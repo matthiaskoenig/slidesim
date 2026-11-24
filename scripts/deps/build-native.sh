@@ -3,10 +3,12 @@
 # Usage: build-native.sh <debug|opt>
 set -euo pipefail
 
+# Reproducible floating point: no FMA contraction, no fast-math (same numbers on every target).
+FP="-ffp-contract=off -fno-fast-math"
 MODE="${1:-}"
 case "$MODE" in
-  debug) DEBUGGING=1; FLAGS="-O0 -g" ;;
-  opt) DEBUGGING=0; FLAGS="-O3 -march=native" ;;
+  debug) DEBUGGING=1; FLAGS="-O0 -g $FP" ;;
+  opt) DEBUGGING=0; FLAGS="-O3 -DNDEBUG -march=native $FP" ;;
   *) echo "usage: $0 <debug|opt>" >&2; exit 2 ;;
 esac
 
