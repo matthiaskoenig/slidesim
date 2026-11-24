@@ -53,16 +53,27 @@ make -C "$ROOT/deps/build/libceed-wasi" -j"$JOBS" install prefix="$PREFIX" \
 # the --known-* values are the ones the native configure determines for f2cblaslapack).
 # CFLAGS+= keeps PETSc's default warning and visibility flags, as in the native build.
 # No -fPIC: in wasm it turns every global access into a GOT indirection (petsc-0005).
-# The f2cblaslapack tarball of the native build is reused when present, else it is downloaded.
 prepare petsc
-F2C="$(ls -d "$ROOT"/deps/build/petsc-*/arch-*/externalpackages/f2cblaslapack-* 2>/dev/null | grep -v -- '-wasi/' | head -n1 || true)"
+
+# f2cblaslapack: the tarball the pinned PETSc downloads, fetched once into deps/src and checked
+# against its sha256, so the build depends on nothing but deps/src.
+F2C_URL="https://web.cels.anl.gov/projects/petsc/download/externalpackages/f2cblaslapack-3.8.0.q2.tar.gz"
+F2C_SHA256="12fa8d5001e313aeeea22eb2054883f59e3e3c656f11129f31abb02ddbf8ad60"
+F2C="$ROOT/deps/src/$(basename "$F2C_URL")"
+grep -qF "'$F2C_URL'" "$ROOT/deps/build/petsc-wasi/config/BuildSystem/config/packages/f2cblaslapack.py" ||
+  { echo "PETSc no longer downloads $F2C_URL: update F2C_URL and F2C_SHA256" >&2; exit 1; }
+if [[ ! -f "$F2C" ]]; then
+  curl -fsSL -o "$F2C.part" "$F2C_URL"
+  mv "$F2C.part" "$F2C"
+fi
+echo "$F2C_SHA256  $F2C" | sha256sum --check --quiet
 (
   cd "$ROOT/deps/build/petsc-wasi"
   ./configure PETSC_ARCH=arch-wasi --prefix="$PREFIX" \
     --with-cc="$CC" --with-cxx=0 --with-fc=0 --with-mpi=0 \
     --with-ar="$AR" --with-ranlib="$RANLIB" \
     CFLAGS+="$TARGET" CPPFLAGS="$EMU_DEFS" COPTFLAGS="$FLAGS" LIBS="$EMU_LIBS" \
-    --download-f2cblaslapack${F2C:+="$F2C"} \
+    --download-f2cblaslapack="$F2C" \
     --with-shared-libraries=0 --with-x=0 --with-ssl=0 --with-pthread=0 \
     --with-debugging=0 --with-avx512-kernels=0 --with-batch \
     --known-sdot-returns-double=0 --known-snrm2-returns-double=0

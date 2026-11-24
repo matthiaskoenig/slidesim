@@ -47,7 +47,7 @@ The final command is in `build-wasi.sh`:
   CPPFLAGS="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID" \
   COPTFLAGS="-O3 -DNDEBUG -ffp-contract=off -fno-fast-math -msimd128" \
   LIBS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid" \
-  --download-f2cblaslapack[=<f2cblaslapack dir unpacked by the native build>] \
+  --download-f2cblaslapack=deps/src/f2cblaslapack-3.8.0.q2.tar.gz \
   --with-shared-libraries=0 --with-x=0 --with-ssl=0 --with-pthread=0 \
   --with-debugging=0 --with-avx512-kernels=0 --with-batch \
   --known-sdot-returns-double=0 --known-snrm2-returns-double=0
@@ -66,8 +66,11 @@ The final command is in `build-wasi.sh`:
   `petscconf.h` honest.
 - `--with-cc` takes the bare compiler; target and sysroot go in `CFLAGS` so configure does not
   see a compiler with arguments.
-- f2cblaslapack: the tarball directory unpacked by the native build is reused when present, else
-  configure downloads it.
+- f2cblaslapack: `build-wasi.sh` fetches the tarball the pinned PETSc downloads
+  (`f2cblaslapack-3.8.0.q2.tar.gz`, URL as in PETSc's `config/BuildSystem/config/packages/f2cblaslapack.py`)
+  once into `deps/src`, checks its sha256 (pinned in the script) and gives configure that file.
+  The script fails if PETSc's package file no longer names that URL (a PETSc bump then has to
+  update URL and hash). The build depends on nothing outside `deps/src`.
 
 ## Patches
 
@@ -81,6 +84,25 @@ The final command is in `build-wasi.sh`:
 libCEED is then built with `make install STATIC=1 CPU_GEN=0 MARCHFLAG= OPT="<flags>"`
 (`MARCHFLAG=` drops the host `-march=native` probe, `OPT` replaces the default
 `-ffp-contract=fast`).
+
+### libCEED backend: always the full resource string
+
+The `/cpu/self` prefix resolves to the registered backend of highest priority, which differs per
+build (checked with `CeedInit("/cpu/self")` + `CeedGetResource`):
+
+| Build | `/cpu/self` resolves to |
+| --- | --- |
+| `deps/install/native-debug` (`-O0`, no AVX) | `/cpu/self/opt/blocked` |
+| `deps/install/native-opt` (`-march=native`, AVX) | `/cpu/self/avx/blocked` |
+| `deps/install/wasi` | `/cpu/self/opt/blocked` |
+
+The JiT backends `/cpu/self/gen/*` are chosen by neither native build, so dropping them in wasm
+(libceed-0002) changes nothing; the difference is AVX, which only the native opt build has.
+Different backends may round differently, so **slidesim always passes the full resource string
+`/cpu/self/opt/blocked` to `CeedInit` on CPU and in wasm**, never the `/cpu/self` prefix. That
+backend exists in all three builds (`CeedInit("/cpu/self/opt/blocked")` returns exactly that
+resource in native-debug, native-opt and wasi), so every target runs the same backend. The smoke
+test requests it and fails if the resource returned differs.
 
 ### PETSc
 
@@ -115,7 +137,7 @@ spike/petsc-wasm/smoke/run.sh                                 # wasmtime and Nod
 ```
 
 The smoke test checks `VecNorm`, a 1D Laplacian solve with CG + Jacobi (50 iterations, LAPACK
-singular value estimate, `-memory_view`), `CeedInit("/cpu/self")`, `CeedVectorNorm` and the gallery
+singular value estimate, `-memory_view`), `CeedInit("/cpu/self/opt/blocked")`, `CeedVectorNorm` and the gallery
 mass operator (`Mass1DBuild` + `MassApply`) on [0, 1]. Both runtimes print identical numbers.
 Additionally, linking a trivial `main` with `--whole-archive` of `libpetsc.a` and of `libceed.a`
 (and `--no-gc-sections`) leaves no undefined symbol, so every object of both archives links in

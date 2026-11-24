@@ -1,9 +1,10 @@
-// Smoke test of the wasm32-wasip1 static libraries: PETSc (Vec, Mat, KSP) and libCEED (/cpu/self).
+// Smoke test of the wasm32-wasip1 static libraries: PETSc (Vec, Mat, KSP) and libCEED.
 // Exits nonzero if any check fails.
 #include <ceed.h>
 #include <math.h>
 #include <petscksp.h>
 #include <stdio.h>
+#include <string.h>
 
 static int failures = 0;
 
@@ -61,6 +62,10 @@ static PetscErrorCode petsc_smoke(void)
   PetscFunctionReturn(PETSC_SUCCESS);
 }
 
+// libCEED backend, always the full resource string: the /cpu/self prefix resolves to different
+// backends natively (avx/blocked with -march=native) and in wasm (opt/blocked), see PATCHES.md.
+#define CEED_RESOURCE "/cpu/self/opt/blocked"
+
 // libCEED: CeedVectorNorm and the gallery mass operator on [0, 1] with linear elements:
 // sum(M * ones) is the length of the domain.
 static int ceed_smoke(void)
@@ -77,9 +82,13 @@ static int ceed_smoke(void)
   CeedInt             offsets[nelem * P];
   const CeedScalar   *vv;
 
-  if (CeedInit("/cpu/self", &ceed)) return 1;
+  if (CeedInit(CEED_RESOURCE, &ceed)) return 1;
   CeedGetResource(ceed, &resource);
   printf("ceed resource                        %s\n", resource);
+  if (strcmp(resource, CEED_RESOURCE)) {
+    printf("ceed resource is not %s FAIL\n", CEED_RESOURCE);
+    failures++;
+  }
 
   CeedVectorCreate(ceed, 100, &v);
   CeedVectorSetValue(v, 2.0);
