@@ -1,0 +1,37 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev pkg-config python3
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Cache native dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/install
+          key: deps-${{ runner.os }}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}
+      - name: Build native dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: scripts/deps/build-native.sh debug
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo nextest run --workspace --no-tests=pass

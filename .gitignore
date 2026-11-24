@@ -1,1 +1,5 @@
 .superpowers/
+target/
+deps/build/
+deps/install/
+deps/src/
