@@ -1,0 +1,22 @@
+# Spike (throwaway): 2D diffusion on PETSc + libCEED from Rust, natively and in wasm32-wasip1.
+# Not a member of the root workspace (it excludes spike/); built by run.sh.
+[workspace]
+
+[package]
+name = "diffusion-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "diffusion"
+path = "src/main.rs"
+
+[dependencies]
+libm = "0.2"
+
+[build-dependencies]
+bindgen = "0.73.2"
+
+[profile.release]
+debug = false

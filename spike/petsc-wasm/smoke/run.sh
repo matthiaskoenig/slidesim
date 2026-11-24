@@ -20,4 +20,4 @@ OPTS="-ksp_type cg -pc_type jacobi -ksp_converged_reason -ksp_view_singularvalue
 echo "== wasmtime"
 wasmtime run "$OUT/smoke.wasm" $OPTS
 echo "== node"
-node --no-warnings "$(dirname "${BASH_SOURCE[0]}")/run-node.mjs" "$OUT/smoke.wasm" $OPTS
+node --no-warnings "$(dirname "${BASH_SOURCE[0]}")/../run-node.mjs" "$OUT/smoke.wasm" $OPTS
