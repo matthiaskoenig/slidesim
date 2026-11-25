@@ -1,0 +1,16 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {"length": "um"},
+  "mesh": {"format": "gmsh", "path": "mesh.msh"},
+  "maps": [
+    {
+      "id": "zonation",
+      "path": "maps/zonation.tif",
+      "units": "1",
+      "um_per_px": 1.5,
+      "origin_um": [0.0, 0.0],
+      "no_value": -1.0
+    }
+  ]
+}

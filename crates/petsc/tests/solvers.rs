@@ -97,6 +97,16 @@ fn ksp_solves_to_its_tolerances() {
 }
 
 #[test]
+fn operator_sizes_once_set() {
+    let p = Petsc::init(&[]).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    assert_eq!(ksp.operator_sizes().unwrap(), None);
+    let a = laplacian(&p.comm(), 7, 1.0);
+    ksp.set_operators(&a, &a).unwrap();
+    assert_eq!(ksp.operator_sizes().unwrap(), Some((7, 7)));
+}
+
+#[test]
 fn pc_type_and_options_prefix() {
     let p = Petsc::init(&[]).unwrap();
     let mut ksp = Ksp::create(&p.comm()).unwrap();

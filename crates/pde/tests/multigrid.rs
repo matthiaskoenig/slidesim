@@ -16,13 +16,14 @@ use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    BoundarySpec, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene,
-    TimeSpec, Units,
+    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
+    SCENE_VERSION, Scene, TimeSpec, Units,
 };
+use maps::Maps;
 use mesh::Mesh;
 use pde::{
-    DiffusionReaction, Discretization, Multigrid, PdeError, Problem, SharedOperator, SourceField,
-    configure_multigrid,
+    Discretization, Inputs, Multigrid, PdeError, PointData, Problem, SharedOperator, SourceField,
+    Terms, Transport, configure_multigrid,
 };
 use petsc::{Ksp, Matrix, Petsc, Vector};
 
@@ -51,6 +52,7 @@ fn tissue_small(p: &Petsc, refinements: u32) -> Mesh {
             format: MeshFormat::Gmsh,
             path: fixture("tissue_small.msh"),
         },
+        maps: Vec::new(),
     };
     Mesh::load(p, &scene, refinements).unwrap()
 }
@@ -100,7 +102,7 @@ impl Steady {
         ksp.set_operators(&a, &a).unwrap();
         ksp.set_type("cg").unwrap();
         ksp.set_tolerances(Some(1e-10), None, Some(1000)).unwrap();
-        let multigrid = configure_multigrid(&mut ksp, &mesh, &levels).unwrap();
+        let multigrid = configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
         Steady {
             ksp,
             multigrid,
@@ -120,12 +122,16 @@ impl Steady {
     }
 }
 
-/// The operators `shift M + D K + K M` on `discs`.
+/// The operators `shift M + D K + K M` on `discs`: the Jacobians of [`Transport`] with mass 1,
+/// reaction `K` and diffusion `D` at every point.
 fn operators(discs: &[Discretization], shift: f64) -> Vec<SharedOperator> {
     discs
         .iter()
         .map(|disc| {
-            let op = DiffusionReaction::new(disc, D, K, shift).unwrap();
+            let n = disc.num_quadrature_points();
+            let data = PointData::isotropic(disc, &vec![1.0; n], &vec![K; n], &vec![D; n]);
+            let mut op = Transport::new(disc, Rc::new(data), Terms::Jacobian).unwrap();
+            op.shift = shift;
             SharedOperator(Rc::new(RefCell::new(op)))
         })
         .collect()
@@ -183,8 +189,8 @@ fn refreshed_preconditioner_matches_a_new_one() {
     let p = Petsc::init(&["-mg_coarse_pc_gamg_reuse_interpolation", "false"]).unwrap();
     let mut steady = Steady::new(&p, 2, 0.0);
     steady.solve();
-    // The coefficients change on every level; the operator of the solver is marked changed.
-    steady.multigrid.set_coefficients(D, K, SHIFT).unwrap();
+    // The shift changes on every level; the operator of the solver is marked changed.
+    steady.multigrid.set_shift(SHIFT).unwrap();
     steady.a.mark_changed().unwrap();
     let mut fresh = Steady::new(&p, 2, SHIFT);
     let (refreshed_u, refreshed_iterations) = steady.solve();
@@ -224,17 +230,82 @@ fn levels_must_be_a_hierarchy() {
     let mesh = tissue_small(&p, 1);
     let ceed = ceed();
     let mut ksp = Ksp::create(&p.comm()).unwrap();
-    // One operator for two levels.
+    // One operator for two levels, on level 1: the first is not on level 0.
     let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
-    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs[1..], 0.0)).unwrap_err();
+    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs[1..], 0.0), true).unwrap_err();
     assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
+    assert!(
+        e.to_string()
+            .contains("the first of 1 operators is not on level 0 of the mesh"),
+        "{e}"
+    );
     // Discretizations of each level, not linked.
     let discs: Vec<Discretization> = (0..2)
         .map(|level| Discretization::with_essential(&mesh, level, &ceed, 1, &BOUNDARY).unwrap())
         .collect();
-    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs, 0.0)).unwrap_err();
+    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs, 0.0), true).unwrap_err();
     assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
     assert!(e.to_string().contains("level 0"), "{e}");
+}
+
+#[test]
+fn last_level_must_be_the_operator_of_the_solver() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = tissue_small(&p, 1);
+    let ceed = ceed();
+    let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
+    let levels = operators(&discs, 0.0);
+    let fine = discs[1].shell_matrix(levels[1].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    // The operators of level 0 only, for a solver on level 1.
+    let e = configure_multigrid(&mut ksp, &mesh, &levels[..1], true).unwrap_err();
+    assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
+    assert!(
+        e.to_string().contains("the last of 1 operators (level 0"),
+        "{e}"
+    );
+    // All levels: the sizes agree.
+    configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
+    // The operators of level 0 for a solver on level 0.
+    let coarse = discs[0].shell_matrix(levels[0].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&coarse, &coarse).unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels[..1], true).unwrap();
+}
+
+/// A nonsymmetric hierarchy (advection) estimates the intervals of its smoothers with GMRES and
+/// leaves the operators unmarked.
+#[test]
+fn nonsymmetric_levels_estimate_with_gmres() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = tissue_small(&p, 1);
+    let ceed = ceed();
+    let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
+    let levels = operators(&discs, 1.0);
+    let fine = discs[1].shell_matrix(levels[1].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    ksp.set_type("gmres").unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels, false).unwrap();
+    let smoother = ksp.pc().unwrap().mg_smoother(1).unwrap();
+    let estimator = smoother.chebyshev_est_eig_ksp().unwrap().unwrap();
+    assert_eq!(estimator.type_name().unwrap(), "gmres");
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
+    let smoother = ksp.pc().unwrap().mg_smoother(1).unwrap();
+    let estimator = smoother.chebyshev_est_eig_ksp().unwrap().unwrap();
+    assert_eq!(estimator.type_name().unwrap(), "cg");
+}
+
+/// The inputs of a [`Problem`] of constant coefficients: no maps.
+fn no_maps() -> Inputs<'static> {
+    static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
+    Inputs {
+        maps: &NONE,
+        flow: None,
+    }
 }
 
 /// A field on `tissue_small` as in a study of oxygen: `d = D`, `k = K`, a fixed value on the
@@ -242,9 +313,11 @@ fn levels_must_be_a_hierarchy() {
 fn tissue_field() -> FieldSpec {
     FieldSpec {
         id: "u".to_string(),
-        diffusion: D,
-        decay: K,
-        source: 0.0,
+        diffusion: Coefficient::Constant(D),
+        decay: Coefficient::Constant(K),
+        source: Coefficient::Constant(0.0),
+        porosity: Coefficient::Constant(1.0),
+        advection: false,
         initial: 0.0,
         boundaries: vec![BoundarySpec {
             tag: "vessel_wall".to_string(),
@@ -264,7 +337,8 @@ fn run(
 ) -> (Discretization, Vec<Vector>, usize) {
     let mesh = tissue_small(p, 1);
     let options = format!("-ksp_rtol 1e-12 {options}");
-    let mut problem = Problem::new(&mesh, &tissue_field(), time, &ceed(), &options).unwrap();
+    let mut problem =
+        Problem::new(&mesh, &tissue_field(), time, &ceed(), &options, &no_maps()).unwrap();
     let solutions = times
         .iter()
         .map(|&t| {
@@ -333,7 +407,7 @@ fn tissue_results(p: &Petsc) -> [f64; 2] {
         adaptive: false,
         outputs: Vec::new(),
     };
-    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "").unwrap();
+    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "", &no_maps()).unwrap();
     problem.step_to(2.0).unwrap();
     assert_eq!(problem.steps().unwrap(), 4);
     [

@@ -88,6 +88,8 @@ pub struct Mesh {
     levels: Vec<Dm>,
     /// Sorted by name.
     tags: Vec<Tag>,
+    /// See [`Mesh::local_bounds`].
+    bounds: Option<[[f64; 2]; 2]>,
 }
 
 impl Mesh {
@@ -131,7 +133,12 @@ impl Mesh {
             finer.set_up_local_coordinates()?;
             levels.push(finer);
         }
-        Ok(Mesh { levels, tags })
+        let bounds = local_bounds(&levels)?;
+        Ok(Mesh {
+            levels,
+            tags,
+            bounds,
+        })
     }
 
     /// The levels, coarse first: the distributed mesh as read, then each refinement of the one
@@ -143,6 +150,14 @@ impl Mesh {
     /// The finest level.
     pub fn finest(&self) -> &Dm {
         self.levels.last().expect("levels is never empty")
+    }
+
+    /// The bounding box `[[xmin, ymin], [xmax, ymax]]` of the coordinates of this process's cells
+    /// on all levels (their vertices, ghosts included; the first two coordinates), or `None` if
+    /// this process has no cells. Every point of a local cell is inside it, so it is the region
+    /// of a raster this process needs (see `maps::Maps::read`).
+    pub fn local_bounds(&self) -> Option<[[f64; 2]; 2]> {
+        self.bounds
     }
 
     /// The tags, sorted by name.
@@ -161,6 +176,27 @@ impl Mesh {
                 available: self.tags.iter().map(|t| t.name.clone()).collect(),
             })
     }
+}
+
+/// The bounding box of the coordinates of the local cells of `levels` (see
+/// [`Mesh::local_bounds`]), `None` without local cells. The levels have their local coordinates
+/// set up, so this is not collective.
+fn local_bounds(levels: &[Dm]) -> petsc::Result<Option<[[f64; 2]; 2]>> {
+    let mut bounds: Option<[[f64; 2]; 2]> = None;
+    for level in levels {
+        if level.height_stratum(0)?.is_empty() {
+            continue;
+        }
+        let dim = level.coordinate_dimension()?;
+        for x in level.local_coordinates()?.chunks_exact(dim) {
+            let [lo, hi] = bounds.get_or_insert([[x[0], x[1]], [x[0], x[1]]]);
+            for axis in 0..2 {
+                lo[axis] = lo[axis].min(x[axis]);
+                hi[axis] = hi[axis].max(x[axis]);
+            }
+        }
+    }
+    Ok(bounds)
 }
 
 /// The mesh file `path` read on `comm`, with labels named after the gmsh physical names.

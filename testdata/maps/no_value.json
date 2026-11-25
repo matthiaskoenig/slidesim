@@ -1,0 +1,11 @@
+{
+  "id": "no_value",
+  "path": "no_value.zarr",
+  "units": "1",
+  "um_per_px": 2.0,
+  "origin_um": [
+    10.0,
+    20.0
+  ],
+  "no_value": -1.0
+}

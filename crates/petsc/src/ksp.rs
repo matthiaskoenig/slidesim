@@ -130,6 +130,26 @@ impl Ksp {
         Ok(())
     }
 
+    /// The sizes of the operator of the solver, if one is set (`KSPGetOperatorsSet`): its rows
+    /// on this process and in all (`MatGetLocalSize`, `MatGetSize`); `None` before
+    /// [`Ksp::set_operators`] (a `SNES` sets them when it solves).
+    pub fn operator_sizes(&self) -> Result<Option<(usize, usize)>> {
+        let (mut set, mut pmat_set) = (false, false);
+        // SAFETY: a valid KSP; PETSc writes two flags.
+        chk!(unsafe { sys::KSPGetOperatorsSet(self.raw, &mut set, &mut pmat_set) });
+        if !set {
+            return Ok(None);
+        }
+        let mut a = null_mut();
+        // SAFETY: the operator is borrowed from the KSP; it is set, so none is created.
+        chk!(unsafe { sys::KSPGetOperators(self.raw, &mut a, null_mut()) });
+        let (mut local, mut global, mut columns) = (0, 0, 0);
+        // SAFETY: a valid matrix; PETSc writes two integers each.
+        chk!(unsafe { sys::MatGetLocalSize(a, &mut local, &mut columns) });
+        chk!(unsafe { sys::MatGetSize(a, &mut global, &mut columns) });
+        Ok(Some((local as usize, global as usize)))
+    }
+
     /// Gives the solver (and its preconditioner) the DM `dm` (`KSPSetDM`). If not `active`, the
     /// DM only describes the problem (for example a level of multigrid), and does not compute
     /// the operators, right-hand side or initial guess (`KSPSetDMActive` false). The solver

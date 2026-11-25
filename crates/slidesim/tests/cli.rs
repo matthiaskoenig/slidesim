@@ -1,7 +1,8 @@
 //! End to end tests of `slidesim run`: the binary as a user runs it, on one process and under
 //! `mpiexec`, on `testdata/studies/tissue_oxygen` (oxygen from the vessel walls of
-//! `tissue_small.msh`). The binary runs without `LD_LIBRARY_PATH`: it finds PETSc and libCEED by
-//! its rpath.
+//! `tissue_small.msh`) and `testdata/studies/lobule_toy` (a tracer carried by the Darcy flow
+//! between two holes, with a map). The binary runs without `LD_LIBRARY_PATH`: it finds PETSc and
+//! libCEED by its rpath.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -100,6 +101,58 @@ fn summary(out: &Path, field: &str) -> [Vec<f64>; 3] {
     })
 }
 
+/// A copy of the tissue_oxygen study in `dir` with `refinements` mesh refinements and the other
+/// settings of the original (the full study is too slow for the debug build of PETSc).
+fn coarse_study(dir: &Path, refinements: u32) -> PathBuf {
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(study().with_file_name("scene.json").display().to_string());
+    doc["mesh"]["refinements"] = Value::from(refinements);
+    let path = dir.join("coarse_study.json");
+    std::fs::write(&path, doc.to_string()).unwrap();
+    path
+}
+
+fn lobule_study() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/lobule_toy/study.json")
+}
+
+/// The centre of the central hole of `lobule_toy.msh`, um.
+const CENTRAL: [f64; 2] = [310.0, 310.0];
+
+/// The data array `name` of the `.vtu` file `path` (raw appended data, 64 bit headers): the
+/// values, `components` per point.
+fn vtu_array(path: &Path, name: &str, components: usize) -> Vec<f64> {
+    let bytes = std::fs::read(path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let tag = text
+        .find(&format!("Name=\"{name}\""))
+        .unwrap_or_else(|| panic!("no array {name} in {}", path.display()));
+    let rest = &text[tag..];
+    let offset: usize = rest[rest.find("offset=\"").unwrap() + 8..]
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = text.find("<AppendedData").unwrap();
+    // The data starts after the underscore which follows the tag.
+    let data = marker + text[marker..].find('_').unwrap() + 1 + offset;
+    let len = u64::from_le_bytes(bytes[data..data + 8].try_into().unwrap()) as usize;
+    let values: Vec<f64> = bytes[data + 8..data + 8 + len]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|b| f64::from_le_bytes(*b))
+        .collect();
+    assert_eq!(values.len() % components, 0);
+    values
+}
+
+/// `<out>/summary.json` as JSON.
+fn summary_json(out: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(out.join("summary.json")).unwrap()).unwrap()
+}
+
 /// The names of the point data arrays of the `.vtu` file `path`.
 fn point_data(path: &Path) -> Vec<String> {
     let bytes = std::fs::read(path).unwrap();
@@ -116,6 +169,90 @@ fn point_data(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The mass balances of the field `field` of `<out>/summary.json`, one per output time: `None`
+/// before the first step, else the terms by name (`storage_rate`, `source`, `advection_defect`,
+/// `<tag>.advective`, `<tag>.diffusive`), in the order of the file.
+fn balances(out: &Path, field: &str) -> Vec<Option<Vec<(String, f64)>>> {
+    let summary = summary_json(out);
+    let balances = summary["fields"][field]["mass_balance"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no mass_balance in {summary}"))
+        .clone();
+    balances
+        .iter()
+        .map(|balance| {
+            if balance.is_null() {
+                return None;
+            }
+            let number = |v: &Value| v.as_f64().unwrap_or_else(|| panic!("{balance}"));
+            let mut terms: Vec<(String, f64)> = ["storage_rate", "source", "advection_defect"]
+                .iter()
+                .map(|key| (key.to_string(), number(&balance[key])))
+                .collect();
+            for (tag, inflow) in balance["boundary"].as_object().unwrap() {
+                for part in ["advective", "diffusive"] {
+                    terms.push((format!("{tag}.{part}"), number(&inflow[part])));
+                }
+            }
+            Some(terms)
+        })
+        .collect()
+}
+
+/// The term `name` of the balance `terms` (see [`balances`]).
+fn term(terms: &[(String, f64)], name: &str) -> f64 {
+    terms
+        .iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("no {name} in {terms:?}"))
+        .1
+}
+
+/// The largest absolute term of the balance `terms`.
+fn scale(terms: &[(String, f64)]) -> f64 {
+    terms.iter().fold(0.0, |m, (_, x)| m.max(x.abs()))
+}
+
+/// Asserts that the balance `terms` closes, `storage_rate = source + inflows -
+/// advection_defect`, within 1e-8 of its largest term.
+fn assert_closes(terms: &[(String, f64)]) {
+    let inflows: f64 = terms
+        .iter()
+        .filter(|(name, _)| name.ends_with(".advective") || name.ends_with(".diffusive"))
+        .map(|(_, x)| x)
+        .sum();
+    let residual = term(terms, "storage_rate") - term(terms, "source") - inflows
+        + term(terms, "advection_defect");
+    assert!(
+        residual.abs() <= 1e-8 * scale(terms),
+        "residual {residual:e}: {terms:?}"
+    );
+}
+
+/// The largest difference of the balances `a` and `b` (of the same output times), term by term,
+/// relative to the largest term of the balance: terms which are rounding (zero flow, no source)
+/// have no relative difference of their own.
+fn max_balance_difference(
+    a: &[Option<Vec<(String, f64)>>],
+    b: &[Option<Vec<(String, f64)>>],
+) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let mut largest = 0.0_f64;
+    for (a, b) in a.iter().zip(b) {
+        let (Some(a), Some(b)) = (a, b) else {
+            assert!(a.is_none() && b.is_none(), "{a:?}\n{b:?}");
+            continue;
+        };
+        let names = |t: &[(String, f64)]| t.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        assert_eq!(names(a), names(b));
+        let scale = scale(a).max(scale(b));
+        for ((_, x), (_, y)) in a.iter().zip(b) {
+            largest = largest.max((x - y).abs() / scale);
+        }
+    }
+    largest
+}
+
 /// The largest relative difference of `a` and `b`, entry by entry.
 fn max_relative_difference(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len());
@@ -126,13 +263,128 @@ fn max_relative_difference(a: &[f64], b: &[f64]) -> f64 {
 }
 
 #[test]
+fn lobule_toy_flows_from_portal_to_central() {
+    let out = scratch("lobule_toy_flows_from_portal_to_central");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    let flows = &summary_json(&out)["perfusion"]["tag_flows"];
+    let portal = flows["portal_wall"].as_f64().unwrap();
+    let central = flows["central_wall"].as_f64().unwrap();
+    assert!(portal > 0.0, "{flows}");
+    assert!(central < 0.0, "{flows}");
+    assert!((portal + central).abs() < 1e-8 * portal, "{flows}");
+    assert_eq!(point_data(&out.join("pressure.vtu")), ["pressure.Pa"]);
+    assert_eq!(point_data(&out.join("velocity.vtu")), ["velocity"]);
+    // The mass balance of the tracer at each output time (none before the first step).
+    let balances = balances(&out, "sucrose");
+    assert_eq!(balances.len(), 3, "{balances:?}");
+    assert!(balances[0].is_none(), "{balances:?}");
+    for terms in balances[1..].iter().map(|b| b.as_ref().unwrap()) {
+        assert_closes(terms);
+        // Observed: advection defects of -411 and -229 against an inflow of 2105 um^2/s at 1 mM
+        // (about 20 % and 11 %): the non-conservation of the P1 velocity, small against the
+        // flux (bound: a quarter).
+        let defect = term(terms, "advection_defect");
+        assert!(defect.abs() < 0.25 * portal, "{defect} against {portal}");
+        // The tracer enters at the portal wall (1 mM), carried and by diffusion, and leaves by
+        // the flow through the central wall and the section edge (free outflow, no diffusive
+        // flux there).
+        assert!(term(terms, "portal_wall.advective") > 0.0, "{terms:?}");
+        assert!(term(terms, "portal_wall.diffusive") > 0.0, "{terms:?}");
+        for tag in ["central_wall", "section_edge"] {
+            assert!(term(terms, &format!("{tag}.advective")) <= 0.0, "{terms:?}");
+            assert_eq!(term(terms, &format!("{tag}.diffusive")), 0.0, "{terms:?}");
+        }
+        // The advective inflow at the portal wall is about the flow times 1 mM, short by the
+        // error of the primal normal velocity at the wall.
+        let advective = term(terms, "portal_wall.advective");
+        assert!(
+            advective > 0.5 * portal && advective < 1.05 * portal,
+            "{advective} against {portal}"
+        );
+    }
+}
+
+/// The mean of the tracer in the output `path` over the nodes within `radius` um of `centre`.
+fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
+    let points = vtu_array(path, "Position", 3);
+    let sucrose = vtu_array(path, "sucrose.mM", 1);
+    assert_eq!(points.len(), 3 * sucrose.len());
+    let near: Vec<f64> = points
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(&sucrose)
+        .filter(|(x, _)| ((x[0] - centre[0]).powi(2) + (x[1] - centre[1]).powi(2)).sqrt() < radius)
+        .map(|(_, &c)| c)
+        .collect();
+    assert!(near.len() > 10, "{}", near.len());
+    near.iter().sum::<f64>() / near.len() as f64
+}
+
+#[test]
+fn lobule_toy_tracer_reaches_central() {
+    let out = scratch("lobule_toy_tracer_reaches_central");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    // Nodes within 10 um of the wall of a hole (radius 20 um). The portal hole is at (90, 90).
+    let portal = [90.0, 90.0];
+    let end = mean_near(&out.join("sucrose_2.vtu"), CENTRAL, 30.0);
+    assert!(end > 0.1, "{end}");
+    // The front is still on its way at t = 5: more tracer at the portal than at the central hole.
+    let middle = out.join("sucrose_1.vtu");
+    let (at_portal, at_central) = (
+        mean_near(&middle, portal, 30.0),
+        mean_near(&middle, CENTRAL, 30.0),
+    );
+    assert!(at_portal > 0.9, "{at_portal}");
+    assert!(
+        at_central < 0.5 * at_portal,
+        "{at_central} against {at_portal}"
+    );
+}
+
+#[test]
+fn unknown_map_fails_before_solving() {
+    let dir = scratch("unknown_map_fails_before_solving");
+    let mut doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(lobule_study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(
+        lobule_study()
+            .with_file_name("scene.json")
+            .display()
+            .to_string(),
+    );
+    doc["perfusion"]["direction"]["map"] = Value::from("zonation2");
+    let bad = dir.join("study.json");
+    std::fs::write(&bad, doc.to_string()).unwrap();
+    let out = dir.join("out");
+
+    let run = slidesim(&args(&bad, &out, &[]));
+    assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains("zonation2"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("the scene defines: [zonation]"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    let vtus = std::fs::read_dir(&out)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "vtu"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(vtus, 0);
+}
+
+#[test]
 fn runs_tissue_oxygen() {
     // Existing files in the output directory are overwritten.
     let out = scratch("runs_tissue_oxygen");
     std::fs::write(out.join("oxygen_0.vtu"), "stale").unwrap();
     std::fs::write(out.join("summary.json"), "stale").unwrap();
     // PETSc options after `--`, per field with the prefix `<field id>_`.
-    let run = slidesim(&args(&study(), &out, &["-oxygen_ts_monitor"]));
+    let run = slidesim(&args(&coarse_study(&out, 1), &out, &["-oxygen_ts_monitor"]));
     assert_success(&run);
     assert!(
         run.stdout.contains("120 TS (oxygen_) dt 0.5 time 60."),
@@ -155,6 +407,22 @@ fn runs_tissue_oxygen() {
     assert!(total_mass.windows(2).all(|w| w[1] > w[0]), "{total_mass:?}");
     let change = (total_mass[3] - total_mass[2]).abs() / total_mass[3];
     assert!(change < 0.01, "{change}: {total_mass:?}");
+    // The mass balance of each step without flow: no advective terms, the oxygen enters by
+    // diffusion through the vessel walls (dirichlet) and nothing crosses the section edge
+    // (no condition: no flux).
+    let balances = balances(&out, "oxygen");
+    assert_eq!(balances.len(), OUTPUTS.len());
+    assert!(balances[0].is_none());
+    for terms in balances[1..].iter().map(|b| b.as_ref().unwrap()) {
+        assert_closes(terms);
+        for (name, x) in terms {
+            if name == "advection_defect" || name.ends_with(".advective") {
+                assert_eq!(*x, 0.0, "{name}: {terms:?}");
+            }
+        }
+        assert!(term(terms, "vessel_wall.diffusive") > 0.0, "{terms:?}");
+        assert_eq!(term(terms, "section_edge.diffusive"), 0.0, "{terms:?}");
+    }
 }
 
 #[test]
@@ -325,10 +593,11 @@ fn usage_error_exits_1() {
 fn two_ranks_match_one() {
     let dir = scratch("two_ranks_match_one");
     // A missing output directory is created, with its parents.
+    let study = coarse_study(&dir, 1);
     let serial = dir.join("serial/out");
-    assert_success(&slidesim(&args(&study(), &serial, &[])));
+    assert_success(&slidesim(&args(&study, &serial, &[])));
     let parallel = dir.join("parallel/out");
-    let Some(run) = slidesim_parallel(2, &args(&study(), &parallel, &[])) else {
+    let Some(run) = slidesim_parallel(2, &args(&study, &parallel, &[])) else {
         return;
     };
     assert_success(&run);
@@ -342,9 +611,52 @@ fn two_ranks_match_one() {
     assert_eq!(times_1, times_2);
     let l2_norm = max_relative_difference(&l2_norm_1, &l2_norm_2);
     let total_mass = max_relative_difference(&total_mass_1, &total_mass_2);
+    let balance =
+        max_balance_difference(&balances(&serial, "oxygen"), &balances(&parallel, "oxygen"));
     eprintln!(
-        "relative differences, 2 processes against 1: l2_norm {l2_norm:e}, total_mass {total_mass:e}"
+        "relative differences, 2 processes against 1: l2_norm {l2_norm:e}, \
+         total_mass {total_mass:e}, mass_balance {balance:e}"
     );
     assert!(l2_norm < 1e-10, "{l2_norm_1:?}\n{l2_norm_2:?}");
     assert!(total_mass < 1e-10, "{total_mass_1:?}\n{total_mass_2:?}");
+    assert!(balance < 1e-10, "{balance:e}");
+}
+
+#[test]
+fn two_ranks_match_one_with_perfusion() {
+    let dir = scratch("two_ranks_match_one_with_perfusion");
+    let serial = dir.join("serial");
+    assert_success(&slidesim(&args(&lobule_study(), &serial, &[])));
+    let parallel = dir.join("parallel");
+    let Some(run) = slidesim_parallel(2, &args(&lobule_study(), &parallel, &[])) else {
+        return;
+    };
+    assert_success(&run);
+    for name in ["pressure.vtu", "velocity.vtu", "sucrose_2.vtu"] {
+        assert!(parallel.join(name).exists(), "{name}");
+    }
+    let [times_1, l2_norm_1, total_mass_1] = summary(&serial, "sucrose");
+    let [times_2, l2_norm_2, total_mass_2] = summary(&parallel, "sucrose");
+    assert_eq!(times_1, times_2);
+    let l2_norm = max_relative_difference(&l2_norm_1[1..], &l2_norm_2[1..]);
+    let total_mass = max_relative_difference(&total_mass_1[1..], &total_mass_2[1..]);
+    let flows = |out: &Path| {
+        let flows = summary_json(out)["perfusion"]["tag_flows"].clone();
+        ["portal_wall", "central_wall"].map(|tag| flows[tag].as_f64().unwrap())
+    };
+    let flow = max_relative_difference(&flows(&serial), &flows(&parallel));
+    // The mass balance, advection_defect included: each term against the largest of its
+    // balance.
+    let balance = max_balance_difference(
+        &balances(&serial, "sucrose"),
+        &balances(&parallel, "sucrose"),
+    );
+    eprintln!(
+        "relative differences, 2 processes against 1: l2_norm {l2_norm:e}, \
+         total_mass {total_mass:e}, flow {flow:e}, mass_balance {balance:e}"
+    );
+    assert!(l2_norm < 1e-10, "{l2_norm_1:?}\n{l2_norm_2:?}");
+    assert!(total_mass < 1e-10, "{total_mass_1:?}\n{total_mass_2:?}");
+    assert!(flow < 1e-10, "{flow}");
+    assert!(balance < 1e-10, "{balance:e}");
 }

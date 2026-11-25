@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use contracts::{Condition, Scene, Study};
+use contracts::{Coefficient, Condition, Scene, Study, Table, check_maps};
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,7 +201,15 @@ fn schemas_match_load() {
         contracts::schema_scene(),
         "scene-minimal.json"
     ));
+    assert!(schema_accepts(
+        contracts::schema_study(),
+        "study-perfusion.json"
+    ));
+    assert!(schema_accepts(contracts::schema_scene(), "scene-maps.json"));
+    // Strictly increasing table values and unique tags are checked by `load` only.
     for f in [
+        "study-table-negative-diffusion.json",
+        "study-perfusion-no-boundary.json",
         "study-bad-version.json",
         "study-both-conditions.json",
         "study-no-condition.json",
@@ -230,7 +238,7 @@ fn schemas_match_load() {
 }
 
 /// The studies of `testdata/studies` (`<name>/study.json`, run end to end by the `slidesim`
-/// tests) are valid: by the
+/// tests; `m2_real_slide` has a test of its own) are valid: by the
 /// schemas, and by `Study::load` and `Scene::load`, which resolve the scene and the mesh.
 #[test]
 fn example_studies_are_valid() {
@@ -243,6 +251,7 @@ fn example_studies_are_valid() {
     let mut studies: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap() != "m2_real_slide")
         .collect();
     studies.sort();
     assert!(!studies.is_empty());
@@ -258,4 +267,226 @@ fn example_studies_are_valid() {
         let scene = Scene::load(&loaded.scene).unwrap();
         assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
     }
+}
+
+/// The studies of the end-to-end run on a real slide (`testdata/studies/m2_real_slide`,
+/// `<name>.study.json`) are valid by the schema. Their scene is written by
+/// `scripts/e2e/m2_real_slide.sh` from slides outside the repository, so it is not loaded here.
+#[test]
+fn real_slide_studies_are_valid() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/m2_real_slide");
+    let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(schema.is_valid(&doc), "{name}");
+        names.push(name);
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "baseline.study.json",
+            "calibrated.study.json",
+            "radial10.study.json",
+            "whole_blood.study.json"
+        ]
+    );
+}
+
+#[test]
+fn scene_maps_load_and_resolve() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    assert_eq!(scene.maps.len(), 1);
+    let m = &scene.maps[0];
+    assert_eq!(m.id, "zonation");
+    assert!(m.path.is_absolute());
+    assert!(m.path.ends_with("testdata/contracts/maps/zonation.tif"));
+    assert_eq!(m.um_per_px, 1.5);
+    assert_eq!(m.no_value, Some(-1.0));
+}
+
+#[test]
+fn study_perfusion_round_trip() {
+    let study = Study::load(data("study-perfusion.json")).unwrap();
+    assert_eq!(
+        study.fields[0].diffusion,
+        Coefficient::Table(Table {
+            map: "zonation".into(),
+            points: vec![[0.0, 500.0], [1.0, 900.0]]
+        })
+    );
+    assert_eq!(study.fields[0].porosity, Coefficient::Constant(0.15));
+    assert!(study.fields[0].advection);
+    let p = study.perfusion.as_ref().unwrap();
+    assert_eq!(p.viscosity, 0.0024);
+    assert_eq!(p.direction.g0, 0.00043);
+    assert_eq!(p.boundaries.len(), 2);
+    let back: Study = serde_json::from_value(serde_json::to_value(&study).unwrap()).unwrap();
+    assert_eq!(back, study);
+    let reloaded =
+        Study::from_value(serde_json::to_value(&study).unwrap(), &data("x.json")).unwrap();
+    assert_eq!(reloaded.perfusion, study.perfusion);
+}
+
+#[test]
+fn table_eval() {
+    let c = Coefficient::Table(Table {
+        map: "m".into(),
+        points: vec![[0.0, 1.0], [1.0, 3.0]],
+    });
+    assert_eq!(c.eval(-1.0), 1.0);
+    assert_eq!(c.eval(0.5), 2.0);
+    assert_eq!(c.eval(2.0), 3.0);
+    assert_eq!(c.maps(), Some("m"));
+    assert_eq!(Coefficient::Constant(4.0).eval(9.0), 4.0);
+    assert_eq!(Coefficient::Constant(4.0).maps(), None);
+}
+
+#[test]
+fn table_not_increasing() {
+    let e = study_err("study-table-not-increasing.json");
+    assert!(
+        e.contains("diffusion") && e.contains("strictly increasing"),
+        "{e}"
+    );
+}
+
+#[test]
+fn table_negative_diffusion() {
+    let e = study_err("study-table-negative-diffusion.json");
+    assert!(e.contains("diffusion") && e.contains("> 0"), "{e}");
+}
+
+#[test]
+fn perfusion_without_boundary() {
+    let e = study_err("study-perfusion-no-boundary.json");
+    assert!(e.contains("perfusion.boundaries"), "{e}");
+}
+
+#[test]
+fn perfusion_duplicate_tag() {
+    let e = study_err("study-perfusion-duplicate-tag.json");
+    assert!(e.contains("duplicate") && e.contains("portal_wall"), "{e}");
+}
+
+#[test]
+fn unknown_map_lists_available() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    let mut study = Study::load(data("study-perfusion.json")).unwrap();
+    check_maps(&study, &scene).unwrap();
+    study.perfusion.as_mut().unwrap().direction.map = "zonation2".into();
+    let e = check_maps(&study, &scene).unwrap_err().to_string();
+    assert!(e.contains("zonation2") && e.contains("zonation"), "{e}");
+}
+
+#[test]
+fn milestone_1_studies_still_load() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    // The studies of milestone 1: later studies (lobule_toy) use maps and perfusion.
+    let files = [
+        root.join("contracts/study-minimal.json"),
+        root.join("studies/tissue_oxygen/study.json"),
+    ];
+    for f in files {
+        let s = Study::load(&f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        assert!(s.perfusion.is_none());
+        for field in &s.fields {
+            assert!(matches!(field.diffusion, Coefficient::Constant(_)));
+            assert_eq!(field.porosity, Coefficient::Constant(1.0));
+            assert!(!field.advection);
+        }
+    }
+}
+
+/// The JSON of the file `name` of `testdata/contracts`.
+fn json(name: &str) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap()
+}
+
+/// The error of `Study::from_value` for `study-perfusion.json` changed by `change`.
+fn perfusion_study_err(change: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut value = json("study-perfusion.json");
+    change(&mut value);
+    Study::from_value(value, &data("study-perfusion.json"))
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn table_needs_two_points() {
+    let e = perfusion_study_err(|v| {
+        v["fields"][0]["diffusion"]["points"] = serde_json::json!([[0.0, 500.0]]);
+    });
+    assert_eq!(
+        e,
+        "field 'tracer': diffusion: table needs at least 2 points"
+    );
+}
+
+#[test]
+fn decay_table_is_nonnegative() {
+    // A table output of 0 is a valid decay, a negative one is not.
+    let mut value = json("study-perfusion.json");
+    value["fields"][0]["decay"] =
+        serde_json::json!({"map": "zonation", "points": [[0.0, 0.0], [1.0, 0.5]]});
+    Study::from_value(value, &data("study-perfusion.json")).unwrap();
+    let e = perfusion_study_err(|v| {
+        v["fields"][0]["decay"] =
+            serde_json::json!({"map": "zonation", "points": [[0.0, 0.1], [1.0, -0.5]]});
+    });
+    assert_eq!(e, "field 'tracer': decay must be >= 0, got -0.5");
+}
+
+#[test]
+fn advection_needs_perfusion() {
+    let e = perfusion_study_err(|v| {
+        v.as_object_mut().unwrap().remove("perfusion");
+    });
+    assert_eq!(e, "field 'tracer': advection needs a 'perfusion' section");
+    // Without advection the same study is valid.
+    let mut value = json("study-perfusion.json");
+    value.as_object_mut().unwrap().remove("perfusion");
+    value["fields"][0]["advection"] = serde_json::Value::from(false);
+    Study::from_value(value, &data("study-perfusion.json")).unwrap();
+}
+
+#[test]
+fn scene_map_rules() {
+    let err = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = json("scene-maps.json");
+        change(&mut value);
+        Scene::from_value(value, &data("scene-maps.json"))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        err(&|v| v["maps"][0]["id"] = "2zonation".into()),
+        "map id '2zonation' must match ^[A-Za-z][A-Za-z0-9_]*$"
+    );
+    assert_eq!(
+        err(&|v| v["maps"][0]["id"] = "zonation-1".into()),
+        "map id 'zonation-1' must match ^[A-Za-z][A-Za-z0-9_]*$"
+    );
+    assert_eq!(
+        err(&|v| {
+            let map = v["maps"][0].clone();
+            v["maps"].as_array_mut().unwrap().push(map);
+        }),
+        "duplicate map id 'zonation'"
+    );
+    for px in [0.0, -1.5] {
+        assert_eq!(
+            err(&|v| v["maps"][0]["um_per_px"] = px.into()),
+            format!("map 'zonation': um_per_px must be > 0, got {px}")
+        );
+    }
+    // Without no_value the map is valid: NaN pixels are the only ones without data.
+    let mut value = json("scene-maps.json");
+    value["maps"][0].as_object_mut().unwrap().remove("no_value");
+    let scene = Scene::from_value(value, &data("scene-maps.json")).unwrap();
+    assert_eq!(scene.maps[0].no_value, None);
 }

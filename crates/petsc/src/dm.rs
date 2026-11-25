@@ -346,6 +346,46 @@ impl Dm {
         chk!(unsafe { sys::DMGetStratumIS(self.raw, name.as_ptr(), value, &mut is) });
         take_is(is, true)
     }
+
+    /// The local points whose closure holds `point`, one level up (`DMPlexGetSupport`): the
+    /// cells of an edge of a 2D mesh, for example.
+    pub fn support(&self, point: Point) -> Result<Vec<Point>> {
+        let mut n = 0;
+        // SAFETY: `self.raw` is a live DMPlex; PETSc writes the support size into `n` (an error
+        // for a point outside the chart is returned, not undefined).
+        chk!(unsafe { sys::DMPlexGetSupportSize(self.raw, point, &mut n) });
+        let mut support: *const sys::PetscInt = null();
+        // SAFETY: PETSc points `support` into the DM's own support storage, `n` entries long,
+        // valid as long as the DM is not changed; nothing here changes it.
+        chk!(unsafe { sys::DMPlexGetSupport(self.raw, point, &mut support) });
+        if n == 0 || support.is_null() {
+            return Ok(Vec::new());
+        }
+        // SAFETY: `support` is non-null and holds `n > 0` initialized `PetscInt`s (above), and
+        // the slice is copied before `self` can be borrowed mutably again.
+        Ok(unsafe { std::slice::from_raw_parts(support, n as usize) }.to_vec())
+    }
+
+    /// The local faces (edges of a 2D mesh) on the boundary of the domain, sorted: those with
+    /// one cell in all, not those on the boundary between the parts of processes
+    /// (`DMPlexMarkBoundaryFaces` into a label of its own). Collective.
+    pub fn boundary_faces(&self) -> Result<Vec<Point>> {
+        let name = c_string("boundary faces", "label name")?;
+        let mut label = null_mut();
+        // SAFETY: `label` receives a new label, which is destroyed below.
+        chk!(unsafe { sys::DMLabelCreate(sys::petsc_sys_comm_self(), name.as_ptr(), &mut label) });
+        let faces = (|| -> Result<Vec<Point>> {
+            chk!(unsafe { sys::DMPlexMarkBoundaryFaces(self.raw, 1, label) });
+            let mut is = null_mut();
+            // SAFETY: the IS (or null) is ours to destroy.
+            chk!(unsafe { sys::DMLabelGetStratumIS(label, 1, &mut is) });
+            let mut faces = take_is(is, true)?;
+            faces.sort_unstable();
+            Ok(faces)
+        })();
+        chk!(unsafe { sys::DMLabelDestroy(&mut label) });
+        faces
+    }
 }
 
 /// The graph partitioner of a DMPlex (`PetscPartitioner`), borrowed from it ([`Dm::partitioner`]).

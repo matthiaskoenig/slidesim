@@ -9,7 +9,7 @@ use std::rc::Rc;
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError};
-use pde::{DiffusionReaction, Discretization, PdeError, SharedOperator, SourceField};
+use pde::{Discretization, PdeError, PointData, SharedOperator, SourceField, Terms, Transport};
 use petsc::{Petsc, Vector};
 
 fn fixture(file: &str) -> PathBuf {
@@ -29,6 +29,7 @@ fn scene(file: &str, dimension: u8) -> Scene {
             format: MeshFormat::Gmsh,
             path: fixture(file),
         },
+        maps: Vec::new(),
     }
 }
 
@@ -50,8 +51,19 @@ fn constant(disc: &Discretization, value: f64) -> Vector {
     v
 }
 
+/// The operator of milestone 1, `shift M + d K + k M` (`M` the mass matrix, `K` the stiffness
+/// matrix): the Jacobian of [`Transport`] with mass 1, reaction `k` and diffusion `d` at every
+/// point.
+fn diffusion_reaction(disc: &Discretization, d: f64, k: f64, shift: f64) -> Transport {
+    let n = disc.num_quadrature_points();
+    let data = PointData::isotropic(disc, &vec![1.0; n], &vec![k; n], &vec![d; n]);
+    let mut op = Transport::new(disc, Rc::new(data), Terms::Jacobian).unwrap();
+    op.shift = shift;
+    op
+}
+
 /// `y = A x` with the shell matrix of `op`.
-fn apply(disc: &Discretization, op: DiffusionReaction, x: &Vector) -> Vector {
+fn apply(disc: &Discretization, op: Transport, x: &Vector) -> Vector {
     let a = disc.shell_matrix(op).unwrap();
     let mut y = disc.global_vector().unwrap();
     a.mult(x, &mut y).unwrap();
@@ -75,7 +87,7 @@ fn mass_integrates_area() {
     for level in 0..2 {
         let disc = Discretization::new(&mesh, level, &ceed, 1).unwrap();
         let one = constant(&disc, 1.0);
-        let mass = DiffusionReaction::new(&disc, 0.0, 1.0, 0.0).unwrap();
+        let mass = diffusion_reaction(&disc, 0.0, 1.0, 0.0);
         let m1 = apply(&disc, mass, &one);
         let area = one.dot(&m1).unwrap();
         assert!((area - 1.0).abs() < 1e-12, "level {level}: {area}");
@@ -88,7 +100,7 @@ fn shift_and_decay_both_scale_the_mass() {
     let mesh = load(&p, "unit_square.msh", 0);
     let disc = Discretization::new(&mesh, 0, &ceed(), 1).unwrap();
     let one = constant(&disc, 1.0);
-    let op = DiffusionReaction::new(&disc, 0.0, 0.5, 2.0).unwrap();
+    let op = diffusion_reaction(&disc, 0.0, 0.5, 2.0);
     let area = one.dot(&apply(&disc, op, &one)).unwrap();
     assert!((area - 2.5).abs() < 1e-12, "{area}");
 }
@@ -101,7 +113,7 @@ fn diffusion_kills_constants() {
         let mesh = load(&p, file, refinements);
         let disc = Discretization::new(&mesh, refinements as usize, &ceed, 1).unwrap();
         let one = constant(&disc, 1.0);
-        let stiffness = DiffusionReaction::new(&disc, 1.0, 0.0, 0.0).unwrap();
+        let stiffness = diffusion_reaction(&disc, 1.0, 0.0, 0.0);
         let k1 = apply(&disc, stiffness, &one).norm2().unwrap();
         assert!(k1 < 1e-12, "{file}: |K 1| = {k1}");
     }
@@ -109,10 +121,10 @@ fn diffusion_kills_constants() {
 
 /// The operator of the diagonal and assembly tests: all three terms, essential dofs on the
 /// vessel walls, on the refined tissue mesh.
-fn tissue_operator(p: &Petsc) -> (Discretization, DiffusionReaction) {
+fn tissue_operator(p: &Petsc) -> (Discretization, Transport) {
     let mesh = load(p, "tissue_small.msh", 1);
     let disc = Discretization::with_essential(&mesh, 1, &ceed(), 1, &["vessel_wall"]).unwrap();
-    let op = DiffusionReaction::new(&disc, 0.3, 0.7, 2.0).unwrap();
+    let op = diffusion_reaction(&disc, 0.3, 0.7, 2.0);
     (disc, op)
 }
 
@@ -154,7 +166,7 @@ fn assembled_matches_shell() {
 }
 
 #[test]
-fn changed_coefficients_reach_mult_and_diagonal() {
+fn changed_shift_reaches_mult_and_diagonal() {
     let p = Petsc::init(&[]).unwrap();
     let (disc, op) = tissue_operator(&p);
     let op = Rc::new(RefCell::new(op));
@@ -167,22 +179,17 @@ fn changed_coefficients_reach_mult_and_diagonal() {
         }
     })
     .unwrap();
-    // Applied once with the first coefficients, then changed.
+    // Applied once with the first shift, then changed.
     let mut before = disc.global_vector().unwrap();
     shell.mult(&x, &mut before).unwrap();
     let mut diagonal_before = disc.global_vector().unwrap();
     shell.diagonal(&mut diagonal_before).unwrap();
-    {
-        let mut op = op.borrow_mut();
-        op.d = 1.5;
-        op.k = 0.1;
-        op.shift = 10.0;
-    }
+    op.borrow_mut().shift = 10.0;
     let mut y = disc.global_vector().unwrap();
     shell.mult(&x, &mut y).unwrap();
     let mut diagonal = disc.global_vector().unwrap();
     shell.diagonal(&mut diagonal).unwrap();
-    // The assembled matrix of the new coefficients.
+    // The assembled matrix of the new shift.
     let assembled = op.borrow().assemble().unwrap();
     let mut expected = disc.global_vector().unwrap();
     assembled.mult(&x, &mut expected).unwrap();
@@ -191,7 +198,7 @@ fn changed_coefficients_reach_mult_and_diagonal() {
     assembled.diagonal(&mut expected).unwrap();
     let error = distance(&disc, &diagonal, &expected) / expected.norm2().unwrap();
     assert!(error < 1e-13, "relative |diag - diag(A)| = {error}");
-    // And they differ from those of the first coefficients.
+    // And they differ from those of the first shift.
     assert!(distance(&disc, &y, &before) > 0.1 * expected.norm2().unwrap());
     assert!(distance(&disc, &diagonal, &diagonal_before) > 0.1 * expected.norm2().unwrap());
 }
@@ -236,11 +243,7 @@ fn apply_local_uses_essential_values() {
     let disc = Discretization::with_essential(&mesh, 1, &ceed(), 1, &SIDES).unwrap();
     let one = constant(&disc, 1.0);
     // As a Jacobian, the operator sees zero essential values: K 1 is not zero next to them.
-    let jacobian = apply(
-        &disc,
-        DiffusionReaction::new(&disc, 1.0, 0.0, 0.0).unwrap(),
-        &one,
-    );
+    let jacobian = apply(&disc, diffusion_reaction(&disc, 1.0, 0.0, 0.0), &one);
     assert!(jacobian.norm2().unwrap() > 0.1);
     // With the essential values 1 in the local vector, it applies to the constant function.
     let mut local = disc.local_vector().unwrap();
@@ -249,7 +252,7 @@ fn apply_local_uses_essential_values() {
     for side in SIDES {
         disc.set_essential_values(&mut local, side, 1.0).unwrap();
     }
-    let stiffness = DiffusionReaction::new(&disc, 1.0, 0.0, 0.0).unwrap();
+    let stiffness = diffusion_reaction(&disc, 1.0, 0.0, 0.0);
     let mut y = disc.global_vector().unwrap();
     stiffness.apply_local(&local, &mut y).unwrap();
     let k1 = y.norm2().unwrap();
@@ -257,26 +260,152 @@ fn apply_local_uses_essential_values() {
 }
 
 #[test]
-fn coefficients_take_effect_when_changed() {
+fn shift_takes_effect_when_changed() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = load(&p, "unit_square.msh", 0);
     let disc = Discretization::new(&mesh, 0, &ceed(), 1).unwrap();
-    let mut op = DiffusionReaction::new(&disc, 0.0, 1.0, 0.0).unwrap();
-    let diagonal = |op: &DiffusionReaction| {
+    let mut op = diffusion_reaction(&disc, 0.0, 1.0, 0.0);
+    let diagonal = |op: &Transport| {
         let mut d = disc.global_vector().unwrap();
         op.assemble().unwrap().diagonal(&mut d).unwrap();
         d
     };
     let mass = diagonal(&op);
-    op.k = 0.0;
-    op.shift = 3.0;
+    // (shift + k) M.
+    op.shift = 2.0;
     let mut scaled = diagonal(&op);
     scaled.axpy(-3.0, &mass).unwrap();
     assert!(scaled.norm2().unwrap() < 1e-14);
-    op.d = 1.0;
-    op.shift = 0.0;
-    let stiffness = diagonal(&op);
+    let stiffness = diagonal(&diffusion_reaction(&disc, 1.0, 0.0, 0.0));
     assert!(distance(&disc, &stiffness, &mass) > 1.0);
+}
+
+/// `a x - sum_i c_i (b_i x)`, relative to `|a x|`, for global vectors of `disc`.
+fn combination_error(
+    disc: &Discretization,
+    a: Transport,
+    combination: Vec<(f64, Transport)>,
+    x: &Vector,
+) -> f64 {
+    let ax = apply(disc, a, x);
+    let mut d = disc.global_vector().unwrap();
+    d.set(0.0).unwrap();
+    d.axpy(1.0, &ax).unwrap();
+    for (c, b) in combination {
+        d.axpy(-c, &apply(disc, b, x)).unwrap();
+    }
+    d.norm2().unwrap() / ax.norm2().unwrap()
+}
+
+#[test]
+fn transport_matches_diffusion_reaction() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "tissue_small.msh", 1);
+    let disc = Discretization::with_essential(&mesh, 1, &ceed(), 1, &["vessel_wall"]).unwrap();
+    let n = disc.num_quadrature_points();
+    let mut x = disc.global_vector().unwrap();
+    let rank = p.comm().rank();
+    x.with_array_mut(|a| {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = (i as f64 + 1000.0 * rank as f64).sin();
+        }
+    })
+    .unwrap();
+    let transport = |mass: f64, reaction: f64, diffusion: f64, terms: Terms| {
+        let data = PointData::isotropic(
+            &disc,
+            &vec![mass; n],
+            &vec![reaction; n],
+            &vec![diffusion; n],
+        );
+        Transport::new(&disc, Rc::new(data), terms).unwrap()
+    };
+    // The mass matrix M and the stiffness matrix K.
+    let m = || transport(1.0, 0.0, 0.0, Terms::Mass);
+    let k = || transport(0.0, 0.0, 1.0, Terms::Steady);
+    // The Jacobian of milestone 1: shift M + d K + k M, here 2 M + 0.3 K + 0.7 M.
+    let error = combination_error(
+        &disc,
+        diffusion_reaction(&disc, 0.3, 0.7, 2.0),
+        vec![(2.7, m()), (0.3, k())],
+        &x,
+    );
+    assert!(error < 1e-14, "Jacobian: {error}");
+    // Its steady part, d K + k M; and the mass term with the mass factor 0.5, 0.5 M.
+    let steady = transport(1.0, 0.7, 0.3, Terms::Steady);
+    let error = combination_error(&disc, steady, vec![(0.7, m()), (0.3, k())], &x);
+    assert!(error < 1e-14, "steady: {error}");
+    let mass = transport(0.5, 0.7, 0.3, Terms::Mass);
+    let error = combination_error(&disc, mass, vec![(0.5, m())], &x);
+    assert!(error < 1e-14, "mass: {error}");
+    // A Jacobian with the mass factor 0.5: shift 0.5 M + steady.
+    let mut jacobian = transport(0.5, 0.7, 0.3, Terms::Jacobian);
+    jacobian.shift = 4.0;
+    let error = combination_error(&disc, jacobian, vec![(2.7, m()), (0.3, k())], &x);
+    assert!(error < 1e-14, "Jacobian with mass 0.5: {error}");
+}
+
+#[test]
+fn anisotropic_tensor_integrates_exactly() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "unit_square.msh", 1);
+    let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
+    let n = disc.num_quadrature_points();
+    // D = [[2, 1], [1, 3]] as (D00, D01, D11).
+    let data = PointData::new(vec![0.0; n], vec![0.0; n], vec![[2.0, 1.0, 3.0]; n]);
+    let op = Rc::new(RefCell::new(
+        Transport::new(&disc, Rc::new(data), Terms::Steady).unwrap(),
+    ));
+    let a = disc.shell_matrix(SharedOperator(Rc::clone(&op))).unwrap();
+    let mut u = disc.global_vector().unwrap();
+    disc.interpolate(|[x, _]| x, &mut u).unwrap();
+    let mut v = disc.global_vector().unwrap();
+    disc.interpolate(|[_, y]| y, &mut v).unwrap();
+    let mut au = disc.global_vector().unwrap();
+    a.mult(&u, &mut au).unwrap();
+    let mut av = disc.global_vector().unwrap();
+    a.mult(&v, &mut av).unwrap();
+    // int D grad u . grad v over the unit square, for grad u = (1, 0) and grad v = (0, 1): D_10,
+    // D_00 and D_11.
+    let uv = v.dot(&au).unwrap();
+    assert!((uv - 1.0).abs() < 1e-12, "{uv}");
+    let vu = u.dot(&av).unwrap();
+    assert!((vu - 1.0).abs() < 1e-12, "{vu}");
+    let uu = u.dot(&au).unwrap();
+    assert!((uu - 2.0).abs() < 1e-12, "{uu}");
+    let vv = v.dot(&av).unwrap();
+    assert!((vv - 3.0).abs() < 1e-12, "{vv}");
+}
+
+#[test]
+fn point_data_must_match_the_discretization() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "unit_square.msh", 0);
+    let disc = Discretization::new(&mesh, 0, &ceed(), 1).unwrap();
+    let n = disc.num_quadrature_points() + 1;
+    let data = PointData::new(vec![1.0; n], vec![0.0; n], vec![[1.0, 0.0, 1.0]; n]);
+    let e = Transport::new(&disc, Rc::new(data), Terms::Steady).unwrap_err();
+    assert!(e.to_string().contains(&n.to_string()), "{e}");
+}
+
+#[test]
+fn cells_have_their_area_tag() {
+    let p = Petsc::init(&[]).unwrap();
+    let ceed = ceed();
+    for (file, tag) in [
+        ("unit_square.msh", "domain"),
+        ("tissue_small.msh", "tissue"),
+    ] {
+        let mesh = load(&p, file, 1);
+        for level in 0..2 {
+            let disc = Discretization::new(&mesh, level, &ceed, 1).unwrap();
+            let cells = disc.dm().height_stratum(0).unwrap().len();
+            for cell in 0..cells {
+                assert_eq!(disc.cell_area_tag(cell).as_deref(), Some(tag), "{file}");
+            }
+            assert_eq!(disc.cell_area_tag(cells), None);
+        }
+    }
 }
 
 #[test]
@@ -468,17 +597,20 @@ fn level_out_of_range_is_error() {
     );
 }
 
-/// The tests `parallel_on_*_processes` run on several processes: operators and assembly on a distributed
-/// mesh (ghost dofs shared between processes, global numbering by owner), and errors found on
-/// some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one without
-/// cells.
-const PARALLEL_TESTS: [&str; 14] = [
+/// The tests `parallel_on_*_processes` run on several processes: operators and assembly on a
+/// distributed mesh (ghost dofs shared between processes, global numbering by owner), and errors
+/// found on some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one
+/// without cells.
+const PARALLEL_TESTS: [&str; 17] = [
     "mpi_world_has_the_expected_size",
     "mass_integrates_area",
     "diffusion_kills_constants",
     "diagonal_matches_assembled",
     "assembled_matches_shell",
-    "changed_coefficients_reach_mult_and_diagonal",
+    "changed_shift_reaches_mult_and_diagonal",
+    "transport_matches_diffusion_reaction",
+    "anisotropic_tensor_integrates_exactly",
+    "cells_have_their_area_tag",
     "essential_dofs_leave_global_vectors",
     "apply_local_uses_essential_values",
     "source_integrates_over_the_domain",

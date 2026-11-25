@@ -6,6 +6,57 @@
       ],
       "type": "string"
     },
+    "MapSpec": {
+      "additionalProperties": false,
+      "description": "A raster map: one float value per pixel, placed in the scene's um coordinates.",
+      "properties": {
+        "id": {
+          "description": "Unique map id: an ASCII letter, then ASCII letters, digits and `_`.",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "no_value": {
+          "description": "Pixel value that marks \"no data\", if any.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "origin_um": {
+          "description": "Position `[x, y]` in um of the centre of pixel (row 0, col 0); rows run along y, columns\nalong x.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "path": {
+          "description": "Path of the raster file; relative paths resolve against the directory of the scene\nfile (`Scene::load` stores the absolute path).",
+          "type": "string"
+        },
+        "um_per_px": {
+          "description": "Pixel size in um, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "units": {
+          "description": "Units of the map values, free text (e.g. `1` for a dimensionless coordinate).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "units",
+        "um_per_px",
+        "origin_um"
+      ],
+      "type": "object"
+    },
     "MeshFormat": {
       "enum": [
         "gmsh"
@@ -54,6 +105,13 @@
       "maximum": 3,
       "minimum": 2,
       "type": "integer"
+    },
+    "maps": {
+      "description": "Raster maps over the tissue (e.g. a zonation coordinate); studies refer to them by id.",
+      "items": {
+        "$ref": "#/$defs/MapSpec"
+      },
+      "type": "array"
     },
     "mesh": {
       "$ref": "#/$defs/MeshRef"

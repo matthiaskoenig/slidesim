@@ -142,7 +142,7 @@ slideviz (Python)                         slidesim
   and support 2D DMPlex meshes; 3D octree meshes need the `octree` build, whose binaries are
   GPL.
 - Octree levels align with the slide pyramid levels, which the viewer and the output use.
-- **Mesh hierarchy in 2D** (Claude's call): the gmsh mesh from slideviz is the coarse level.
+- **Mesh hierarchy in 2D** (design call): the gmsh mesh from slideviz is the coarse level.
   Uniform DMPlex refinements of it give the finer levels on which the PDE is solved and the
   levels of `PCMG` (GAMG as fallback). Triangles use libCEED non-tensor bases, without sum
   factorization. For `result/1` the 2D fields are resampled onto the raster of the slide pyramid.
@@ -191,7 +191,7 @@ PETSc.
   math, libroadrunner's meaning of every operator).
 - Verification: the batched kernel against sbmlsim-core's CVODE engine, per instance, within
   tolerance.
-- Compilation (Claude's call). Models are data, so kernels are compiled per study and cached by
+- Compilation (design call). Models are data, so kernels are compiled per study and cached by
   the hash of the model and the target:
   - browser: sbmlsim-core's codegen already emits wasm directly from Rust, so it runs in the
     browser and is extended with a batched SIMD128 emitter. No external compiler.
@@ -206,7 +206,7 @@ PETSc.
   between the ODE level and the PDE level by the restriction and prolongation of the hierarchy.
 - Cell type, and with it the SBML model, and the parameters of each instance are sampled from the
   position fields of the scene.
-- Each element runs exactly one model or none (Claude's call). Elements without a model (lumen,
+- Each element runs exactly one model or none (design call). Elements without a model (lumen,
   necrotic tissue) still carry PDE coefficients. Mixtures of cell types are expressed as
   parameters of one model (for example fractions from spatial transcriptomics), not as several
   models per element. The batched kernel groups instances by model.
@@ -269,7 +269,7 @@ Python is never in the hot loop.
 7. 3D: octree from label volumes, viewer slice planes and volume rendering, cluster scaling.
 8. Python API completed, spatial transcriptomics validation tools, VTKHDF offline renders.
 
-Acceptance (Claude's call): each milestone is accepted by its verification tests (manufactured
+Acceptance (design call): each milestone is accepted by its verification tests (manufactured
 solutions, convergence rates, agreement with sbmlsim-core, agreement across targets). The scale
 of 10^8-10^9 unknowns is the goal of milestones 6 and 7, measured by weak and strong scaling
 benchmarks, not a gate for the earlier milestones.

@@ -1,4 +1,5 @@
-//! Operators on a [`Discretization`]: diffusion-reaction and sources at quadrature points.
+//! Operators on a [`Discretization`]: transport (mass, reaction, advection and diffusion with
+//! coefficients at the quadrature points, stabilized by SUPG) and sources at quadrature points.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -7,27 +8,61 @@ use ceed::{CVector, EvalMode, FieldVector, Operator, QFunction};
 use petsc::{AsVec, AsVecMut, InsertMode, Matrix, ShellOperator, VecMut, VecRef, Vector};
 
 use crate::discretization::Shared;
-use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE};
-use crate::{Discretization, PdeError, Result};
+use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
+use crate::{Discretization, PdeError, PointData, Result};
 
-/// The operator `shift M + d K + k M` on global vectors of a [`Discretization`]: `M` is the mass
-/// matrix, `K` the stiffness matrix (`d` the diffusion coefficient in um^2/s, `k` the decay rate
-/// in 1/s), and `shift` the shift of an implicit time step (in 1/s).
+/// The terms of the transport equation `m u_t + r u + vel . grad u - div(D grad u) = f` a
+/// [`Transport`] operator applies (`m`, `r`, `D`, the velocity `vel` and the SUPG parameter
+/// `tau` from its [`PointData`]), each tested with the SUPG test function
+/// `v + tau vel . grad v` except diffusion, which is tested with `v`: the residual SUPG weighs
+/// leaves out `-div(D grad u)`, which for P1 vanishes in each cell where `D` is constant (the
+/// usual practice for linear elements; it makes the method inconsistent by `tau D lap u`, an
+/// error of order `h^2` where diffusion dominates). Without velocity (or with `tau` zero) this
+/// is the Galerkin form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terms {
+    /// The steady terms, `R + A + K_D`: `R` the mass matrix weighted with `r`, `A` advection
+    /// (`int (vel . grad u) v`), `K_D` the stiffness matrix of `D`, with the SUPG terms
+    /// `int tau (vel . grad v) (r u + vel . grad u)`.
+    Steady,
+    /// The mass term, `M_m`: the mass matrix weighted with `m`, with the SUPG term
+    /// `int tau (vel . grad v) m u`.
+    Mass,
+    /// The Jacobian of an implicit time step, `shift M_m + R + A + K_D` (SUPG terms included).
+    Jacobian,
+}
+
+impl Terms {
+    /// The value of `TransportContext.terms` in `transport.h`.
+    fn context(self) -> f64 {
+        match self {
+            Terms::Steady => 0.0,
+            Terms::Mass => 1.0,
+            Terms::Jacobian => 2.0,
+        }
+    }
+}
+
+/// The transport operator on global vectors of a [`Discretization`], with the coefficients of a
+/// [`PointData`] at its quadrature points: of the weak form of
+/// `shift m u + r u + vel . grad u - div(D grad u)` (stabilized by SUPG, see [`Terms`]), the
+/// terms [`Terms`] selects. With a velocity the operator is not symmetric. `shift` is the shift
+/// of an implicit time step (in 1/s), which [`Terms::Jacobian`] applies.
 ///
-/// The coefficients may be changed between applications. As a [`ShellOperator`] it is a
-/// Jacobian: essential dofs are zero in its input (and absent from its output); the residual of
-/// nonzero essential values comes from [`DiffusionReaction::apply_local`]. Each operator has its
-/// own libCEED operator and work vectors, and shares the restrictions, basis and geometry of
-/// the discretization.
+/// The coefficients are fixed; the shift may be changed between applications. As a
+/// [`ShellOperator`] it is a Jacobian: essential dofs are zero in its input (and absent from its
+/// output); the residual of nonzero essential values comes from [`Transport::apply_local`].
+/// Each operator has its own libCEED operator and work vectors, and shares the restrictions,
+/// basis and geometry of the discretization, and its point data with other operators of it.
 #[derive(Debug)]
-pub struct DiffusionReaction {
-    pub d: f64,
-    pub k: f64,
+pub struct Transport {
     pub shift: f64,
+    terms: Terms,
+    data: Rc<PointData>,
     shared: Rc<Shared>,
     qf: RefCell<QFunction>,
     op: Operator,
-    /// The coefficients the QFunction context holds: `[d, shift + k]`.
+    /// The context the QFunction holds: `[shift, terms]`.
     context: Cell<[f64; 2]>,
     /// Local vectors: the input of [`ShellOperator::mult`], and results.
     work: RefCell<Work>,
@@ -39,28 +74,40 @@ struct Work {
     y: Vector,
 }
 
-impl DiffusionReaction {
-    /// The operator with the coefficients `d`, `k` and `shift` on `disc`.
-    pub fn new(disc: &Discretization, d: f64, k: f64, shift: f64) -> Result<DiffusionReaction> {
+impl Transport {
+    /// The operator of the terms `terms` with the coefficients `data` on `disc`, with shift 0.
+    ///
+    /// Errors: [`PdeError::Unsupported`] unless `data` has a value per quadrature point of
+    /// `disc`.
+    pub fn new(disc: &Discretization, data: Rc<PointData>, terms: Terms) -> Result<Transport> {
+        let n = disc.num_quadrature_points();
+        if data.len() != n {
+            return Err(PdeError::Unsupported(format!(
+                "point data of {} points on a discretization of {n} quadrature points",
+                data.len()
+            )));
+        }
         let shared = disc.shared();
         let ceed = &shared.ceed;
         let dim = shared.basis.dim();
-        // SAFETY: the fields and the context (two values, `DiffusionReactionContext`) match what
-        // DiffusionReaction2D reads and writes.
+        // SAFETY: the fields and the context (two values, `TransportContext`) match what
+        // Transport2D reads and writes.
         let mut qf = unsafe {
             QFunction::interior(
                 ceed,
                 1,
-                Some(qf::slidesim_pde_DiffusionReaction2D),
-                qf::DIFFUSION_REACTION_2D,
+                Some(qf::slidesim_pde_Transport2D),
+                qf::TRANSPORT_2D,
             )
         }?;
         qf.add_input("u", 1, EvalMode::Interp)?;
         qf.add_input("du", dim, EvalMode::Grad)?;
         qf.add_input("q_data", GEOMETRY_2D_SIZE, EvalMode::None)?;
+        qf.add_input("p_data", TRANSPORT_DATA_SIZE, EvalMode::None)?;
         qf.add_output("v", 1, EvalMode::Interp)?;
         qf.add_output("dv", dim, EvalMode::Grad)?;
-        let context = [d, shift + k];
+        let shift = 0.0;
+        let context = [shift, terms.context()];
         qf.set_context(&context)?;
         let mut op = Operator::new(ceed, &qf)?;
         let (r, b) = (Some(&shared.restriction), Some(&shared.basis));
@@ -72,12 +119,22 @@ impl DiffusionReaction {
             None,
             FieldVector::Passive(&shared.q_data),
         )?;
+        data.with_packed(ceed, disc.points_per_cell(), |p_data| {
+            // libCEED keeps a reference to the vector.
+            op.set_field(
+                "p_data",
+                Some(&shared.p_data_restriction),
+                None,
+                FieldVector::Passive(p_data),
+            )?;
+            Ok(())
+        })?;
         op.set_field("v", r, b, FieldVector::Active)?;
         op.set_field("dv", r, b, FieldVector::Active)?;
-        Ok(DiffusionReaction {
-            d,
-            k,
+        Ok(Transport {
             shift,
+            terms,
+            data,
             shared: Rc::clone(shared),
             qf: RefCell::new(qf),
             op,
@@ -89,9 +146,28 @@ impl DiffusionReaction {
         })
     }
 
-    /// Passes the current coefficients to the QFunction, if they changed.
+    /// The terms the operator applies.
+    pub fn terms(&self) -> Terms {
+        self.terms
+    }
+
+    /// The coefficients at the quadrature points.
+    pub fn data(&self) -> &Rc<PointData> {
+        &self.data
+    }
+
+    /// The entries of the backflow term of the data ([`PointData::with_backflow`]), which the
+    /// steady terms and the Jacobian apply (the mass term does not).
+    fn backflow(&self) -> &[(usize, usize, f64)] {
+        match self.terms {
+            Terms::Mass => &[],
+            Terms::Steady | Terms::Jacobian => self.data.backflow(),
+        }
+    }
+
+    /// Passes the current shift to the QFunction, if it changed.
     fn update_context(&self) -> Result<()> {
-        let context = [self.d, self.shift + self.k];
+        let context = [self.shift, self.terms.context()];
         if self.context.get() != context {
             self.qf.borrow_mut().set_context(&context)?;
             self.context.set(context);
@@ -117,8 +193,15 @@ impl DiffusionReaction {
     ) -> Result<()> {
         self.update_context()?;
         // libCEED views the arrays of the local vectors in place.
-        let applied =
-            x_local.with_array(|x| y_local.with_array_mut(|y| self.op.apply_slices(x, y)));
+        let applied = x_local.with_array(|x| {
+            y_local.with_array_mut(|y| {
+                self.op.apply_slices(x, y)?;
+                for &(i, j, value) in self.backflow() {
+                    y[i] += value * x[j];
+                }
+                Ok::<_, ceed::Error>(())
+            })
+        });
         applied???;
         y.zero()?;
         self.shared
@@ -145,7 +228,16 @@ impl DiffusionReaction {
         let mut diagonal = CVector::new(&self.shared.ceed, self.shared.local_size)?;
         self.op.assemble_diagonal(&mut diagonal)?;
         let mut work = self.work.borrow_mut();
-        diagonal.with_array(|values| work.y.with_array_mut(|y| y.copy_from_slice(values)))??;
+        diagonal.with_array(|values| {
+            work.y.with_array_mut(|y| {
+                y.copy_from_slice(values);
+                for &(i, j, value) in self.backflow() {
+                    if i == j {
+                        y[i] += value;
+                    }
+                }
+            })
+        })??;
         d.zero()?;
         self.shared
             .dm
@@ -158,7 +250,12 @@ impl DiffusionReaction {
     /// out, like the dofs themselves; entries of rows owned by another process are sent to it.
     /// Collective.
     pub fn assemble(&self) -> Result<Matrix> {
-        let (rows, cols) = self.op.assemble_coo_symbolic()?;
+        let (mut rows, mut cols) = self.op.assemble_coo_symbolic()?;
+        // The backflow term after the entries of libCEED, in the order of `reassemble`.
+        for &(i, j, _) in self.backflow() {
+            rows.push(i as i64);
+            cols.push(j as i64);
+        }
         let shared = &self.shared;
         let global = |local: Vec<i64>| -> Result<Vec<i64>> {
             local
@@ -185,14 +282,23 @@ impl DiffusionReaction {
         Ok(matrix)
     }
 
-    /// Assembles the operator with its current coefficients again into `matrix`, from
-    /// [`DiffusionReaction::assemble`] of an operator on the same discretization: the entries
-    /// keep their places (the coordinate pattern depends on the discretization only), their
-    /// values are computed again. Collective.
+    /// Assembles the operator with its current shift again into `matrix`, from
+    /// [`Transport::assemble`] of this operator or of one on the same discretization with the
+    /// same terms and the same backflow entries ([`PointData::with_backflow`]): the coordinate
+    /// pattern is that of libCEED for the discretization followed by the backflow entries, so
+    /// the entries keep their places and only their values are computed again (with the shift
+    /// and the coefficients at the time of the call). Collective.
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
         self.update_context()?;
         let values = self.op.assemble_coo_values()?;
-        values.with_array(|values| matrix.set_values_coo(values))??;
+        let backflow = self.backflow();
+        if backflow.is_empty() {
+            values.with_array(|values| matrix.set_values_coo(values))??;
+        } else {
+            let mut all = values.with_array(<[f64]>::to_vec)?;
+            all.extend(backflow.iter().map(|&(_, _, value)| value));
+            matrix.set_values_coo(&all)?;
+        }
         Ok(())
     }
 
@@ -202,7 +308,7 @@ impl DiffusionReaction {
     }
 }
 
-impl ShellOperator for DiffusionReaction {
+impl ShellOperator for Transport {
     fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
         self.mult_global(x, y).map_err(PdeError::into_petsc)
     }
@@ -212,11 +318,11 @@ impl ShellOperator for DiffusionReaction {
     }
 }
 
-/// A [`DiffusionReaction`] shared between a shell matrix (as its [`ShellOperator`]) and the code
-/// which changes its coefficients while PETSc owns the matrix: an implicit time integrator
-/// changes the shift each step.
+/// A [`Transport`] shared between a shell matrix (as its [`ShellOperator`]) and the code which
+/// changes its shift while PETSc owns the matrix: an implicit time integrator changes the shift
+/// each step.
 #[derive(Clone, Debug)]
-pub struct SharedOperator(pub Rc<RefCell<DiffusionReaction>>);
+pub struct SharedOperator(pub Rc<RefCell<Transport>>);
 
 impl ShellOperator for SharedOperator {
     fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
@@ -268,7 +374,9 @@ impl PointValues {
 }
 
 /// A field given at the quadrature points of a [`Discretization`] (a source in mM/s), and its
-/// integral against the test functions, `int f v`.
+/// integral against the test functions, `int f v`; or, stabilized
+/// ([`SourceField::stabilized`]), against the SUPG test functions of a [`Transport`] operator,
+/// `int f (v + tau vel . grad v)`.
 ///
 /// The values are stored as the discretization lays out values at points: point `q` of local
 /// cell `e` at `e * Q + q`, in the order of [`Discretization::quadrature_points`].
@@ -277,12 +385,14 @@ pub struct SourceField {
     values: Vec<f64>,
     shared: Rc<Shared>,
     op: Operator,
+    /// The point data of the SUPG test functions, whose packed values the operator reads.
+    _data: Option<Rc<PointData>>,
     /// A local vector for results.
     work: RefCell<Vector>,
 }
 
 impl SourceField {
-    /// The field on `disc`, zero at every point.
+    /// The field on `disc`, zero at every point, integrated against the test functions `v`.
     pub fn new(disc: &Discretization) -> Result<SourceField> {
         let shared = disc.shared();
         let ceed = &shared.ceed;
@@ -311,10 +421,79 @@ impl SourceField {
             Some(&shared.basis),
             FieldVector::Active,
         )?;
+        SourceField::with_operator(disc, op, None)
+    }
+
+    /// The field on `disc`, zero at every point, integrated against the SUPG test functions
+    /// `v + tau vel . grad v` of the velocity and `tau` of `data` (see [`Terms`]): the source
+    /// of the equation of a [`Transport`] operator with `data`.
+    ///
+    /// Errors: [`PdeError::Unsupported`] unless `data` has a value per quadrature point of
+    /// `disc`.
+    pub fn stabilized(disc: &Discretization, data: Rc<PointData>) -> Result<SourceField> {
+        let n = disc.num_quadrature_points();
+        if data.len() != n {
+            return Err(PdeError::Unsupported(format!(
+                "point data of {} points on a discretization of {n} quadrature points",
+                data.len()
+            )));
+        }
+        let shared = disc.shared();
+        let ceed = &shared.ceed;
+        let dim = shared.basis.dim();
+        // SAFETY: the fields match what TransportSource2D reads and writes; no context.
+        let mut qf = unsafe {
+            QFunction::interior(
+                ceed,
+                1,
+                Some(qf::slidesim_pde_TransportSource2D),
+                qf::TRANSPORT_SOURCE_2D,
+            )
+        }?;
+        qf.add_input("q_data", GEOMETRY_2D_SIZE, EvalMode::None)?;
+        qf.add_input("p_data", TRANSPORT_DATA_SIZE, EvalMode::None)?;
+        qf.add_input("f", 1, EvalMode::None)?;
+        qf.add_output("v", 1, EvalMode::Interp)?;
+        qf.add_output("dv", dim, EvalMode::Grad)?;
+        let mut op = Operator::new(ceed, &qf)?;
+        op.set_field(
+            "q_data",
+            Some(&shared.q_data_restriction),
+            None,
+            FieldVector::Passive(&shared.q_data),
+        )?;
+        data.with_packed(ceed, disc.points_per_cell(), |p_data| {
+            // libCEED keeps a reference to the vector.
+            op.set_field(
+                "p_data",
+                Some(&shared.p_data_restriction),
+                None,
+                FieldVector::Passive(p_data),
+            )?;
+            Ok(())
+        })?;
+        op.set_field(
+            "f",
+            Some(&shared.point_restriction),
+            None,
+            FieldVector::Active,
+        )?;
+        let (r, b) = (Some(&shared.restriction), Some(&shared.basis));
+        op.set_field("v", r, b, FieldVector::Active)?;
+        op.set_field("dv", r, b, FieldVector::Active)?;
+        SourceField::with_operator(disc, op, Some(data))
+    }
+
+    fn with_operator(
+        disc: &Discretization,
+        op: Operator,
+        data: Option<Rc<PointData>>,
+    ) -> Result<SourceField> {
         Ok(SourceField {
             values: vec![0.0; disc.num_quadrature_points()],
-            shared: Rc::clone(shared),
+            shared: Rc::clone(disc.shared()),
             op,
+            _data: data,
             work: RefCell::new(disc.local_vector()?),
         })
     }
@@ -329,8 +508,8 @@ impl SourceField {
         &mut self.values
     }
 
-    /// `b = int f v` for the test functions `v` of the global dofs, into the global vector `b`.
-    /// Collective.
+    /// `b = int f v` for the test functions `v` of the global dofs (the SUPG test functions if
+    /// stabilized), into the global vector `b`. Collective.
     pub fn apply(&self, b: &mut impl AsVecMut) -> Result<()> {
         let mut local = self.work.borrow_mut();
         local.with_array_mut(|y| self.op.apply_slices(&self.values, y))??;

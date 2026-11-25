@@ -1,0 +1,15 @@
+[package]
+name = "maps"
+description = "Raster maps from Zarr v3: windowed reads, bilinear samples and gradients"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+contracts = { path = "../contracts" }
+thiserror = "2"
+zarrs = { version = "0.23.14", default-features = false, features = ["filesystem", "zstd"] }
+
+[dev-dependencies]
+serde_json = "1"

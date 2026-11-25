@@ -1,0 +1,15 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {"length": "um"},
+  "mesh": {"format": "gmsh", "path": "../../meshes/lobule_toy.msh"},
+  "maps": [
+    {
+      "id": "zonation",
+      "path": "zonation.zarr",
+      "units": "1",
+      "um_per_px": 4.0,
+      "origin_um": [-8.0, -8.0]
+    }
+  ]
+}

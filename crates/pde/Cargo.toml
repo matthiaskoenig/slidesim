@@ -11,6 +11,7 @@ ceed = { path = "../ceed" }
 # Direct dependency for `DEP_CEED_INCLUDE` (libCEED's headers) in build.rs.
 ceed-sys.workspace = true
 contracts = { path = "../contracts" }
+maps = { path = "../maps" }
 mesh = { path = "../mesh" }
 petsc = { path = "../petsc" }
 thiserror = "2"

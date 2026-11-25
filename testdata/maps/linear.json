@@ -1,0 +1,10 @@
+{
+  "id": "linear",
+  "path": "linear.zarr",
+  "units": "1",
+  "um_per_px": 2.0,
+  "origin_um": [
+    10.0,
+    20.0
+  ]
+}

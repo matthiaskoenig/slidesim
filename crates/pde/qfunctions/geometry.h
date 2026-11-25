@@ -1,6 +1,6 @@
 /// @file
 /// Geometry of P1 triangles at quadrature points (2D), for the operators of mass.h and
-/// diffusion.h.
+/// transport.h.
 #pragma once
 
 #include <ceed/types.h>
