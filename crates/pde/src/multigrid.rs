@@ -1,5 +1,5 @@
-//! Geometric multigrid on the refinement hierarchy of a mesh: `PCMG` with the
-//! diffusion-reaction operator discretized again on every level.
+//! Geometric multigrid on the refinement hierarchy of a mesh: `PCMG` with the transport
+//! operator discretized again on every level.
 
 use mesh::Mesh;
 use petsc::{Ksp, Matrix};
@@ -17,7 +17,7 @@ const SMOOTHING_STEPS: usize = 2;
 const CHEBYSHEV_TRANSFORM: [f64; 4] = [0.0, 0.1, 0.0, 1.1];
 
 /// The levels of a geometric multigrid preconditioner from [`configure_multigrid`], for keeping
-/// them in step with the coefficients of the operator ([`Multigrid::set_coefficients`]).
+/// them in step with the shift of the operator ([`Multigrid::set_shift`]).
 ///
 /// The preconditioner (PETSc's `PCMG`) holds references to what it needs; this handle shares
 /// the operators of the levels and holds the matrices whose changes it marks.
@@ -33,9 +33,10 @@ pub struct Multigrid {
 
 /// Makes the preconditioner of `ksp` geometric multigrid (`PCMG`, V-cycles) over the levels of
 /// `mesh`, with the operators `levels`: one per level of the mesh, coarse first, on the
-/// discretizations of [`Discretization::hierarchy`] (each linked to the one before), with the
-/// same coefficients. The finest level is the operator of `ksp`, which should be the operator
-/// `levels` ends with (as a shell matrix). Collective.
+/// discretizations of [`Discretization::hierarchy`] (each linked to the one before), each with
+/// the coefficients of its level (the same coefficient functions at its quadrature points) and
+/// the same terms and shift. The finest level is the operator of `ksp`, which should be the
+/// operator `levels` ends with (as a shell matrix). Collective.
 ///
 /// - Interpolation: `DMCreateInterpolation` from each level to the next, between the DMs of
 ///   the discretizations (nested P1 spaces; essential dofs are left out on both levels).
@@ -48,7 +49,7 @@ pub struct Multigrid {
 ///   estimator set to CG: it only applies the shell operator and Jacobi). The estimates are
 ///   renewed when the operator of the level changes.
 /// - Coarse level (level 0): one application of algebraic multigrid (`PCGAMG`, `preonly`) to
-///   the assembled operator ([`crate::DiffusionReaction::assemble`]), which runs on any
+///   the assembled operator ([`crate::Transport::assemble`]), which runs on any
 ///   number of processes without external packages. A mesh of one level is solved this way
 ///   alone.
 ///
@@ -56,8 +57,8 @@ pub struct Multigrid {
 /// under its prefix `<p>`, `-<p>pc_type`, `-<p>mg_levels_ksp_max_it`, `-<p>mg_coarse_pc_type`
 /// and the like (`-<p>mg_coarse_` is the coarse solver for a mesh of one level too).
 ///
-/// When the coefficients change, [`Multigrid::set_coefficients`] changes them on every level,
-/// and the operator of `ksp` must be marked changed ([`Matrix::mark_changed`]; a `TS` does
+/// When the shift changes, [`Multigrid::set_shift`] changes it on every level, and the operator
+/// of `ksp` must be marked changed ([`Matrix::mark_changed`]; a `TS` does
 /// when [`petsc::Implicit::jacobian`] returns true) for the preconditioner to be rebuilt.
 ///
 /// Errors: [`PdeError::NotHierarchy`] unless `levels` has one operator per level of `mesh`,
@@ -140,17 +141,14 @@ pub fn configure_multigrid(
 }
 
 impl Multigrid {
-    /// Sets the coefficients `d`, `k` and `shift` of the operators of every level (see
-    /// [`crate::DiffusionReaction`]) and assembles the coarse operator again (its values; the
-    /// pattern stays). The coarser levels are marked changed, so their smoothers are set up
+    /// Sets the shift of the operators of every level (see [`crate::Transport`]) and assembles
+    /// the coarse operator again (its values; the pattern stays). The coefficients of the levels
+    /// stay as they are. The coarser levels are marked changed, so their smoothers are set up
     /// again when the preconditioner is rebuilt next, which the caller triggers by marking the
     /// operator of the solver changed (see [`configure_multigrid`]). Collective.
-    pub fn set_coefficients(&mut self, d: f64, k: f64, shift: f64) -> Result<()> {
+    pub fn set_shift(&mut self, shift: f64) -> Result<()> {
         for op in &self.levels {
-            let mut op = op.0.borrow_mut();
-            op.d = d;
-            op.k = k;
-            op.shift = shift;
+            op.0.borrow_mut().shift = shift;
         }
         for shell in &mut self.intermediate {
             shell.mark_changed()?;

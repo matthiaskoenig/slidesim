@@ -1,4 +1,5 @@
-//! Operators on a [`Discretization`]: diffusion-reaction and sources at quadrature points.
+//! Operators on a [`Discretization`]: transport (mass, reaction and diffusion with coefficients
+//! at the quadrature points) and sources at quadrature points.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -7,27 +8,52 @@ use ceed::{CVector, EvalMode, FieldVector, Operator, QFunction};
 use petsc::{AsVec, AsVecMut, InsertMode, Matrix, ShellOperator, VecMut, VecRef, Vector};
 
 use crate::discretization::Shared;
-use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE};
-use crate::{Discretization, PdeError, Result};
+use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
+use crate::{Discretization, PdeError, PointData, Result};
 
-/// The operator `shift M + d K + k M` on global vectors of a [`Discretization`]: `M` is the mass
-/// matrix, `K` the stiffness matrix (`d` the diffusion coefficient in um^2/s, `k` the decay rate
-/// in 1/s), and `shift` the shift of an implicit time step (in 1/s).
+/// The terms of the transport equation `m u_t + r u - div(D grad u) = f` a [`Transport`]
+/// operator applies (`m`, `r` and `D` from its [`PointData`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Terms {
+    /// The steady terms, `R + K_D`: `R` the mass matrix weighted with `r`, `K_D` the stiffness
+    /// matrix of `D`.
+    Steady,
+    /// The mass term, `M_m`: the mass matrix weighted with `m`.
+    Mass,
+    /// The Jacobian of an implicit time step, `shift M_m + R + K_D`.
+    Jacobian,
+}
+
+impl Terms {
+    /// The value of `TransportContext.terms` in `transport.h`.
+    fn context(self) -> f64 {
+        match self {
+            Terms::Steady => 0.0,
+            Terms::Mass => 1.0,
+            Terms::Jacobian => 2.0,
+        }
+    }
+}
+
+/// The transport operator on global vectors of a [`Discretization`], with the coefficients of a
+/// [`PointData`] at its quadrature points: of the weak form of
+/// `shift m u + r u - div(D grad u)`, the terms [`Terms`] selects. `shift` is the shift of an
+/// implicit time step (in 1/s), which [`Terms::Jacobian`] applies.
 ///
-/// The coefficients may be changed between applications. As a [`ShellOperator`] it is a
-/// Jacobian: essential dofs are zero in its input (and absent from its output); the residual of
-/// nonzero essential values comes from [`DiffusionReaction::apply_local`]. Each operator has its
-/// own libCEED operator and work vectors, and shares the restrictions, basis and geometry of
-/// the discretization.
+/// The coefficients are fixed; the shift may be changed between applications. As a
+/// [`ShellOperator`] it is a Jacobian: essential dofs are zero in its input (and absent from its
+/// output); the residual of nonzero essential values comes from [`Transport::apply_local`].
+/// Each operator has its own libCEED operator and work vectors, and shares the restrictions,
+/// basis and geometry of the discretization, and its point data with other operators of it.
 #[derive(Debug)]
-pub struct DiffusionReaction {
-    pub d: f64,
-    pub k: f64,
+pub struct Transport {
     pub shift: f64,
+    terms: Terms,
+    data: Rc<PointData>,
     shared: Rc<Shared>,
     qf: RefCell<QFunction>,
     op: Operator,
-    /// The coefficients the QFunction context holds: `[d, shift + k]`.
+    /// The context the QFunction holds: `[shift, terms]`.
     context: Cell<[f64; 2]>,
     /// Local vectors: the input of [`ShellOperator::mult`], and results.
     work: RefCell<Work>,
@@ -39,28 +65,40 @@ struct Work {
     y: Vector,
 }
 
-impl DiffusionReaction {
-    /// The operator with the coefficients `d`, `k` and `shift` on `disc`.
-    pub fn new(disc: &Discretization, d: f64, k: f64, shift: f64) -> Result<DiffusionReaction> {
+impl Transport {
+    /// The operator of the terms `terms` with the coefficients `data` on `disc`, with shift 0.
+    ///
+    /// Errors: [`PdeError::Unsupported`] unless `data` has a value per quadrature point of
+    /// `disc`.
+    pub fn new(disc: &Discretization, data: Rc<PointData>, terms: Terms) -> Result<Transport> {
+        let n = disc.num_quadrature_points();
+        if data.len() != n {
+            return Err(PdeError::Unsupported(format!(
+                "point data of {} points on a discretization of {n} quadrature points",
+                data.len()
+            )));
+        }
         let shared = disc.shared();
         let ceed = &shared.ceed;
         let dim = shared.basis.dim();
-        // SAFETY: the fields and the context (two values, `DiffusionReactionContext`) match what
-        // DiffusionReaction2D reads and writes.
+        // SAFETY: the fields and the context (two values, `TransportContext`) match what
+        // Transport2D reads and writes.
         let mut qf = unsafe {
             QFunction::interior(
                 ceed,
                 1,
-                Some(qf::slidesim_pde_DiffusionReaction2D),
-                qf::DIFFUSION_REACTION_2D,
+                Some(qf::slidesim_pde_Transport2D),
+                qf::TRANSPORT_2D,
             )
         }?;
         qf.add_input("u", 1, EvalMode::Interp)?;
         qf.add_input("du", dim, EvalMode::Grad)?;
         qf.add_input("q_data", GEOMETRY_2D_SIZE, EvalMode::None)?;
+        qf.add_input("p_data", TRANSPORT_DATA_SIZE, EvalMode::None)?;
         qf.add_output("v", 1, EvalMode::Interp)?;
         qf.add_output("dv", dim, EvalMode::Grad)?;
-        let context = [d, shift + k];
+        let shift = 0.0;
+        let context = [shift, terms.context()];
         qf.set_context(&context)?;
         let mut op = Operator::new(ceed, &qf)?;
         let (r, b) = (Some(&shared.restriction), Some(&shared.basis));
@@ -72,12 +110,22 @@ impl DiffusionReaction {
             None,
             FieldVector::Passive(&shared.q_data),
         )?;
+        data.with_packed(ceed, disc.points_per_cell(), |p_data| {
+            // libCEED keeps a reference to the vector.
+            op.set_field(
+                "p_data",
+                Some(&shared.p_data_restriction),
+                None,
+                FieldVector::Passive(p_data),
+            )?;
+            Ok(())
+        })?;
         op.set_field("v", r, b, FieldVector::Active)?;
         op.set_field("dv", r, b, FieldVector::Active)?;
-        Ok(DiffusionReaction {
-            d,
-            k,
+        Ok(Transport {
             shift,
+            terms,
+            data,
             shared: Rc::clone(shared),
             qf: RefCell::new(qf),
             op,
@@ -89,9 +137,19 @@ impl DiffusionReaction {
         })
     }
 
-    /// Passes the current coefficients to the QFunction, if they changed.
+    /// The terms the operator applies.
+    pub fn terms(&self) -> Terms {
+        self.terms
+    }
+
+    /// The coefficients at the quadrature points.
+    pub fn data(&self) -> &Rc<PointData> {
+        &self.data
+    }
+
+    /// Passes the current shift to the QFunction, if it changed.
     fn update_context(&self) -> Result<()> {
-        let context = [self.d, self.shift + self.k];
+        let context = [self.shift, self.terms.context()];
         if self.context.get() != context {
             self.qf.borrow_mut().set_context(&context)?;
             self.context.set(context);
@@ -185,10 +243,10 @@ impl DiffusionReaction {
         Ok(matrix)
     }
 
-    /// Assembles the operator with its current coefficients again into `matrix`, from
-    /// [`DiffusionReaction::assemble`] of an operator on the same discretization: the entries
-    /// keep their places (the coordinate pattern depends on the discretization only), their
-    /// values are computed again. Collective.
+    /// Assembles the operator with its current shift again into `matrix`, from
+    /// [`Transport::assemble`] of an operator on the same discretization: the entries keep
+    /// their places (the coordinate pattern depends on the discretization only), their values
+    /// are computed again. Collective.
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
         self.update_context()?;
         let values = self.op.assemble_coo_values()?;
@@ -202,7 +260,7 @@ impl DiffusionReaction {
     }
 }
 
-impl ShellOperator for DiffusionReaction {
+impl ShellOperator for Transport {
     fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
         self.mult_global(x, y).map_err(PdeError::into_petsc)
     }
@@ -212,11 +270,11 @@ impl ShellOperator for DiffusionReaction {
     }
 }
 
-/// A [`DiffusionReaction`] shared between a shell matrix (as its [`ShellOperator`]) and the code
-/// which changes its coefficients while PETSc owns the matrix: an implicit time integrator
-/// changes the shift each step.
+/// A [`Transport`] shared between a shell matrix (as its [`ShellOperator`]) and the code which
+/// changes its shift while PETSc owns the matrix: an implicit time integrator changes the shift
+/// each step.
 #[derive(Clone, Debug)]
-pub struct SharedOperator(pub Rc<RefCell<DiffusionReaction>>);
+pub struct SharedOperator(pub Rc<RefCell<Transport>>);
 
 impl ShellOperator for SharedOperator {
     fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {

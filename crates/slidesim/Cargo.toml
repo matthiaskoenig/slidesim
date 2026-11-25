@@ -11,6 +11,7 @@ anyhow = "1"
 ceed = { path = "../ceed" }
 clap = { version = "4", features = ["derive"] }
 contracts = { path = "../contracts" }
+maps = { path = "../maps" }
 mesh = { path = "../mesh" }
 pde = { path = "../pde" }
 petsc = { path = "../petsc" }

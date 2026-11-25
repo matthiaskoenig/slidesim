@@ -1,8 +1,8 @@
 /* The QFunctions of the headers here, exported for Rust: a CEED_QFUNCTION is static. Each
    wrapper also refers to the location string CEED_QFUNCTION defines, which is otherwise unused. */
-#include "diffusion.h"
 #include "geometry.h"
 #include "mass.h"
+#include "transport.h"
 
 #define EXPORT(name)                                                                                      \
   int slidesim_pde_##name(void *ctx, CeedInt Q, const CeedScalar *const *in, CeedScalar *const *out) { \
@@ -14,4 +14,4 @@ EXPORT(SetupGeometry2D)
 EXPORT(QuadraturePoints2D)
 EXPORT(Mass)
 EXPORT(Values)
-EXPORT(DiffusionReaction2D)
+EXPORT(Transport2D)

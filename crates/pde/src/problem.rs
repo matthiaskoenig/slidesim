@@ -1,18 +1,19 @@
 //! One diffusion-reaction field stepped in time: BDF2 of PETSc's `TS` on the P1 discretization
-//! of the finest mesh level.
+//! of the finest mesh level, with the coefficients of the field at the quadrature points.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use ceed::Ceed;
 use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
+use maps::Maps;
 use mesh::Mesh;
 use petsc::{ExactFinalTime, Implicit, OptionsScope, ProblemType, Ts, VecMut, VecRef, Vector, sys};
 
 use crate::operators::PointValues;
 use crate::{
-    DiffusionReaction, Discretization, Multigrid, PdeError, Result, SharedOperator, SourceField,
-    configure_multigrid,
+    Discretization, Multigrid, PdeError, PointData, Result, SharedOperator, SourceField, Terms,
+    Transport, coefficient_values, configure_multigrid,
 };
 
 /// The options every problem sets before those of the caller, who may override them: a solver
@@ -36,27 +37,40 @@ const CONCENTRATION_UNIT: &str = "mM";
 /// shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
 
+/// What a [`Problem`] takes besides its field: the maps its coefficient tables refer to.
+#[derive(Debug, Clone, Copy)]
+pub struct Inputs<'a> {
+    /// The maps, read for the cells of this process (see [`mesh::Mesh::local_bounds`]).
+    pub maps: &'a Maps,
+}
+
 /// The field `u` of a [`FieldSpec`] on a [`Mesh`], stepped in time:
 ///
-/// `u_t = div(d grad u) - k u + f`, with `d` the diffusion coefficient (um^2/s), `k` the decay
-/// rate (1/s) and `f` the source (mM/s), on the finest level of the mesh, in the weak form of P1
-/// elements:
+/// `phi u_t = div(phi d grad u) - phi k u + phi f`, with `phi` the porosity (dimensionless),
+/// `d` the diffusion coefficient (um^2/s), `k` the decay rate (1/s) and `f` the source (mM/s),
+/// on the finest level of the mesh, in the weak form of P1 elements:
 ///
-/// `M u_t + (d K + k M) u = int f v + sum_i int_(Gamma_i) q_i v`.
+/// `M_phi u_t + (K_(phi d) + M_(phi k)) u = int phi f v + sum_i int_(Gamma_i) q_i v`,
+///
+/// `M_c` the mass matrix weighted with `c` and `K_c` the stiffness matrix of `c`. The
+/// coefficients are numbers or tables over maps ([`Coefficient`]), evaluated at the quadrature
+/// points of every level of the mesh ([`coefficient_values`]): the coarser levels of the
+/// multigrid preconditioner discretize the same equation again.
 ///
 /// Boundary conditions, by tag ([`FieldSpec::boundaries`]): a Dirichlet value is fixed on the
 /// tag (an essential boundary; where tags meet, the value of the tag listed last holds); a flux
-/// `q` is an inward flux on the boundary edges of the tag (mM*um/s); everywhere else the flux
-/// is zero (the natural boundary condition).
+/// `q` is an inward diffusive flux (`phi d grad u . n`) on the boundary edges of the tag
+/// (mM*um/s); everywhere else the flux is zero (the natural boundary condition).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
-/// step is one linear solve (`SNESKSPONLY`): CG with the Jacobian `shift M + d K + k M` as a
-/// matrix-free shell operator, preconditioned by geometric multigrid over the levels of the mesh
-/// ([`configure_multigrid`]; a mesh without refinements is solved by its coarse solver, algebraic
-/// multigrid, alone). The operators are built once; a step changes the shift only, on every
-/// level, and when the shift changes the preconditioner is rebuilt (the smoothers set up again,
-/// the coarse operator assembled again).
+/// step is one linear solve (`SNESKSPONLY`): CG with the Jacobian
+/// `shift M_phi + K_(phi d) + M_(phi k)` as a matrix-free shell operator ([`Transport`]),
+/// preconditioned by geometric multigrid over the levels of the mesh ([`configure_multigrid`]; a
+/// mesh without refinements is solved by its coarse solver, algebraic multigrid, alone). The
+/// operators are built once; a step changes the shift only, on every level, and when the shift
+/// changes the preconditioner is rebuilt (the smoothers set up again, the coarse operator
+/// assembled again).
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
@@ -104,36 +118,33 @@ pub struct Problem {
 
 impl Problem {
     /// The problem of the field `field` on the finest level of `mesh`, at t = 0 with the uniform
-    /// initial value `field.initial` and the uniform source `field.source`, stepped as `time`
-    /// says (its time step and adaptivity), and with the PETSc options `petsc_options` (for
-    /// example `-ksp_rtol 1e-8`), which override the defaults of the problem and give way to
-    /// options under the prefix already in the database (see [`Problem`]). Collective.
+    /// initial value `field.initial` and the source `field.source`, with its coefficients from
+    /// the maps of `inputs`, stepped as `time` says (its time step and adaptivity), and with the
+    /// PETSc options `petsc_options` (for example `-ksp_rtol 1e-8`), which override the
+    /// defaults of the problem and give way to options under the prefix already in the database
+    /// (see [`Problem`]). Collective.
     ///
     /// Errors: [`PdeError::Unsupported`] if the field id cannot be an options prefix (it starts
-    /// with an ASCII letter and has ASCII letters, digits and `_` only), or a flux is on a tag
-    /// which is not of boundary edges; [`PdeError::Mesh`] for a tag the mesh does not have;
-    /// [`PdeError::Petsc`] if a problem of the same field id is alive, or PETSc rejects the
-    /// options.
+    /// with an ASCII letter and has ASCII letters, digits and `_` only), a flux is on a tag
+    /// which is not of boundary edges, or the field has advection (not supported yet);
+    /// [`PdeError::Mesh`] for a tag the mesh does not have; [`PdeError::Map`] (on every
+    /// process) if a coefficient table cannot be evaluated at a quadrature point of a level,
+    /// naming the field and the coefficient; [`PdeError::Petsc`] if a problem of the same field
+    /// id is alive, or PETSc rejects the options.
     pub fn new(
         mesh: &Mesh,
         field: &FieldSpec,
         time: &TimeSpec,
         ceed: &Ceed,
         petsc_options: &str,
+        inputs: &Inputs,
     ) -> Result<Problem> {
         let prefix = options_prefix(&field.id)?;
-        // Replaced by the coefficient fields of milestone 2 (Task 3).
-        let constant = |c: &Coefficient| match c {
-            Coefficient::Constant(x) => Ok(*x),
-            Coefficient::Table(_) => Err(PdeError::Unsupported("coefficient tables".into())),
-        };
-        let (d, k, f) = (
-            constant(&field.diffusion)?,
-            constant(&field.decay)?,
-            constant(&field.source)?,
-        );
-        if constant(&field.porosity)? != 1.0 || field.advection {
-            return Err(PdeError::Unsupported("porosity and advection".into()));
+        if field.advection {
+            return Err(PdeError::Unsupported(format!(
+                "advection of field '{}'",
+                field.id
+            )));
         }
         let options = OptionsScope::new(
             &prefix,
@@ -170,32 +181,42 @@ impl Problem {
             .clone()
             .set_field_names(0, &field.id, &[CONCENTRATION_UNIT])?;
 
-        let mut source = SourceField::new(&disc)?;
-        source.values_mut().fill(f);
         let load = if fluxes.is_empty() {
             None
         } else {
             let fluxes: Vec<(&str, f64)> = fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
             Some(disc.boundary_load(&fluxes)?)
         };
-        let jacobian = Rc::new(RefCell::new(DiffusionReaction::new(&disc, d, k, 0.0)?));
+        // The coefficients of the finest level first: a map error names a point of the level
+        // of the solution, where there is one.
+        let fine = Coefficients::new(&disc, field, inputs.maps, true)?;
+        let data = Rc::new(fine.point_data(&disc));
+        let jacobian = Rc::new(RefCell::new(Transport::new(
+            &disc,
+            Rc::clone(&data),
+            Terms::Jacobian,
+        )?));
         let mut shell = disc.shell_matrix(SharedOperator(Rc::clone(&jacobian)))?;
         shell.set_spd()?;
         // The operators of the coarser levels, then the Jacobian on the finest.
         let level_operators = levels[..levels.len() - 1]
             .iter()
             .map(|level| {
-                let op = DiffusionReaction::new(level, d, k, 0.0)?;
+                let coefficients = Coefficients::new(level, field, inputs.maps, false)?;
+                let data = Rc::new(coefficients.point_data(level));
+                let op = Transport::new(level, data, Terms::Jacobian)?;
                 Ok(SharedOperator(Rc::new(RefCell::new(op))))
             })
             .chain(std::iter::once(Ok(SharedOperator(Rc::clone(&jacobian)))))
             .collect::<Result<Vec<_>>>()?;
         let equation = Equation {
-            operator: DiffusionReaction::new(&disc, d, k, 0.0)?,
-            mass: DiffusionReaction::new(&disc, 0.0, 0.0, 1.0)?,
+            steady: Transport::new(&disc, Rc::clone(&data), Terms::Steady)?,
+            mass: Transport::new(&disc, data, Terms::Mass)?,
             jacobian,
             multigrid: None,
-            source,
+            source: SourceField::new(&disc)?,
+            f: fine.source,
+            porosity: fine.porosity,
             load,
             u_local: local_with_dirichlet(&disc, &dirichlet)?,
             work: disc.global_vector()?,
@@ -250,10 +271,10 @@ impl Problem {
     }
 
     /// The source `f` (mM/s) at the quadrature points of the local cells, in the layout of
-    /// [`Discretization::quadrature_points`], for writing: the steps use the values it holds.
-    /// Initially the uniform `FieldSpec::source`.
+    /// [`Discretization::quadrature_points`], for writing: the steps use the values it holds,
+    /// integrated with the porosity (`int phi f v`). Initially the values of `FieldSpec::source`.
     pub fn source_mut(&mut self) -> &mut [f64] {
-        self.ts.context_mut().source.values_mut()
+        &mut self.ts.context_mut().f
     }
 
     /// Steps to the time `t` (in s), the last steps shortened to end there (`TSAdapt` may split
@@ -445,20 +466,77 @@ fn local_with_dirichlet(disc: &Discretization, dirichlet: &[(String, f64)]) -> R
     Ok(local)
 }
 
+/// The coefficients of a field at the quadrature points of a discretization (see [`Problem`]).
+struct Coefficients {
+    porosity: Vec<f64>,
+    diffusion: Vec<f64>,
+    decay: Vec<f64>,
+    /// Of the finest level only (empty on the others).
+    source: Vec<f64>,
+}
+
+impl Coefficients {
+    /// The coefficients of `field` on `disc` from `maps`, with the source if `source`.
+    /// Collective.
+    ///
+    /// Errors (on every process): [`PdeError::Map`], naming the field and the coefficient.
+    fn new(disc: &Discretization, field: &FieldSpec, maps: &Maps, source: bool) -> Result<Self> {
+        let values = |name: &str, c: &Coefficient| {
+            coefficient_values(disc, c, maps).map_err(|e| match e {
+                PdeError::Map { message } => PdeError::Map {
+                    message: format!("field '{}', {name}: {message}", field.id),
+                },
+                e => e,
+            })
+        };
+        Ok(Coefficients {
+            porosity: values("porosity", &field.porosity)?,
+            diffusion: values("diffusion", &field.diffusion)?,
+            decay: values("decay", &field.decay)?,
+            source: if source {
+                values("source", &field.source)?
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    /// The data of the operator: mass `phi`, reaction `phi k` and diffusion `phi d I`.
+    fn point_data(&self, disc: &Discretization) -> PointData {
+        let scaled = |c: &[f64]| -> Vec<f64> {
+            c.iter()
+                .zip(&self.porosity)
+                .map(|(c, phi)| phi * c)
+                .collect()
+        };
+        PointData::isotropic(
+            disc,
+            &self.porosity,
+            &scaled(&self.decay),
+            &scaled(&self.diffusion),
+        )
+    }
+}
+
 /// The equation of a [`Problem`] for its `TS`:
-/// `F(u, u_t) = M u_t + (d K + k M) u - int f v - int_Gamma q v`.
+/// `F(u, u_t) = M_phi u_t + (K_(phi d) + M_(phi k)) u - int phi f v - int_Gamma q v`.
 #[derive(Debug)]
 struct Equation {
     disc: Discretization,
-    /// `d K + k M`.
-    operator: DiffusionReaction,
-    /// `M`.
-    mass: DiffusionReaction,
-    /// The Jacobian `shift M + d K + k M`, shared with its shell matrix.
-    jacobian: Rc<RefCell<DiffusionReaction>>,
+    /// `K_(phi d) + M_(phi k)`.
+    steady: Transport,
+    /// `M_phi`.
+    mass: Transport,
+    /// The Jacobian `shift M_phi + K_(phi d) + M_(phi k)`, shared with its shell matrix.
+    jacobian: Rc<RefCell<Transport>>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
     multigrid: Option<Multigrid>,
+    /// `phi f` at the points, integrated.
     source: SourceField,
+    /// The source `f` at the points (see [`Problem::source_mut`]).
+    f: Vec<f64>,
+    /// The porosity `phi` at the points.
+    porosity: Vec<f64>,
     /// The load of the boundary fluxes, if any.
     load: Option<Vector>,
     /// The solution with its Dirichlet values, which stay.
@@ -469,10 +547,19 @@ struct Equation {
 impl Equation {
     fn residual(&mut self, u: &VecRef<'_>, u_t: &VecRef<'_>, f: &mut VecMut<'_>) -> Result<()> {
         self.disc.dm().global_to_local(u, &mut self.u_local)?;
-        self.operator.apply_local(&self.u_local, f)?;
+        self.steady.apply_local(&self.u_local, f)?;
         // The essential dofs are constant: u_t holds the others.
         self.mass.mult_global(u_t, &mut self.work)?;
         f.axpy(1.0, &self.work)?;
+        for ((s, f), phi) in self
+            .source
+            .values_mut()
+            .iter_mut()
+            .zip(&self.f)
+            .zip(&self.porosity)
+        {
+            *s = phi * f;
+        }
         self.source.apply(&mut self.work)?;
         f.axpy(-1.0, &self.work)?;
         if let Some(load) = &self.load {
@@ -500,18 +587,16 @@ impl Implicit for Equation {
         _u_t: &VecRef<'_>,
         shift: f64,
     ) -> petsc::Result<bool> {
-        let (d, k, same) = {
+        let same = {
             let mut jacobian = self.jacobian.borrow_mut();
             // The operator applies the exact shift; the preconditioner follows changes beyond
             // rounding.
             let same = (shift - jacobian.shift).abs() <= SHIFT_TOLERANCE * shift.abs();
             jacobian.shift = shift;
-            (jacobian.d, jacobian.k, same)
+            same
         };
         if !same && let Some(multigrid) = &mut self.multigrid {
-            multigrid
-                .set_coefficients(d, k, shift)
-                .map_err(PdeError::into_petsc)?;
+            multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
         }
         Ok(!same)
     }

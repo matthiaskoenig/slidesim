@@ -302,11 +302,37 @@ fn partition_is_reproducible() {
     }
 }
 
+#[test]
+fn local_bounds_cover_the_local_cells() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = Mesh::load(&p, &scene("tissue_small.msh"), 1).unwrap();
+    let [lo, hi] = mesh.local_bounds().expect("cells on every process");
+    // Every vertex of every level of this process is inside, and the box is in the section
+    // (200 x 200 um).
+    for level in mesh.levels() {
+        for x in level.local_coordinates().unwrap().as_chunks::<2>().0 {
+            assert!((0..2).all(|i| lo[i] <= x[i] && x[i] <= hi[i]), "{x:?}");
+        }
+    }
+    assert!(
+        0.0 <= lo[0] && lo[0] < hi[0] && hi[0] <= 200.0,
+        "{lo:?} {hi:?}"
+    );
+    assert!(
+        0.0 <= lo[1] && lo[1] < hi[1] && hi[1] <= 200.0,
+        "{lo:?} {hi:?}"
+    );
+    if p.comm().size() == 1 {
+        assert_eq!([lo, hi], [[0.0, 0.0], [200.0, 200.0]]);
+    }
+}
+
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 10] = [
+const PARALLEL_TESTS: [&str; 11] = [
     "mpi_world_has_the_expected_size",
+    "local_bounds_cover_the_local_cells",
     "tissue_area",
     "refinement_quadruples_cells",
     "tags_are_the_physical_names",

@@ -8,7 +8,7 @@ use ceed::{Basis, CVector, Ceed, ElemRestriction, EvalMode, FieldVector, Operato
 use mesh::Mesh;
 use petsc::{AsVecMut, Dm, Fe, InsertMode, LocalOffsets, Matrix, ShellOperator, Vector, sys};
 
-use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE};
+use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{PdeError, Result};
 
 /// The P1 discretization of one level of a [`Mesh`], shared by the operators built on it.
@@ -41,6 +41,8 @@ pub(crate) struct Shared {
     pub(crate) q_data_restriction: ElemRestriction,
     /// One value per quadrature point, in the layout of [`Discretization`].
     pub(crate) point_restriction: ElemRestriction,
+    /// The point data of the transport operator ([`TRANSPORT_DATA_SIZE`] components per point).
+    pub(crate) p_data_restriction: ElemRestriction,
     /// For each entry of a local vector, its global index (negative for essential dofs).
     pub(crate) local_to_global: Vec<i64>,
     /// The sizes of global vectors: on this process, and in all.
@@ -54,6 +56,11 @@ pub(crate) struct Shared {
     nodes: Vec<[f64; 2]>,
     /// The essential tags and the local dofs they constrain, in the order given.
     essential: Vec<(String, Vec<usize>)>,
+    /// The area tags of the mesh (its tags of the dimension of the mesh), sorted by name: the
+    /// same on every process.
+    pub(crate) area_tags: Vec<String>,
+    /// For each local cell, the index in `area_tags` of its area tag, if any.
+    cell_tags: Vec<Option<u32>>,
 }
 
 /// The quadrature degree of degree `degree` elements: mass matrices are integrated exactly.
@@ -173,18 +180,21 @@ impl Discretization {
             .collect::<Result<Vec<_>>>()?;
 
         let offsets = dm.local_offsets(0)?;
+        let (area_tags, cell_tags) = area_tags(mesh, &dm, dim)?;
         let x_offsets = dm.coordinate_dm()?.local_offsets(0)?;
         let coordinates = dm.local_coordinates()?;
         let num_cells = offsets.num_cells;
         if offsets.local_size != local_size
+            || cell_tags.len() != num_cells
             || x_offsets.num_cells != num_cells
             || x_offsets.num_comp != dim
             || x_offsets.local_size != coordinates.len()
         {
             return Err(PdeError::Unsupported(format!(
-                "a cell restriction of {} cells for local vectors of length {local_size}, and of \
-                 {} cells with {} components for {} coordinates",
+                "a cell restriction of {} cells ({} cells in the mesh) for local vectors of length \
+                 {local_size}, and of {} cells with {} components for {} coordinates",
                 num_cells,
+                cell_tags.len(),
                 x_offsets.num_cells,
                 x_offsets.num_comp,
                 coordinates.len()
@@ -217,6 +227,7 @@ impl Discretization {
         };
         let q_data_restriction = per_point(GEOMETRY_2D_SIZE)?;
         let point_restriction = per_point(1)?;
+        let p_data_restriction = per_point(TRANSPORT_DATA_SIZE)?;
 
         // The geometry: w det(J) and J^-1 at every point.
         // SAFETY: the fields match what SetupGeometry2D reads and writes; no context.
@@ -294,6 +305,7 @@ impl Discretization {
                 q_data,
                 q_data_restriction,
                 point_restriction,
+                p_data_restriction,
                 local_to_global,
                 global_sizes,
                 local_size,
@@ -301,6 +313,8 @@ impl Discretization {
                 weights,
                 nodes,
                 essential,
+                area_tags,
+                cell_tags,
             }),
         })
     }
@@ -335,6 +349,27 @@ impl Discretization {
     /// determinant, so that `sum_q weights[q] f(x_q)` is the integral of `f` over the local cells.
     pub fn quadrature_weights(&self) -> &[f64] {
         &self.shared.weights
+    }
+
+    /// The number of quadrature points of each cell.
+    pub(crate) fn points_per_cell(&self) -> usize {
+        self.shared.basis.num_quadrature_points()
+    }
+
+    /// The name of the area tag of local cell `cell` (in the order of the local cells, see
+    /// [`Discretization`]): of the tags of the dimension of the mesh (2), the one which marks the
+    /// cell, the first by name if several do. `None` if no area tag marks it, or there is no such
+    /// local cell.
+    pub fn cell_area_tag(&self, cell: usize) -> Option<String> {
+        self.cell_area_tag_index(cell)
+            .map(|i| self.shared.area_tags[i].clone())
+    }
+
+    /// The index of the area tag of local cell `cell` in the area tags of the discretization,
+    /// which are the same on every process (see [`Discretization::cell_area_tag`]).
+    pub(crate) fn cell_area_tag_index(&self, cell: usize) -> Option<usize> {
+        let index = (*self.shared.cell_tags.get(cell)?)?;
+        Some(index as usize)
     }
 
     /// The coordinates of the nodes of the entries of local vectors: of the vertices, for P1.
@@ -475,6 +510,33 @@ impl Discretization {
         })?;
         Ok(())
     }
+}
+
+/// The area tags of `mesh` (of dimension `dim`, sorted by name), and for each local cell of `dm`
+/// (a level of `mesh`, with its labels) the index of its area tag among them: of several, the
+/// first.
+fn area_tags(mesh: &Mesh, dm: &Dm, dim: usize) -> Result<(Vec<String>, Vec<Option<u32>>)> {
+    let names: Vec<String> = mesh
+        .tags()
+        .iter()
+        .filter(|tag| usize::from(tag.dim) == dim)
+        .map(|tag| tag.name.clone())
+        .collect();
+    let cells = dm.height_stratum(0)?;
+    let mut tags = vec![None; cells.len()];
+    // The last written wins: the first by name.
+    for (index, name) in names.iter().enumerate().rev() {
+        let index = u32::try_from(index)
+            .map_err(|_| PdeError::Unsupported(format!("{} area tags", names.len())))?;
+        for value in dm.label_values(name)? {
+            for point in dm.stratum_points(name, value)? {
+                if cells.contains(&point) {
+                    tags[(point - cells.start) as usize] = Some(index);
+                }
+            }
+        }
+    }
+    Ok((names, tags))
 }
 
 /// The local dofs on the points the label `name` marks, and on their closure, sorted.

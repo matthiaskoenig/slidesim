@@ -11,14 +11,16 @@
 
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
+    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MapSpec, MeshFormat, MeshRef,
     SCENE_VERSION, Scene, TimeSpec, Units,
 };
+use maps::Maps;
 use mesh::{Mesh, MeshError};
-use pde::{DiffusionReaction, PdeError, Problem};
+use pde::{Inputs, PdeError, PointData, Problem, Terms, Transport};
 use petsc::{Petsc, Vector};
 
 const D: f64 = 0.01;
@@ -53,6 +55,12 @@ fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
         maps: Vec::new(),
     };
     Mesh::load(p, &scene, refinements).unwrap()
+}
+
+/// The inputs of a [`Problem`] of constant coefficients: no maps.
+fn no_maps() -> Inputs<'static> {
+    static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
+    Inputs { maps: &NONE }
 }
 
 fn ceed() -> Ceed {
@@ -121,8 +129,15 @@ fn spatial_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
         .iter()
         .map(|&refinements| {
             let mesh = unit_square(p, refinements);
-            let mut problem =
-                Problem::new(&mesh, &field(D, K), &fixed(200.0, 1.0), &ceed(), ACCURATE).unwrap();
+            let mut problem = Problem::new(
+                &mesh,
+                &field(D, K),
+                &fixed(200.0, 1.0),
+                &ceed(),
+                ACCURATE,
+                &no_maps(),
+            )
+            .unwrap();
             let points = problem.discretization().quadrature_points().to_vec();
             for (f, &x) in problem.source_mut().iter_mut().zip(&points) {
                 *f = LAMBDA * phi(x);
@@ -179,8 +194,15 @@ fn temporal_order_bdf2() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 3);
     let run = |dt: f64| {
-        let mut problem =
-            Problem::new(&mesh, &field(D, K), &fixed(T_END, dt), &ceed(), ACCURATE).unwrap();
+        let mut problem = Problem::new(
+            &mesh,
+            &field(D, K),
+            &fixed(T_END, dt),
+            &ceed(),
+            ACCURATE,
+            &no_maps(),
+        )
+        .unwrap();
         problem.set_initial_condition(phi).unwrap();
         problem.step_to(T_END).unwrap();
         assert_eq!(problem.time(), T_END);
@@ -191,8 +213,10 @@ fn temporal_order_bdf2() {
         (reference.discretization().clone(), solution(&reference))
     };
     // The L2 norm of differences of solutions on the same mesh: sqrt(e^T M e).
+    let n = disc.num_quadrature_points();
+    let data = PointData::isotropic(&disc, &vec![1.0; n], &vec![0.0; n], &vec![0.0; n]);
     let mass = disc
-        .shell_matrix(DiffusionReaction::new(&disc, 0.0, 1.0, 0.0).unwrap())
+        .shell_matrix(Transport::new(&disc, Rc::new(data), Terms::Mass).unwrap())
         .unwrap();
     let errors: Vec<f64> = [0.1, 0.05, 0.025]
         .into_iter()
@@ -218,8 +242,15 @@ fn mass_conserved_with_zero_flux() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 2);
     let field = natural_field(0.0, Vec::new());
-    let mut problem =
-        Problem::new(&mesh, &field, &fixed(10.0, 0.5), &ceed(), CONSERVATIVE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(10.0, 0.5),
+        &ceed(),
+        CONSERVATIVE,
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(bump).unwrap();
     let initial = problem.total_mass().unwrap();
     assert!((initial - 0.02 * PI).abs() < 1e-3, "{initial}");
@@ -244,8 +275,15 @@ fn flux_balances_mass() {
             condition: Condition::Flux { value: q },
         }],
     );
-    let mut problem =
-        Problem::new(&mesh, &field, &fixed(10.0, 0.5), &ceed(), CONSERVATIVE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(10.0, 0.5),
+        &ceed(),
+        CONSERVATIVE,
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(bump).unwrap();
     let initial = problem.total_mass().unwrap();
     for t in [2.5, 10.0] {
@@ -266,6 +304,7 @@ fn divergence_is_error() {
         &fixed(1e9, 1e9),
         &ceed(),
         "-ksp_max_it 1",
+        &no_maps(),
     )
     .unwrap();
     problem.set_initial_condition(phi).unwrap();
@@ -305,6 +344,7 @@ fn options_are_scoped_to_the_problem() {
         &fixed(1.0, 0.1),
         &ceed(),
         "-ksp_max_it 7",
+        &no_maps(),
     )
     .unwrap();
     // Under the prefix of the field ("u_"), and nowhere else.
@@ -316,13 +356,29 @@ fn options_are_scoped_to_the_problem() {
     assert_eq!(p.option("-ksp_max_it").unwrap(), None);
     assert_eq!(p.option("-ksp_error_if_not_converged").unwrap(), None);
     // One problem per prefix at a time.
-    let e = Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field(D, K),
+        &fixed(1.0, 0.1),
+        &ceed(),
+        "",
+        &no_maps(),
+    )
+    .unwrap_err();
     assert!(e.to_string().contains("u_"), "{e}");
     // Dropping the problem removes its options.
     drop(problem);
     assert_eq!(p.option("-u_ksp_max_it").unwrap(), None);
     assert_eq!(p.option("-u_ksp_error_if_not_converged").unwrap(), None);
-    Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), "").unwrap();
+    Problem::new(
+        &mesh,
+        &field(D, K),
+        &fixed(1.0, 0.1),
+        &ceed(),
+        "",
+        &no_maps(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -336,6 +392,7 @@ fn user_options_override_the_defaults() {
         &fixed(1e9, 1e9),
         &ceed(),
         "-ksp_max_it 1 -ksp_error_if_not_converged false",
+        &no_maps(),
     )
     .unwrap();
     assert_eq!(
@@ -361,6 +418,7 @@ fn command_line_options_override_the_defaults_and_the_caller() {
             &fixed(0.1, 0.1),
             &ceed(),
             "-ksp_rtol 1e-12",
+            &no_maps(),
         )
         .unwrap();
         assert_eq!(p.option("-u_ksp_rtol").unwrap().as_deref(), Some(rtol));
@@ -385,8 +443,15 @@ fn command_line_options_override_the_defaults_and_the_caller() {
 fn steps_end_at_the_requested_times() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 2);
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), ACCURATE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &fixed(1.0, 0.1),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     for t in [0.15, 0.3, 0.3, 1.0] {
         problem.step_to(t).unwrap();
@@ -405,8 +470,15 @@ fn steps_end_at_the_requested_times() {
 fn step_to_a_time_which_is_not_finite_is_error() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 1);
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), ACCURATE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &fixed(1.0, 0.1),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     problem.step_to(0.1).unwrap();
     for t in [f64::INFINITY, f64::NAN, f64::NEG_INFINITY] {
@@ -426,8 +498,15 @@ fn step_to_a_time_which_is_not_finite_is_error() {
 fn fixed_steps_keep_their_size_after_requested_times() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 1);
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), ACCURATE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &fixed(1.0, 0.1),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     // 0.1, then 0.05 to end at 0.15.
     problem.step_to(0.15).unwrap();
@@ -449,7 +528,8 @@ fn adaptive_steps_keep_the_choice_of_the_adaptor() {
         adaptive: true,
         ..fixed(2.0, 0.01)
     };
-    let mut problem = Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE).unwrap();
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
     problem.set_initial_condition(phi).unwrap();
     problem.step_to(0.5).unwrap();
     // The adaptor grew the step from 0.01; the next step_to starts with its choice.
@@ -468,7 +548,8 @@ fn adaptive_steps_reach_the_requested_times() {
         adaptive: true,
         ..fixed(2.0, 0.01)
     };
-    let mut problem = Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE).unwrap();
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
     problem.set_initial_condition(phi).unwrap();
     for t in [0.5, 2.0] {
         problem.step_to(t).unwrap();
@@ -491,7 +572,15 @@ fn uniform_initial_and_source_and_dirichlet_values() {
     for b in &mut field.boundaries {
         b.condition = Condition::Dirichlet { value: 2.0 };
     }
-    let mut problem = Problem::new(&mesh, &field, &fixed(1.0, 0.25), &ceed(), ACCURATE).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.25),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
     assert!(problem.source_mut().iter().all(|&f| f == 2.0 * K));
     assert!((problem.total_mass().unwrap() - 2.0).abs() < 1e-12);
     problem.step_to(1.0).unwrap();
@@ -515,7 +604,15 @@ fn local_solution_has_the_dirichlet_values() {
         }],
     );
     field.initial = 1.0;
-    let problem = Problem::new(&mesh, &field, &fixed(1.0, 0.25), &ceed(), ACCURATE).unwrap();
+    let problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.25),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
     let local = problem.local_solution().unwrap();
     // Named for viewers: the point data of a VTK viewer is `u.mM`.
     assert_eq!(local.name().unwrap(), "");
@@ -550,7 +647,7 @@ fn unknown_boundary_tag_is_error() {
                 condition,
             }],
         );
-        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
+        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
         assert!(
             matches!(&e, PdeError::Mesh(MeshError::UnknownTag { name, .. }) if name == "nowhere"),
             "{e}"
@@ -569,7 +666,7 @@ fn flux_on_a_region_is_error() {
             condition: Condition::Flux { value: 1.0 },
         }],
     );
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
+    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
     assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
     assert!(e.to_string().contains("domain"), "{e}");
 }
@@ -583,39 +680,180 @@ fn field_id_must_be_an_options_prefix() {
             id: id.to_string(),
             ..natural_field(0.0, Vec::new())
         };
-        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
+        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
         assert!(matches!(e, PdeError::Unsupported(_)), "{id:?}: {e}");
     }
 }
 
-/// Coefficient tables, porosity and advection are not supported yet (milestone 2, Task 3).
+/// Advection is not supported yet (milestone 2, Task 5).
 #[test]
-fn coefficient_tables_are_unsupported() {
+fn advection_is_unsupported() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 0);
-    let table = Coefficient::Table(contracts::Table {
-        map: "m".to_string(),
-        points: vec![[0.0, 1.0], [1.0, 2.0]],
-    });
-    let mut fields = vec![natural_field(0.0, Vec::new()); 3];
-    fields[0].diffusion = table;
-    fields[1].porosity = Coefficient::Constant(0.5);
-    fields[2].advection = true;
-    for field in &fields {
-        let e = Problem::new(&mesh, field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
-        assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
+    let field = FieldSpec {
+        advection: true,
+        ..natural_field(0.0, Vec::new())
+    };
+    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
+    assert!(e.to_string().contains("advection"), "{e}");
+}
+
+#[test]
+fn table_of_a_missing_map_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 0);
+    let field = FieldSpec {
+        porosity: table("nowhere", [0.0, 0.5], [1.0, 1.0]),
+        ..natural_field(0.0, Vec::new())
+    };
+    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+    let PdeError::Map { message } = &e else {
+        panic!("expected a map error, got {e}");
+    };
+    // The map, the field and its coefficient.
+    for name in ["'nowhere'", "'u'", "porosity"] {
+        assert!(message.contains(name), "{name}: {message}");
     }
+}
+
+/// A table over the map `map` from `(v0, c0)` to `(v1, c1)`.
+fn table(map: &str, [v0, c0]: [f64; 2], [v1, c1]: [f64; 2]) -> Coefficient {
+    Coefficient::Table(contracts::Table {
+        map: map.to_string(),
+        points: vec![[v0, c0], [v1, c1]],
+    })
+}
+
+/// A directory of this process for the maps of a test, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(test: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("slidesim-pde-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// The map `id` of `f` over the unit square and a margin: pixels of 0.01 um with centres
+    /// from -0.05 to 1.05 in x and y.
+    fn map(&self, id: &str, f: impl Fn([f64; 2]) -> f64) -> MapSpec {
+        const PIXELS: usize = 111;
+        let centre = |i: usize| -0.05 + i as f64 * 0.01;
+        let values: Vec<f64> = (0..PIXELS)
+            .flat_map(|r| (0..PIXELS).map(move |c| (r, c)))
+            .map(|(r, c)| f([centre(c), centre(r)]))
+            .collect();
+        let path = self.0.join(format!("{id}.zarr"));
+        let mut spec = maps::write_test_map(&path, &values, PIXELS, PIXELS, 0.01, [-0.05, -0.05]);
+        spec.id = id.to_string();
+        spec
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The diffusion coefficient of [`spatial_order_variable_coefficients`]: `0.01 (1 + x)`.
+fn variable_d([x, _]: [f64; 2]) -> f64 {
+    0.01 * (1.0 + x)
+}
+
+/// The porosity of [`spatial_order_variable_coefficients`]: `0.5 + 0.25 y`.
+fn variable_phi([_, y]: [f64; 2]) -> f64 {
+    0.5 + 0.25 * y
+}
+
+/// The source `f` of `phi u_t - div(phi d grad u) + phi k u = phi f` for `u = phi(x) e^-t`
+/// ([`phi`], the eigenfunction of the convergence tests), with [`variable_d`],
+/// [`variable_phi`] and `k = K`, at `x` and `t = 0`: it scales with `e^-t`.
+///
+/// `div(phi d grad u) = phi d lap u + grad(phi d) . grad u`, `lap u = -2 pi^2 u`, and
+/// `grad(phi d) = (0.01 phi, 0.25 d)`, so
+/// `f = (K - 1 + 2 pi^2 d) u - 0.01 du/dx - (0.25 d / phi) du/dy`.
+fn variable_source(x: [f64; 2]) -> f64 {
+    let (d, porosity) = (variable_d(x), variable_phi(x));
+    let [px, py] = [PI * x[0], PI * x[1]];
+    let du_dx = PI * px.cos() * py.sin();
+    let du_dy = PI * px.sin() * py.cos();
+    (K - 1.0 + 2.0 * PI * PI * d) * phi(x) - 0.01 * du_dx - 0.25 * d / porosity * du_dy
+}
+
+/// The time step of [`spatial_order_variable_coefficients`]: a power of 2, so that the times
+/// `n DT` are exact; the temporal error at it is far below the spatial errors.
+const DT: f64 = 1.0 / 128.0;
+
+/// The L2 errors at t = 1 of `u = phi(x) e^-t` with the variable coefficients of
+/// [`variable_source`] on the refinements `levels` of the unit square, the coefficients from
+/// maps of x and y. The source is set before each step to its value at the end of the step,
+/// where the BDF2 residual takes it.
+fn variable_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
+    let scratch = Scratch::new("spatial_order_variable_coefficients");
+    let specs = [
+        scratch.map("position_x", |[x, _]| x),
+        scratch.map("position_y", |[_, y]| y),
+    ];
+    let field = FieldSpec {
+        diffusion: table("position_x", [0.0, 0.01], [1.0, 0.02]),
+        porosity: table("position_y", [0.0, 0.5], [1.0, 0.75]),
+        ..field(D, K)
+    };
+    levels
+        .iter()
+        .map(|&refinements| {
+            let mesh = unit_square(p, refinements);
+            let bounds = mesh.local_bounds().expect("cells on every process");
+            let maps = Maps::read(&specs, &["position_x", "position_y"], bounds).unwrap();
+            let inputs = Inputs { maps: &maps };
+            let mut problem =
+                Problem::new(&mesh, &field, &fixed(1.0, DT), &ceed(), ACCURATE, &inputs).unwrap();
+            problem.set_initial_condition(phi).unwrap();
+            let points = problem.discretization().quadrature_points().to_vec();
+            let source: Vec<f64> = points.iter().map(|&x| variable_source(x)).collect();
+            let steps = (1.0 / DT) as u32;
+            for n in 1..=steps {
+                let t = f64::from(n) * DT;
+                for (f, g) in problem.source_mut().iter_mut().zip(&source) {
+                    *f = g * (-t).exp();
+                }
+                problem.step_to(t).unwrap();
+            }
+            assert_eq!(problem.time(), 1.0);
+            assert_eq!(problem.steps().unwrap(), steps as usize);
+            problem.l2_error(|x, t| phi(x) * (-t).exp()).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn spatial_order_variable_coefficients() {
+    let p = Petsc::init(&[]).unwrap();
+    assert_orders(&variable_errors(&p, &[2, 3, 4]), 1.9..=2.1);
+}
+
+/// [`spatial_order_variable_coefficients`] on the two coarser meshes only, cheap enough to run
+/// on several processes: the maps read for the cells of each process.
+#[test]
+fn spatial_order_variable_coefficients_on_refinements_2_and_3() {
+    let p = Petsc::init(&[]).unwrap();
+    assert_orders(&variable_errors(&p, &[2, 3]), 1.9..=2.1);
 }
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 8] = [
+const PARALLEL_TESTS: [&str; 10] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",
     "fixed_steps_keep_their_size_after_requested_times",
     "spatial_order_p1_on_refinements_2_and_3",
+    "spatial_order_variable_coefficients_on_refinements_2_and_3",
+    "table_of_a_missing_map_is_error",
     "uniform_initial_and_source_and_dirichlet_values",
     "local_solution_has_the_dirichlet_values",
 ];

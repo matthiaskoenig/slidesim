@@ -19,10 +19,11 @@ use contracts::{
     BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
     SCENE_VERSION, Scene, TimeSpec, Units,
 };
+use maps::Maps;
 use mesh::Mesh;
 use pde::{
-    DiffusionReaction, Discretization, Multigrid, PdeError, Problem, SharedOperator, SourceField,
-    configure_multigrid,
+    Discretization, Inputs, Multigrid, PdeError, PointData, Problem, SharedOperator, SourceField,
+    Terms, Transport, configure_multigrid,
 };
 use petsc::{Ksp, Matrix, Petsc, Vector};
 
@@ -121,12 +122,16 @@ impl Steady {
     }
 }
 
-/// The operators `shift M + D K + K M` on `discs`.
+/// The operators `shift M + D K + K M` on `discs`: the Jacobians of [`Transport`] with mass 1,
+/// reaction `K` and diffusion `D` at every point.
 fn operators(discs: &[Discretization], shift: f64) -> Vec<SharedOperator> {
     discs
         .iter()
         .map(|disc| {
-            let op = DiffusionReaction::new(disc, D, K, shift).unwrap();
+            let n = disc.num_quadrature_points();
+            let data = PointData::isotropic(disc, &vec![1.0; n], &vec![K; n], &vec![D; n]);
+            let mut op = Transport::new(disc, Rc::new(data), Terms::Jacobian).unwrap();
+            op.shift = shift;
             SharedOperator(Rc::new(RefCell::new(op)))
         })
         .collect()
@@ -184,8 +189,8 @@ fn refreshed_preconditioner_matches_a_new_one() {
     let p = Petsc::init(&["-mg_coarse_pc_gamg_reuse_interpolation", "false"]).unwrap();
     let mut steady = Steady::new(&p, 2, 0.0);
     steady.solve();
-    // The coefficients change on every level; the operator of the solver is marked changed.
-    steady.multigrid.set_coefficients(D, K, SHIFT).unwrap();
+    // The shift changes on every level; the operator of the solver is marked changed.
+    steady.multigrid.set_shift(SHIFT).unwrap();
     steady.a.mark_changed().unwrap();
     let mut fresh = Steady::new(&p, 2, SHIFT);
     let (refreshed_u, refreshed_iterations) = steady.solve();
@@ -238,6 +243,12 @@ fn levels_must_be_a_hierarchy() {
     assert!(e.to_string().contains("level 0"), "{e}");
 }
 
+/// The inputs of a [`Problem`] of constant coefficients: no maps.
+fn no_maps() -> Inputs<'static> {
+    static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
+    Inputs { maps: &NONE }
+}
+
 /// A field on `tissue_small` as in a study of oxygen: `d = D`, `k = K`, a fixed value on the
 /// vessel walls, no flux through the edge of the section.
 fn tissue_field() -> FieldSpec {
@@ -267,7 +278,8 @@ fn run(
 ) -> (Discretization, Vec<Vector>, usize) {
     let mesh = tissue_small(p, 1);
     let options = format!("-ksp_rtol 1e-12 {options}");
-    let mut problem = Problem::new(&mesh, &tissue_field(), time, &ceed(), &options).unwrap();
+    let mut problem =
+        Problem::new(&mesh, &tissue_field(), time, &ceed(), &options, &no_maps()).unwrap();
     let solutions = times
         .iter()
         .map(|&t| {
@@ -336,7 +348,7 @@ fn tissue_results(p: &Petsc) -> [f64; 2] {
         adaptive: false,
         outputs: Vec::new(),
     };
-    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "").unwrap();
+    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "", &no_maps()).unwrap();
     problem.step_to(2.0).unwrap();
     assert_eq!(problem.steps().unwrap(), 4);
     [

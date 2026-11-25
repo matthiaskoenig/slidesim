@@ -6,15 +6,20 @@
 //! (`w det J`, `J^-1`) stored per quadrature point. Essential (Dirichlet) boundaries are
 //! constraints of its section: global vectors leave their dofs out. Its operators work on
 //! PETSc vectors, with libCEED viewing the arrays of local vectors in place:
-//! - [`DiffusionReaction`]: `shift M + d K + k M` as a [`petsc::ShellOperator`], with its
-//!   diagonal and its assembled matrix;
+//! - [`Transport`]: mass, reaction and tensor diffusion with coefficients given at the quadrature
+//!   points ([`PointData`]), as a [`petsc::ShellOperator`], with its diagonal and its assembled
+//!   matrix;
 //! - [`SourceField`]: values at the quadrature points, integrated against the test functions.
+//!
+//! Coefficients of a study, numbers or tables over maps, become values at the quadrature points
+//! of a discretization through [`coefficient_values`].
 //!
 //! [`configure_multigrid`] makes a linear solver geometric multigrid over the levels of the mesh
 //! ([`Discretization::hierarchy`]), with the operator discretized again on every level.
 //!
 //! A [`Problem`] steps one diffusion-reaction field of a study in time (BDF2, PETSc `TS`) on the
-//! finest level, preconditioned by that multigrid.
+//! finest level, preconditioned by that multigrid, with the coefficients of the field (and its
+//! porosity) at the quadrature points of every level.
 //!
 //! The QFunctions are C headers in `qfunctions/` ([`QFUNCTION_DIR`]), compiled by `build.rs`
 //! for the CPU backends; backends which compile them at run time read them from there.
@@ -22,15 +27,17 @@
 //! Supported: 2D triangle meshes, degree 1. Every constructor is collective on the
 //! communicator of the mesh.
 
+mod coefficients;
 mod discretization;
 mod multigrid;
 mod operators;
 mod problem;
 
+pub use coefficients::{PointData, coefficient_values};
 pub use discretization::Discretization;
 pub use multigrid::{Multigrid, configure_multigrid};
-pub use operators::{DiffusionReaction, SharedOperator, SourceField};
-pub use problem::Problem;
+pub use operators::{SharedOperator, SourceField, Terms, Transport};
+pub use problem::{Inputs, Problem};
 
 /// The absolute path of the directory of the QFunction sources.
 pub const QFUNCTION_DIR: &str = env!("SLIDESIM_PDE_QFUNCTIONS");
@@ -54,6 +61,11 @@ pub enum PdeError {
     /// [`Discretization::hierarchy`], for [`configure_multigrid`].
     #[error("not a multigrid hierarchy: {0}")]
     NotHierarchy(String),
+    /// A coefficient which cannot be evaluated from its map at a quadrature point: outside the
+    /// raster, or on a no-value pixel. The message names the map, the point and the area tag
+    /// of its cell, and counts the points which fail. The same error on every process.
+    #[error("{message}")]
+    Map { message: String },
     /// The time integration failed: a solver diverged or a step failed. `reason` is the PETSc
     /// converged reason of the innermost solver which failed (for example `KSP DIVERGED_ITS`),
     /// `t` the time reached (in s), at the last step which succeeded.
@@ -117,7 +129,7 @@ mod qfunctions {
         slidesim_pde_QuadraturePoints2D,
         slidesim_pde_Mass,
         slidesim_pde_Values,
-        slidesim_pde_DiffusionReaction2D
+        slidesim_pde_Transport2D
     );
 
     /// The source of a QFunction, `/abs/dir/file.h:name`.
@@ -131,8 +143,12 @@ mod qfunctions {
     pub const QUADRATURE_POINTS_2D: &str = source!("geometry.h:QuadraturePoints2D");
     pub const MASS: &str = source!("mass.h:Mass");
     pub const VALUES: &str = source!("mass.h:Values");
-    pub const DIFFUSION_REACTION_2D: &str = source!("diffusion.h:DiffusionReaction2D");
+    pub const TRANSPORT_2D: &str = source!("transport.h:Transport2D");
 
     /// The number of components of the quadrature data (`GEOMETRY_2D_SIZE` of `geometry.h`).
     pub const GEOMETRY_2D_SIZE: usize = 5;
+
+    /// The number of components of the point data of `Transport2D` (`TRANSPORT_DATA_SIZE` of
+    /// `transport.h`).
+    pub const TRANSPORT_DATA_SIZE: usize = 8;
 }

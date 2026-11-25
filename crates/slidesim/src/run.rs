@@ -20,8 +20,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use ceed::Ceed;
 use contracts::{Scene, Study};
+use maps::Maps;
 use mesh::Mesh;
-use pde::Problem;
+use pde::{Inputs, Problem};
 use petsc::{Petsc, Viewer};
 use serde::Serialize;
 
@@ -46,7 +47,7 @@ struct FieldSummary {
 /// the module documentation). Collective.
 pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     let study = Study::load(study_path).context("cannot load the study")?;
-    // Replaced by the perfusion of milestone 2 (Task 3).
+    // Replaced by the perfusion of milestone 2 (Task 6).
     anyhow::ensure!(study.perfusion.is_none(), "perfusion is not supported yet");
     let scene = Scene::load(&study.scene).context("cannot load the scene")?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
@@ -60,6 +61,10 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     }
     comm.barrier()?;
 
+    // The maps of the study are read in milestone 2, Task 6: until then a coefficient table is
+    // an error of the problem (its map is unknown).
+    let maps = Maps::default();
+    let inputs = Inputs { maps: &maps };
     let mut problems = study
         .fields
         .iter()
@@ -70,6 +75,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
                 &study.time,
                 &ceed,
                 &study.solver.petsc_options,
+                &inputs,
             )
             .with_context(|| format!("field '{}'", field.id))
         })
