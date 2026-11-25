@@ -271,6 +271,23 @@ fn divergence_is_error() {
     assert!(reason.contains("DIVERGED_ITS"), "{reason}");
     assert_eq!(*t, 0.0);
     assert!(e.to_string().contains("DIVERGED_ITS"), "{e}");
+    // The solvers may be left in any state: the problem does not step again.
+    for e in [
+        problem.step_to(1e9).unwrap_err(),
+        problem.step_to(2e9).unwrap_err(),
+        problem.set_initial_condition(phi).unwrap_err(),
+    ] {
+        let PdeError::Poisoned { failure, t } = &e else {
+            panic!("expected Poisoned, got {e}");
+        };
+        assert!(failure.contains("DIVERGED_ITS"), "{failure}");
+        assert_eq!(*t, 0.0);
+    }
+    // What it reached stays readable.
+    assert_eq!(problem.time(), 0.0);
+    let mass = problem.total_mass().unwrap();
+    assert!((mass - 4.0 / (PI * PI)).abs() < 1e-2, "{mass}");
+    assert!(problem.l2_error(|x, _| phi(x)).unwrap() < 1e-1);
 }
 
 #[test]
@@ -345,6 +362,44 @@ fn steps_end_at_the_requested_times() {
     assert!(error < 2e-3, "{error}");
     let e = problem.step_to(0.5).unwrap_err();
     assert!(e.to_string().contains("0.5"), "{e}");
+}
+
+#[test]
+fn fixed_steps_keep_their_size_after_requested_times() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), ACCURATE).unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    // 0.1, then 0.05 to end at 0.15.
+    problem.step_to(0.15).unwrap();
+    assert_eq!(problem.steps().unwrap(), 2);
+    assert_eq!(problem.time_step(), 0.1);
+    // Steps of 0.1 to 0.85, then the remaining 0.15 in two (TSAdapt's match of the end time):
+    // 7 + 2 steps, where steps of 0.05 would take 17.
+    problem.step_to(1.0).unwrap();
+    assert_eq!(problem.steps().unwrap(), 11);
+    assert_eq!(problem.time(), 1.0);
+    assert_eq!(problem.time_step(), 0.1);
+}
+
+#[test]
+fn adaptive_steps_keep_the_choice_of_the_adaptor() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let time = TimeSpec {
+        adaptive: true,
+        ..fixed(2.0, 0.01)
+    };
+    let mut problem = Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE).unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem.step_to(0.5).unwrap();
+    // The adaptor grew the step from 0.01; the next step_to starts with its choice.
+    let h = problem.time_step();
+    assert!(h > 0.02, "{h}");
+    let steps = problem.steps().unwrap();
+    problem.step_to(0.5 + h).unwrap();
+    assert_eq!(problem.steps().unwrap(), steps + 1);
 }
 
 #[test]
@@ -441,11 +496,12 @@ fn field_id_must_be_an_options_prefix() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 6] = [
+const PARALLEL_TESTS: [&str; 7] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",
+    "fixed_steps_keep_their_size_after_requested_times",
     "spatial_order_p1_on_refinements_2_and_3",
     "uniform_initial_and_source_and_dirichlet_values",
 ];

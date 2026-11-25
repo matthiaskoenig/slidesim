@@ -59,6 +59,11 @@ pub struct Problem {
     u: Vector,
     /// The time of `u`, in s.
     t: f64,
+    /// The size of the next step: fixed, or the latest choice of the adaptor.
+    dt: f64,
+    adaptive: bool,
+    /// Why the time integration failed, if it did: then the problem does not step again.
+    failure: Option<String>,
     disc: Discretization,
     dirichlet: Vec<(String, f64)>,
     values: PointValues,
@@ -154,6 +159,9 @@ impl Problem {
             ts,
             u,
             t: 0.0,
+            dt: time.dt,
+            adaptive: time.adaptive,
+            failure: None,
             values: PointValues::new(&disc)?,
             disc,
             dirichlet,
@@ -165,7 +173,10 @@ impl Problem {
     /// condition instead of the uniform `FieldSpec::initial`. The Dirichlet values stay on their
     /// boundaries. Set later, it is the solution at the current time, from which the time
     /// integration starts afresh. Collective.
+    ///
+    /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
     pub fn set_initial_condition(&mut self, f: impl Fn([f64; 2]) -> f64) -> Result<()> {
+        self.ensure_usable()?;
         self.disc.interpolate(f, &mut self.u)?;
         self.ts.restart_step()?;
         Ok(())
@@ -178,21 +189,56 @@ impl Problem {
         self.ts.context_mut().source.values_mut()
     }
 
-    /// Steps to the time `t` (in s), the last step shortened to end there. Collective.
+    /// Steps to the time `t` (in s), the last steps shortened to end there (`TSAdapt` may split
+    /// the remainder in two, rather than take a tiny last step). Fixed steps go on with
+    /// `TimeSpec::dt` after it; adaptive steps with the adaptor's choice. Collective.
     ///
     /// Errors: [`PdeError::InvalidTime`] if `t` is before the current time;
     /// [`PdeError::Diverged`] if a solver does not converge or a step fails (then
-    /// [`Problem::time`] is the time of the last step which succeeded).
+    /// [`Problem::time`] is the time of the last step which succeeded), and [`PdeError::Petsc`]
+    /// for other failures of PETSc. Either leaves the solvers in an unknown state: from then on
+    /// the problem is poisoned, and [`Problem::step_to`] and [`Problem::set_initial_condition`]
+    /// return [`PdeError::Poisoned`]; what it reached stays readable ([`Problem::time`],
+    /// [`Problem::solution`], [`Problem::l2_error`], [`Problem::total_mass`]).
     pub fn step_to(&mut self, t: f64) -> Result<()> {
+        self.ensure_usable()?;
         if t.is_nan() || t < self.t {
             return Err(PdeError::InvalidTime { t, time: self.t });
         }
         if t == self.t {
             return Ok(());
         }
+        let stepped = self.solve_to(t);
+        if let Err(e) = &stepped {
+            self.failure = Some(e.to_string());
+        }
+        stepped
+    }
+
+    /// [`PdeError::Poisoned`] if the time integration failed earlier.
+    fn ensure_usable(&self) -> Result<()> {
+        match &self.failure {
+            Some(failure) => Err(PdeError::Poisoned {
+                failure: failure.clone(),
+                t: self.t,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    fn solve_to(&mut self, t: f64) -> Result<()> {
         self.ts.set_max_time(t)?;
+        if !self.adaptive {
+            // TSAdapt `none` keeps the step it last took, which may have been shortened to end
+            // at the time before.
+            self.ts.set_time_step(self.dt)?;
+        }
         let solved = self.ts.solve(&mut self.u);
         self.t = self.ts.time()?;
+        if self.adaptive {
+            // Chosen after the last step, which ended at `t`: not shortened.
+            self.dt = self.ts.time_step()?;
+        }
         match solved {
             Err(e) if e.code == sys::PETSC_ERR_NOT_CONVERGED => Err(self.diverged(&e.message)?),
             Err(e) => Err(e.into()),
@@ -229,6 +275,17 @@ impl Problem {
     /// The time of the solution, in s.
     pub fn time(&self) -> f64 {
         self.t
+    }
+
+    /// The number of steps taken. Collective.
+    pub fn steps(&self) -> Result<usize> {
+        Ok(self.ts.step_number()?)
+    }
+
+    /// The size of the next step (in s), before it is shortened to end at a requested time: the
+    /// fixed `TimeSpec::dt`, or the latest choice of the adaptor.
+    pub fn time_step(&self) -> f64 {
+        self.dt
     }
 
     /// The solution: a global vector of [`Problem::discretization`], without the essential dofs.

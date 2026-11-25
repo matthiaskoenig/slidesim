@@ -42,10 +42,12 @@ impl ShellOperator for Diagonal {
     }
 }
 
-/// `u_t + lambda_i u_i = 0`, recording the shifts of its Jacobians.
+/// `u_t + lambda_i u_i = 0`, recording the shifts and times of its Jacobians (one per stage
+/// solve, at the end of the step).
 struct Decay {
     shift: Rc<Cell<f64>>,
     shifts: Rc<RefCell<Vec<f64>>>,
+    times: Vec<f64>,
     residuals: usize,
     /// Fail the residual from this evaluation on.
     fail_at: Option<usize>,
@@ -75,14 +77,9 @@ impl Implicit for Decay {
         })
     }
 
-    fn jacobian(
-        &mut self,
-        _t: f64,
-        _u: &VecRef<'_>,
-        _u_t: &VecRef<'_>,
-        shift: f64,
-    ) -> Result<bool> {
+    fn jacobian(&mut self, t: f64, _u: &VecRef<'_>, _u_t: &VecRef<'_>, shift: f64) -> Result<bool> {
         self.shifts.borrow_mut().push(shift);
+        self.times.push(t);
         let changed = self.shift.get() != shift;
         self.shift.set(shift);
         Ok(changed)
@@ -105,6 +102,7 @@ fn decay(p: &Petsc, dt: f64, fail_at: Option<usize>) -> (Ts<Decay>, Vector, Matr
     let equation = Decay {
         shift,
         shifts: Rc::default(),
+        times: Vec::new(),
         residuals: 0,
         fail_at,
     };
@@ -203,17 +201,71 @@ fn jacobian_sees_the_shifts_and_marks_changes() {
     assert!((ts.time().unwrap() - 0.6).abs() < 1e-15);
 }
 
+/// The sizes of the steps between the times `times` (each step's end), from `start`.
+fn step_sizes(start: f64, times: &[f64]) -> Vec<f64> {
+    std::iter::once(start)
+        .chain(times.iter().copied())
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .collect()
+}
+
+fn assert_steps(sizes: &[f64], expected: &[f64]) {
+    assert_eq!(sizes.len(), expected.len(), "{sizes:?}");
+    for (h, e) in sizes.iter().zip(expected) {
+        assert!((h - e).abs() < 1e-12, "{sizes:?} != {expected:?}");
+    }
+}
+
 #[test]
 fn solves_continue_from_the_time_reached() {
     let p = Petsc::init(&["-decay_ksp_rtol", "1e-14"]).unwrap();
     let (mut ts, mut u, _) = decay(&p, 0.1, None);
-    // Stops between steps, then goes on with the same steps.
-    for t in [0.25, 1.0] {
-        ts.set_max_time(t).unwrap();
-        ts.solve(&mut u).unwrap();
-        assert_eq!(ts.time().unwrap(), t);
-    }
+    // 0.1 (two halves: the start of BDF2), then the remaining 0.15 in two: TSAdapt matches the
+    // final time by splitting a remainder under two steps rather than taking a short last one.
+    ts.set_max_time(0.25).unwrap();
+    ts.solve(&mut u).unwrap();
+    assert_eq!(ts.time().unwrap(), 0.25);
+    assert_eq!(ts.step_number().unwrap(), 3);
+    let sizes = step_sizes(0.0, &ts.context().times);
+    assert_steps(&sizes, &[0.05, 0.05, 0.075, 0.075]);
+    // TSAdapt `none` keeps the shortened step for the next solve: the caller sets it back.
+    assert!((ts.time_step().unwrap() - 0.075).abs() < 1e-12);
+    ts.set_time_step(0.1).unwrap();
+    ts.context_mut().times.clear();
+    ts.set_max_time(1.0).unwrap();
+    ts.solve(&mut u).unwrap();
+    assert_eq!(ts.time().unwrap(), 1.0);
+    assert_eq!(ts.step_number().unwrap(), 11);
+    let sizes = step_sizes(0.25, &ts.context().times);
+    assert_steps(&sizes, &[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.075, 0.075]);
     assert!(error(&u, 1.0) < 1e-2, "{}", error(&u, 1.0));
+}
+
+#[test]
+fn adaptive_solves_continue_with_the_choice_of_the_adaptor() {
+    let p = Petsc::init(&["-decay_ksp_rtol", "1e-14"]).unwrap();
+    let (mut ts, mut u, _) = decay(&p, 0.01, None);
+    ts.set_adapt_type("basic").unwrap();
+    ts.set_max_time(0.5).unwrap();
+    ts.solve(&mut u).unwrap();
+    assert_eq!(ts.time().unwrap(), 0.5);
+    // The last step was shortened to end at 0.5; the step chosen after it was not.
+    let times = ts.context().times.clone();
+    let last = times[times.len() - 1] - times[times.len() - 2];
+    let next = ts.time_step().unwrap();
+    assert!(
+        next > 0.01 && next != last,
+        "next {next}, last {last}: {times:?}"
+    );
+    // The next solve starts with it.
+    ts.context_mut().times.clear();
+    ts.set_max_time(2.0).unwrap();
+    ts.solve(&mut u).unwrap();
+    assert_eq!(ts.time().unwrap(), 2.0);
+    let first = ts.context().times[0] - 0.5;
+    assert!((first - next).abs() < 1e-12, "{first} != {next}");
 }
 
 #[test]

@@ -53,6 +53,10 @@ pub enum PdeError {
     /// A time to step to which is before the current time (or not a number).
     #[error("cannot step to t = {t} s from t = {time} s")]
     InvalidTime { t: f64, time: f64 },
+    /// A [`Problem`] whose time integration failed earlier (`failure`, at the time `t` in s): its
+    /// solvers may be left in any state, so it does not step again.
+    #[error("the problem failed at t = {t} s and cannot step again: {failure}")]
+    Poisoned { failure: String, t: f64 },
     #[error(transparent)]
     Mesh(#[from] mesh::MeshError),
     #[error(transparent)]
