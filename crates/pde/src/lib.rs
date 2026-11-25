@@ -89,8 +89,9 @@ pub enum PdeError {
     /// A time to step to which is before the current time, or not finite.
     #[error("cannot step to t = {t} s from t = {time} s")]
     InvalidTime { t: f64, time: f64 },
-    /// A tag through which the flow enters the domain (net inflow, [`Flow::tag_flows`]), without
-    /// a dirichlet condition of a field with advection. The same error on every process.
+    /// A tag through which the flow enters the domain (net inflow above 1e-10 of the largest
+    /// net flow through a tag, [`Flow::tag_flows`]), without a dirichlet condition of a field
+    /// with advection. The same error on every process.
     #[error(
         "tag '{tag}' has inflow; field '{field}' with advection needs a dirichlet condition there"
     )]

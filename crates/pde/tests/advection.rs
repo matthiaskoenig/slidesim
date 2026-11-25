@@ -325,6 +325,44 @@ fn inflow_without_dirichlet_is_error() {
     Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap();
 }
 
+/// A tag whose net flow is rounding (here `top` and `bottom` of the flow along x, with the
+/// pressure fixed on all four sides) has no inflow, whatever the sign of its rounding: only
+/// `left` needs the dirichlet condition.
+#[test]
+fn rounding_flow_is_not_inflow() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let scratch = Scratch::new("rounding_flow_is_not_inflow");
+    let maps = direction_maps(&scratch, &mesh);
+    let boundaries: Vec<(&str, f64)> = SIDES.iter().map(|&side| (side, 0.0)).collect();
+    let pressure = |[x, _]: [f64; 2]| 1.0 - x;
+    let flow = Flow::solve_manufactured(
+        &mesh,
+        &perfusion([1.0, 1.0], &boundaries),
+        &maps,
+        &ceed(),
+        "",
+        &pressure,
+        &|_| 0.0,
+    )
+    .unwrap();
+    let flows = flow.tag_flows();
+    println!("{flows:?}");
+    let rounding = flows
+        .iter()
+        .filter(|(tag, _)| tag == "top" || tag == "bottom")
+        .map(|&(_, q)| q);
+    // The test means something only if one of them is positive.
+    assert!(rounding.clone().any(|q| q > 0.0), "{flows:?}");
+    assert!(rounding.clone().all(|q| q.abs() < 1e-10), "{flows:?}");
+    let inputs = Inputs {
+        maps: &maps,
+        flow: Some(&flow),
+    };
+    let field = field(D, 0.0, 1.0, vec![dirichlet("left", 1.0)]);
+    Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap();
+}
+
 #[test]
 fn advection_without_flow_is_unsupported() {
     let p = Petsc::init(&[]).unwrap();

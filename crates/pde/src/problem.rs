@@ -41,6 +41,10 @@ const CONCENTRATION_UNIT: &str = "mM";
 /// shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
 
+/// The net flow through a tag, relative to the largest net flow through a tag, above which the
+/// tag has inflow ([`PdeError::Inflow`]).
+const INFLOW_THRESHOLD: f64 = 1e-10;
+
 /// What a [`Problem`] takes besides its field: the maps its coefficient tables refer to, and
 /// the flow which carries a field with advection.
 #[derive(Debug, Clone, Copy)]
@@ -218,10 +222,16 @@ impl Problem {
             }
         }
         // Before the first step: the flow enters only where the field is fixed. The flows are the
-        // same on every process.
+        // same on every process. A tag whose flow is below `INFLOW_THRESHOLD` of the largest one
+        // counts as without flow: its sign is rounding, which may differ between process
+        // counts.
         if let Some(flow) = flow {
+            let largest = flow
+                .tag_flows()
+                .iter()
+                .fold(0.0_f64, |m, (_, q)| m.max(q.abs()));
             for (tag, q) in flow.tag_flows() {
-                if *q > 0.0 && !dirichlet.iter().any(|(t, _)| t == tag) {
+                if *q > INFLOW_THRESHOLD * largest && !dirichlet.iter().any(|(t, _)| t == tag) {
                     return Err(PdeError::Inflow {
                         tag: tag.clone(),
                         field: field.id.clone(),
