@@ -451,6 +451,11 @@ fn abort_ends_every_process() {
         let p = Petsc::init(&[]).unwrap();
         let comm = p.comm();
         if comm.rank() == 0 {
+            // Output still in the buffers of Rust's stdout and of C's stdio (no newline): flushed
+            // before the processes end.
+            print!("from Rust before the abort; ");
+            // SAFETY: a NUL terminated format without conversions.
+            unsafe { printf(c"from C before the abort".as_ptr()) };
             p.abort_world(3);
         }
         comm.sum_real(1.0).unwrap();
@@ -461,12 +466,27 @@ fn abort_ends_every_process() {
         return;
     };
     let mut cmd = mpiexec.command(2, std::env::current_exe().unwrap());
-    cmd.args(["--exact", "abort_ends_every_process", "--test-threads", "1"])
-        .env(ABORT_RUN, "1")
-        .env(test_support::MPI_RANKS, "2");
+    // Without capture: the output of process 0 goes to its standard output.
+    cmd.args([
+        "--exact",
+        "abort_ends_every_process",
+        "--test-threads",
+        "1",
+        "--nocapture",
+    ])
+    .env(ABORT_RUN, "1")
+    .env(test_support::MPI_RANKS, "2");
     let run = test_support::run_with_timeout(cmd, std::time::Duration::from_secs(60));
     let output = format!("{}\n{}", run.stdout, run.stderr);
     let status = run.status.unwrap_or_else(|| panic!("hangs:\n{output}"));
     assert!(!status.success(), "{output}");
     assert!(!output.contains("left the collective call"), "{output}");
+    // In either order: C's stdout need not be buffered (MPICH makes it unbuffered).
+    for text in ["from Rust before the abort", "from C before the abort"] {
+        assert!(run.stdout.contains(text), "{text:?} is lost:\n{output}");
+    }
+}
+
+unsafe extern "C" {
+    fn printf(format: *const std::ffi::c_char, ...) -> std::ffi::c_int;
 }

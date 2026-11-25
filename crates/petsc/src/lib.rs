@@ -37,6 +37,7 @@ mod vector;
 mod viewer;
 
 use std::ffi::{CStr, CString, c_char, c_int};
+use std::io::Write;
 use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +146,17 @@ impl Petsc {
     /// Ends every process of `MPI_COMM_WORLD` with the exit code `code` (`MPI_Abort`), without
     /// finalizing PETSc. For an error on some processes only, which would otherwise leave the
     /// others waiting in a collective call forever; with one process, return the error instead.
+    ///
+    /// Flushes this process's buffered output first, Rust's standard output and C's `stdio`
+    /// streams (`fflush(NULL)`), so that what it printed is not lost: Rust keeps an unfinished
+    /// line, and C an unfinished line, or whole blocks if the output is a pipe (MPICH makes C's
+    /// stdout unbuffered and Open MPI's `mpiexec` gives a terminal, other launchers need not).
+    /// PETSc flushes after each of its own prints; other C code need not.
     pub fn abort_world(&self, code: i32) -> ! {
+        // Errors are ignored: the processes end either way.
+        let _ = std::io::stdout().flush();
+        // SAFETY: PetscFFlush(NULL) is fflush(NULL), which flushes every C output stream.
+        let _ = unsafe { sys::PetscFFlush(null_mut()) };
         // SAFETY: MPI is initialized while `self` lives. MPI_Abort does not return; if an MPI
         // implementation does, this process exits all the same.
         unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };

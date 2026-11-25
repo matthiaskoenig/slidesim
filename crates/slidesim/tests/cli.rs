@@ -184,6 +184,37 @@ fn unknown_tag_fails_cleanly() {
 }
 
 #[test]
+fn abort_keeps_the_monitor_output() {
+    // Process 0 alone fails, at the end (it writes summary.json, here a directory): it ends every
+    // process (`MPI_Abort`), and the output of the monitors up to then is printed.
+    let dir = scratch("abort_keeps_the_monitor_output");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(study().with_file_name("scene.json").display().to_string());
+    doc["mesh"]["refinements"] = Value::from(0);
+    doc["time"] = serde_json::json!({"end": 2.0, "dt": 0.5, "outputs": [2.0]});
+    let short = dir.join("study.json");
+    std::fs::write(&short, doc.to_string()).unwrap();
+    let out = dir.join("out");
+    std::fs::create_dir_all(out.join("summary.json")).unwrap();
+
+    let Some(run) = slidesim_parallel(2, &args(&short, &out, &["-oxygen_ts_monitor"])) else {
+        return;
+    };
+    assert!(!run.status.unwrap().success(), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("[rank 0] error: cannot write"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("4 TS (oxygen_) dt 0.5 time 2."),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
 fn bad_petsc_option_fails_cleanly() {
     let out = scratch("bad_petsc_option_fails_cleanly").join("out");
     let run = slidesim(&args(&study(), &out, &["-oxygen_ksp_type", "no_such_ksp"]));
