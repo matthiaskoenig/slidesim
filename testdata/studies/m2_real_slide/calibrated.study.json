@@ -1,0 +1,30 @@
+{
+  "version": "study/1",
+  "scene": "scene/scene.json",
+  "fields": [
+    {
+      "id": "sucrose",
+      "diffusion": 700.0,
+      "decay": 0.0,
+      "source": 0.0,
+      "porosity": 0.15,
+      "advection": true,
+      "initial": 0.0,
+      "boundaries": [
+        {"tag": "portal_wall", "dirichlet": 1.0}
+      ]
+    }
+  ],
+  "perfusion": {
+    "viscosity": 0.0024,
+    "k_along": 0.038,
+    "k_across": 0.043,
+    "direction": {"map": "zonation", "g0": 0.00043},
+    "boundaries": [
+      {"tag": "portal_wall", "pressure": 390.0},
+      {"tag": "central_wall", "pressure": 0.0}
+    ]
+  },
+  "time": {"end": 10.0, "dt": 0.05, "adaptive": false, "outputs": [0.0, 1.0, 2.0, 3.0, 5.0, 10.0]},
+  "mesh": {"refinements": 2}
+}

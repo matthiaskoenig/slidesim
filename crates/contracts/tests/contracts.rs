@@ -238,7 +238,7 @@ fn schemas_match_load() {
 }
 
 /// The studies of `testdata/studies` (`<name>/study.json`, run end to end by the `slidesim`
-/// tests) are valid: by the
+/// tests; `m2_real_slide` has a test of its own) are valid: by the
 /// schemas, and by `Study::load` and `Scene::load`, which resolve the scene and the mesh.
 #[test]
 fn example_studies_are_valid() {
@@ -251,6 +251,7 @@ fn example_studies_are_valid() {
     let mut studies: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap() != "m2_real_slide")
         .collect();
     studies.sort();
     assert!(!studies.is_empty());
@@ -266,6 +267,34 @@ fn example_studies_are_valid() {
         let scene = Scene::load(&loaded.scene).unwrap();
         assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
     }
+}
+
+/// The studies of the end-to-end run on a real slide (`testdata/studies/m2_real_slide`,
+/// `<name>.study.json`) are valid by the schema. Their scene is written by
+/// `scripts/e2e/m2_real_slide.sh` from slides outside the repository, so it is not loaded here.
+#[test]
+fn real_slide_studies_are_valid() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/m2_real_slide");
+    let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(schema.is_valid(&doc), "{name}");
+        names.push(name);
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "baseline.study.json",
+            "calibrated.study.json",
+            "radial10.study.json",
+            "whole_blood.study.json"
+        ]
+    );
 }
 
 #[test]
