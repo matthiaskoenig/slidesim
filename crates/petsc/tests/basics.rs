@@ -1,6 +1,7 @@
 //! Tests of the safe PETSc wrappers. nextest runs each test in its own process, so every test
 //! initializes PETSc once.
 
+use std::cell::RefCell;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -389,4 +390,50 @@ fn use_after_finalize_is_error() {
     assert!(e.message.contains("KSPCreate"), "{e}");
     let e = Matrix::shell(&comm, 3, 3, Box::new(Double)).err().unwrap();
     assert_eq!(e.code, sys::PETSC_ERR_ORDER);
+}
+
+/// Owns `Petsc`, so dropping the operator drops `Petsc` inside a PETSc callback.
+struct OwnsPetsc(RefCell<Option<Petsc>>);
+
+impl ShellOperator for OwnsPetsc {
+    /// Drops `Petsc` during the call, then uses PETSc.
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()> {
+        drop(self.0.borrow_mut().take());
+        y.set(0.0)?;
+        y.axpy(3.0, x)
+    }
+    fn diagonal(&self, d: &mut VecMut<'_>) -> Result<()> {
+        d.set(3.0)
+    }
+}
+
+/// `Petsc` dropped with its matrix (in MatDestroy): PETSc stays initialized and usable.
+#[test]
+fn petsc_dropped_by_matrix_destroy_stays_initialized() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let x = seq(&p, &[1.0, 2.0, 3.0]);
+    let mut y = Vector::create_seq(&p, 3).unwrap();
+    let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();
+    drop(a);
+    let mut ksp = Ksp::create(&comm).unwrap();
+    ksp.set_from_options().unwrap();
+    let b = Matrix::shell(&comm, 3, 3, Box::new(Double)).unwrap();
+    b.mult(&x, &mut y).unwrap();
+    assert_eq!(values(&y), [2.0, 4.0, 6.0]);
+}
+
+/// `Petsc` dropped during `mult` (in MatMult): the call completes, PETSc stays usable.
+#[test]
+fn petsc_dropped_during_mult_stays_initialized() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let x = seq(&p, &[1.0, 2.0, 3.0]);
+    let mut y = Vector::create_seq(&p, 3).unwrap();
+    let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();
+    a.mult(&x, &mut y).unwrap();
+    assert_eq!(values(&y), [3.0, 6.0, 9.0]);
+    drop(a);
+    assert_eq!(y.norm2().unwrap(), 126.0_f64.sqrt());
+    Ksp::create(&comm).unwrap();
 }

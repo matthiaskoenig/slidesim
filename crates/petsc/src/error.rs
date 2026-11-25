@@ -8,7 +8,7 @@
 //! [`Error`] of the Rust call.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, Location, catch_unwind};
@@ -166,6 +166,32 @@ pub(crate) unsafe extern "C" fn record(
     n
 }
 
+thread_local! {
+    /// The number of Rust callbacks called by PETSc on the stack.
+    static DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether PETSc code is on the stack (a Rust callback called by PETSc is running).
+pub(crate) fn in_callback() -> bool {
+    DEPTH.with(Cell::get) > 0
+}
+
+/// One level of [`DEPTH`], left on drop (also when unwinding).
+struct Depth;
+
+impl Depth {
+    fn enter() -> Depth {
+        DEPTH.with(|d| d.set(d.get() + 1));
+        Depth
+    }
+}
+
+impl Drop for Depth {
+    fn drop(&mut self) {
+        DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
 fn panic_message(payload: &(dyn Any + Send)) -> &str {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s
@@ -183,7 +209,10 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 /// `func` must not start with `main`: PetscError aborts the program for errors raised there.
 #[track_caller]
 pub(crate) fn callback(func: &CStr, body: impl FnOnce() -> Result<()>) -> sys::PetscErrorCode {
-    let (code, message) = match catch_unwind(AssertUnwindSafe(body)) {
+    let depth = Depth::enter();
+    let result = catch_unwind(AssertUnwindSafe(body));
+    drop(depth);
+    let (code, message) = match result {
         Ok(Ok(())) => return 0,
         Ok(Err(e)) if e.code > 0 => (e.code, e.message),
         Ok(Err(e)) => (sys::PETSC_ERR_LIB, e.message),

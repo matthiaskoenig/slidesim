@@ -4,7 +4,10 @@
 //! neither prints nor aborts: every failing PETSc call returns an [`Error`] carrying the PETSc
 //! message and traceback (see [`chk!`]). Dropping [`Petsc`] finalizes PETSc; after that, every
 //! wrapper call returns an error (`PETSC_ERR_ORDER`) and dropped objects are leaked instead of
-//! destroyed.
+//! destroyed. One exception: if [`Petsc`] is dropped inside a callback called by PETSc (for
+//! example by a [`ShellOperator`] owning it, dropped with its matrix or during `mult`), PETSc
+//! code is on the stack, so PETSc is not finalized but stays initialized (and usable through
+//! the wrappers) for the rest of the process.
 //!
 //! PETSc is not thread safe: no type here is `Send` or `Sync`.
 //!
@@ -117,6 +120,14 @@ impl Petsc {
 
 impl Drop for Petsc {
     fn drop(&mut self) {
+        if error::in_callback() {
+            // Dropped inside a callback (for example by an operator owning `Petsc`): PETSc code
+            // is on the stack and must not see PETSc and MPI finalized under it. PETSc stays
+            // initialized for the rest of the process, and keeps pointers to the arguments.
+            std::mem::forget(std::mem::take(&mut self._args));
+            std::mem::forget(std::mem::take(&mut self._argv));
+            return;
+        }
         // Nothing to report an error to; PETSc is finalized either way.
         unsafe {
             sys::PetscPopErrorHandler();
