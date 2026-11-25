@@ -158,6 +158,49 @@ fn runs_tissue_oxygen() {
 }
 
 #[test]
+fn outputs_of_an_earlier_run_are_removed() {
+    // A short run with two output times, in a directory with the outputs of a run with more.
+    let dir = scratch("outputs_of_an_earlier_run_are_removed");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(study().with_file_name("scene.json").display().to_string());
+    doc["mesh"]["refinements"] = Value::from(0);
+    doc["time"] = serde_json::json!({"end": 1.0, "dt": 0.5, "outputs": [0.5, 1.0]});
+    let short = dir.join("study.json");
+    std::fs::write(&short, doc.to_string()).unwrap();
+    let out = dir.join("out");
+    let stale = ["oxygen_2.vtu", "oxygen_10.vtu"];
+    // Not outputs of slidesim for the field 'oxygen': kept.
+    let other = ["oxygen_final.vtu", "oxygen_2.vtu.bak", "notes.txt"];
+
+    for ranks in [1, 2] {
+        std::fs::create_dir_all(&out).unwrap();
+        for file in stale.iter().chain(&other) {
+            std::fs::write(out.join(file), "earlier").unwrap();
+        }
+        let command = args(&short, &out, &[]);
+        let run = if ranks == 1 {
+            slidesim(&command)
+        } else {
+            let Some(run) = slidesim_parallel(ranks, &command) else {
+                return;
+            };
+            run
+        };
+        assert_success(&run);
+        for index in 0..2 {
+            let path = out.join(format!("oxygen_{index}.vtu"));
+            assert_eq!(point_data(&path), ["oxygen.mM"], "{}", path.display());
+        }
+        for file in stale {
+            assert!(!out.join(file).exists(), "{file} is left");
+        }
+        for file in other {
+            assert!(out.join(file).exists(), "{file} is removed");
+        }
+    }
+}
+
+#[test]
 fn unknown_tag_fails_cleanly() {
     let dir = scratch("unknown_tag_fails_cleanly");
     let text = std::fs::read_to_string(study()).unwrap();

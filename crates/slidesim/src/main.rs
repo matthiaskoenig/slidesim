@@ -42,6 +42,7 @@ Output files in DIR:
   <field id>_<index>.vtu  the field at the output time number <index> (of time.outputs, from 0),
                           for ParaView: point data '<field id>.mM'
   summary.json            per field: times (s), l2_norm (mM*um), total_mass (mM*um^2)
+Files <field id>_<index>.vtu of an earlier run in DIR are removed first; other files stay.
 
 PETSc options after '--' go to PETSc's options database. The solvers of a field take the
 prefix '<field id>_', for example '-oxygen_ksp_monitor' (residuals of the linear solves of the
@@ -53,7 +54,8 @@ errors), solver.petsc_options of the study, the options after '--'.";
 struct RunArgs {
     /// The study/1 file.
     study: PathBuf,
-    /// The output directory, created if missing; files in it are overwritten.
+    /// The output directory, created if missing. Outputs of an earlier run in it are removed or
+    /// overwritten.
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
     /// PETSc options, for example -oxygen_ksp_monitor.

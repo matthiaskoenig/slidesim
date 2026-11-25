@@ -1,12 +1,13 @@
 //! `slidesim run`: a study end to end.
 //!
 //! Loads the study, its scene and the mesh (distributed over the processes, refined
-//! `mesh.refinements` times), builds one [`Problem`] per field, and steps the fields to each output
-//! time of `time.outputs` in turn, then to `time.end`. At each output time (time 0 before any
-//! step) it writes every field as `<out>/<field id>_<index>.vtu`, `<index>` the position of the
-//! time in `time.outputs`: point data `<field id>.mM` on the finest mesh level, Dirichlet values
-//! included, one file of the pieces of every process. When every field is done, process 0
-//! writes `<out>/summary.json`:
+//! `mesh.refinements` times), removes the outputs `<out>/<field id>_<index>.vtu` of an earlier
+//! run (other files in `<out>` stay), builds one [`Problem`] per field, and steps the fields to
+//! each output time of `time.outputs` in turn, then to `time.end`. At each output time (time 0
+//! before any step) it writes every field as `<out>/<field id>_<index>.vtu`, `<index>` the
+//! position of the time in `time.outputs`: point data `<field id>.mM` on the finest mesh level,
+//! Dirichlet values included, one file of the pieces of every process. When every field is done,
+//! process 0 writes `<out>/summary.json`:
 //!
 //! `{"fields": {"<field id>": {"times": [...], "l2_norm": [...], "total_mass": [...]}}}`
 //!
@@ -49,11 +50,13 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
     let comm = petsc.comm();
-    // Process 0 writes every file.
+    // Process 0 writes every file, after it removed the outputs of an earlier run.
     if comm.rank() == 0 {
         std::fs::create_dir_all(out)
             .with_context(|| format!("cannot create the output directory {}", out.display()))?;
+        remove_earlier_outputs(&study, out)?;
     }
+    comm.barrier()?;
 
     let mut problems = study
         .fields
@@ -108,6 +111,35 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes the files `<field id>_<index>.vtu` of the fields of `study` from the directory `out`:
+/// outputs of an earlier run, which a viewer would take for a part of the series of this run (for
+/// example the files of more output times). Other files stay.
+fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
+    let entries =
+        std::fs::read_dir(out).with_context(|| format!("cannot read {}", out.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", out.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if study.fields.iter().any(|field| is_output(name, &field.id)) {
+            let path = entry.path();
+            std::fs::remove_file(&path)
+                .with_context(|| format!("cannot remove {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the file name `name` is that of an output of the field `id`: `<id>_<index>.vtu`.
+fn is_output(name: &str, id: &str) -> bool {
+    name.strip_prefix(id)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .and_then(|rest| rest.strip_suffix(".vtu"))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Writes the solution of `problem` as the VTU file `path`. Collective.
 fn write_vtu(problem: &Problem, path: &Path) -> Result<()> {
     let solution = problem.local_solution()?;
@@ -115,4 +147,28 @@ fn write_vtu(problem: &Problem, path: &Path) -> Result<()> {
     solution.view(&mut viewer)?;
     viewer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_output;
+
+    #[test]
+    fn outputs_are_named_after_the_field_and_the_index() {
+        assert!(is_output("oxygen_0.vtu", "oxygen"));
+        assert!(is_output("oxygen_12.vtu", "oxygen"));
+        assert!(is_output("o2_x_3.vtu", "o2_x"));
+        for name in [
+            "oxygen_.vtu",
+            "oxygen_x.vtu",
+            "oxygen_1.vtu.bak",
+            "oxygen_1.pvd",
+            "oxygen0.vtu",
+            "oxygen_x_1.vtu",
+            "summary.json",
+        ] {
+            assert!(!is_output(name, "oxygen"), "{name}");
+        }
+        assert!(!is_output("oxygen_1.vtu", "o2"));
+    }
 }
