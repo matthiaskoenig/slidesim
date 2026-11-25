@@ -10,4 +10,5 @@ license = "MIT"
 [workspace.dependencies]
 bindgen = "0.73.2"
 cc = "1.2.41"
+ceed-sys = { path = "crates/ceed-sys" }
 petsc-sys = { path = "crates/petsc-sys" }

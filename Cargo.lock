@@ -47,6 +47,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ceed"
+version = "0.1.0"
+dependencies = [
+ "ceed-sys",
+]
+
+[[package]]
+name = "ceed-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
 name = "cexpr"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
