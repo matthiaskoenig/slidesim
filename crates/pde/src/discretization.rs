@@ -84,6 +84,38 @@ impl Discretization {
         degree: u32,
         essential: &[&str],
     ) -> Result<Discretization> {
+        Discretization::build(mesh, level, ceed, degree, essential, None)
+    }
+
+    /// The discretizations of every level of `mesh`, coarse first, each as
+    /// [`Discretization::with_essential`], and each the next coarser level of the one after it
+    /// ([`Dm::set_coarse_dm`] of their DMs): the hierarchy of geometric multigrid
+    /// ([`crate::configure_multigrid`]). Collective.
+    pub fn hierarchy(
+        mesh: &Mesh,
+        ceed: &Ceed,
+        degree: u32,
+        essential: &[&str],
+    ) -> Result<Vec<Discretization>> {
+        let mut levels: Vec<Discretization> = Vec::with_capacity(mesh.levels().len());
+        for level in 0..mesh.levels().len() {
+            let coarse = levels.last().map(Discretization::dm);
+            let disc = Discretization::build(mesh, level, ceed, degree, essential, coarse)?;
+            levels.push(disc);
+        }
+        Ok(levels)
+    }
+
+    /// The discretization of [`Discretization::with_essential`], with the DM `coarse` as the
+    /// next coarser level of its DM, if given.
+    fn build(
+        mesh: &Mesh,
+        level: usize,
+        ceed: &Ceed,
+        degree: u32,
+        essential: &[&str],
+        coarse: Option<&Dm>,
+    ) -> Result<Discretization> {
         if degree != 1 {
             return Err(PdeError::Unsupported(format!(
                 "elements of degree {degree} (only degree 1 is supported)"
@@ -114,6 +146,9 @@ impl Discretization {
         let degree = degree as usize;
 
         let mut dm = source.clone_mesh()?;
+        if let Some(coarse) = coarse {
+            dm.set_coarse_dm(coarse)?;
+        }
         // The affine coordinate element, for the restriction of the coordinates.
         dm.set_coordinate_disc(None, false)?;
         let fe = Fe::lagrange(dim, 1, true, degree, quadrature_degree(degree))?;
@@ -268,6 +303,10 @@ impl Discretization {
                 essential,
             }),
         })
+    }
+
+    pub(crate) fn from_shared(shared: Rc<Shared>) -> Discretization {
+        Discretization { shared }
     }
 
     pub(crate) fn shared(&self) -> &Rc<Shared> {

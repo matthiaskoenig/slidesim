@@ -10,7 +10,10 @@ use mesh::Mesh;
 use petsc::{ExactFinalTime, Implicit, OptionsScope, ProblemType, Ts, VecMut, VecRef, Vector, sys};
 
 use crate::operators::PointValues;
-use crate::{DiffusionReaction, Discretization, PdeError, Result, SharedOperator, SourceField};
+use crate::{
+    DiffusionReaction, Discretization, Multigrid, PdeError, Result, SharedOperator, SourceField,
+    configure_multigrid,
+};
 
 /// The options every problem sets before those of the caller, who may override them: a solver
 /// which does not converge is an error ([`PdeError::Diverged`]), not a silently wrong step.
@@ -38,8 +41,11 @@ const SHIFT_TOLERANCE: f64 = 1e-12;
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
 /// step is one linear solve (`SNESKSPONLY`): CG with the Jacobian `shift M + d K + k M` as a
-/// matrix-free shell operator, preconditioned by Jacobi from its diagonal. The operators are
-/// built once; a step changes the shift only.
+/// matrix-free shell operator, preconditioned by geometric multigrid over the levels of the mesh
+/// ([`configure_multigrid`]; a mesh without refinements is solved by its coarse solver, algebraic
+/// multigrid, alone). The operators are built once; a step changes the shift only, on every
+/// level, and when the shift changes the preconditioner is rebuilt (the smoothers set up again,
+/// the coarse operator assembled again).
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). The problem sets its options in the
@@ -47,7 +53,9 @@ const SHIFT_TOLERANCE: f64 = 1e-12;
 /// first `-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails`,
 /// then the options of the caller (`petsc_options` of [`Problem::new`], written without the
 /// prefix), which may override them. Options under the prefix from the command line hold too,
-/// unless the caller's override them.
+/// unless the caller's override them. They override the multigrid preconditioner too: for
+/// example `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
+/// `-mg_coarse_pc_type lu` its coarse solver (on one process).
 ///
 /// Limit: one problem per field id lives at a time in a process, since it owns the options under
 /// its prefix; [`Problem::new`] fails for a second one until the first is dropped. Field ids
@@ -114,8 +122,8 @@ impl Problem {
             }
         }
         let essential: Vec<&str> = dirichlet.iter().map(|(tag, _)| tag.as_str()).collect();
-        let finest = mesh.levels().len() - 1;
-        let disc = Discretization::with_essential(mesh, finest, ceed, 1, &essential)?;
+        let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
+        let disc = levels.last().expect("a mesh has a level").clone();
 
         let (d, k) = (field.diffusion, field.decay);
         let mut source = SourceField::new(&disc)?;
@@ -127,11 +135,22 @@ impl Problem {
             Some(disc.boundary_load(&fluxes)?)
         };
         let jacobian = Rc::new(RefCell::new(DiffusionReaction::new(&disc, d, k, 0.0)?));
-        let shell = disc.shell_matrix(SharedOperator(Rc::clone(&jacobian)))?;
+        let mut shell = disc.shell_matrix(SharedOperator(Rc::clone(&jacobian)))?;
+        shell.set_spd()?;
+        // The operators of the coarser levels, then the Jacobian on the finest.
+        let level_operators = levels[..levels.len() - 1]
+            .iter()
+            .map(|level| {
+                let op = DiffusionReaction::new(level, d, k, 0.0)?;
+                Ok(SharedOperator(Rc::new(RefCell::new(op))))
+            })
+            .chain(std::iter::once(Ok(SharedOperator(Rc::clone(&jacobian)))))
+            .collect::<Result<Vec<_>>>()?;
         let equation = Equation {
             operator: DiffusionReaction::new(&disc, d, k, 0.0)?,
             mass: DiffusionReaction::new(&disc, 0.0, 0.0, 1.0)?,
             jacobian,
+            multigrid: None,
             source,
             load,
             u_local: local_with_dirichlet(&disc, &dirichlet)?,
@@ -150,8 +169,12 @@ impl Problem {
         ts.set_time_step(time.dt)?;
         let mut ksp = ts.snes()?.ksp()?;
         ksp.set_type("cg")?;
-        ksp.set_pc_type("jacobi")?;
+        let multigrid = configure_multigrid(&mut ksp, mesh, &level_operators)?;
         ts.set_from_options()?;
+        // Unless the options replaced it.
+        if ksp.pc()?.type_name()? == "mg" {
+            ts.context_mut().multigrid = Some(multigrid);
+        }
 
         let mut u = disc.global_vector()?;
         u.set(field.initial)?;
@@ -282,6 +305,12 @@ impl Problem {
         Ok(self.ts.step_number()?)
     }
 
+    /// The number of linear (Krylov) iterations of all steps so far, failed ones included.
+    /// Collective.
+    pub fn linear_iterations(&self) -> Result<usize> {
+        Ok(self.ts.linear_iterations()?)
+    }
+
     /// The size of the next step (in s), before it is shortened to end at a requested time: the
     /// fixed `TimeSpec::dt`, or the latest choice of the adaptor.
     pub fn time_step(&self) -> f64 {
@@ -367,6 +396,8 @@ struct Equation {
     mass: DiffusionReaction,
     /// The Jacobian `shift M + d K + k M`, shared with its shell matrix.
     jacobian: Rc<RefCell<DiffusionReaction>>,
+    /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
+    multigrid: Option<Multigrid>,
     source: SourceField,
     /// The load of the boundary fluxes, if any.
     load: Option<Vector>,
@@ -409,11 +440,19 @@ impl Implicit for Equation {
         _u_t: &VecRef<'_>,
         shift: f64,
     ) -> petsc::Result<bool> {
-        let mut jacobian = self.jacobian.borrow_mut();
-        // The operator applies the exact shift; the preconditioner follows changes beyond
-        // rounding.
-        let same = (shift - jacobian.shift).abs() <= SHIFT_TOLERANCE * shift.abs();
-        jacobian.shift = shift;
+        let (d, k, same) = {
+            let mut jacobian = self.jacobian.borrow_mut();
+            // The operator applies the exact shift; the preconditioner follows changes beyond
+            // rounding.
+            let same = (shift - jacobian.shift).abs() <= SHIFT_TOLERANCE * shift.abs();
+            jacobian.shift = shift;
+            (jacobian.d, jacobian.k, same)
+        };
+        if !same && let Some(multigrid) = &mut self.multigrid {
+            multigrid
+                .set_coefficients(d, k, shift)
+                .map_err(PdeError::into_petsc)?;
+        }
         Ok(!same)
     }
 }

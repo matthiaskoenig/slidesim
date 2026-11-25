@@ -158,8 +158,7 @@ impl DiffusionReaction {
     /// out, like the dofs themselves; entries of rows owned by another process are sent to it.
     /// Collective.
     pub fn assemble(&self) -> Result<Matrix> {
-        self.update_context()?;
-        let (rows, cols, values) = self.op.assemble_coo()?;
+        let (rows, cols) = self.op.assemble_coo_symbolic()?;
         let shared = &self.shared;
         let global = |local: Vec<i64>| -> Result<Vec<i64>> {
             local
@@ -182,8 +181,24 @@ impl DiffusionReaction {
         let (local_rows, global_rows) = shared.global_sizes;
         let comm = shared.dm.comm();
         let mut matrix = Matrix::aij_coo(&comm, local_rows, global_rows, &rows, &cols)?;
-        matrix.set_values_coo(&values.to_vec()?)?;
+        self.reassemble(&mut matrix)?;
         Ok(matrix)
+    }
+
+    /// Assembles the operator with its current coefficients again into `matrix`, from
+    /// [`DiffusionReaction::assemble`] of an operator on the same discretization: the entries
+    /// keep their places (the coordinate pattern depends on the discretization only), their
+    /// values are computed again. Collective.
+    pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
+        self.update_context()?;
+        let values = self.op.assemble_coo_values()?;
+        values.with_array(|values| matrix.set_values_coo(values))??;
+        Ok(())
+    }
+
+    /// The discretization of the operator.
+    pub fn discretization(&self) -> Discretization {
+        Discretization::from_shared(Rc::clone(&self.shared))
     }
 }
 

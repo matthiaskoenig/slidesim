@@ -10,8 +10,11 @@
 //!   diagonal and its assembled matrix;
 //! - [`SourceField`]: values at the quadrature points, integrated against the test functions.
 //!
+//! [`configure_multigrid`] makes a linear solver geometric multigrid over the levels of the mesh
+//! ([`Discretization::hierarchy`]), with the operator discretized again on every level.
+//!
 //! A [`Problem`] steps one diffusion-reaction field of a study in time (BDF2, PETSc `TS`) on the
-//! finest level.
+//! finest level, preconditioned by that multigrid.
 //!
 //! The QFunctions are C headers in `qfunctions/` ([`QFUNCTION_DIR`]), compiled by `build.rs`
 //! for the CPU backends; backends which compile them at run time read them from there.
@@ -20,10 +23,12 @@
 //! communicator of the mesh.
 
 mod discretization;
+mod multigrid;
 mod operators;
 mod problem;
 
 pub use discretization::Discretization;
+pub use multigrid::{Multigrid, configure_multigrid};
 pub use operators::{DiffusionReaction, SharedOperator, SourceField};
 pub use problem::Problem;
 
@@ -45,6 +50,10 @@ pub enum PdeError {
     #[error("tag '{tag}' is not an essential boundary of the discretization; essential: {}",
         .essential.join(", "))]
     NotEssential { tag: String, essential: Vec<String> },
+    /// Operators which are not one per level of the mesh, on the discretizations of
+    /// [`Discretization::hierarchy`], for [`configure_multigrid`].
+    #[error("not a multigrid hierarchy: {0}")]
+    NotHierarchy(String),
     /// The time integration failed: a solver diverged or a step failed. `reason` is the PETSc
     /// converged reason of the innermost solver which failed (for example `KSP DIVERGED_ITS`),
     /// `t` the time reached (in s), at the last step which succeeded.
