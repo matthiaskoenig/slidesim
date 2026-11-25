@@ -42,9 +42,34 @@
       ],
       "type": "object"
     },
+    "Direction": {
+      "additionalProperties": false,
+      "description": "The flow direction: that of the gradient of a scene map (e.g. a zonation coordinate).",
+      "properties": {
+        "g0": {
+          "description": "Gradient magnitude in 1/um below which the direction fades to isotropic, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "map": {
+          "description": "Id of a map of the scene.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "map",
+        "g0"
+      ],
+      "type": "object"
+    },
     "FieldSpec": {
       "additionalProperties": false,
       "properties": {
+        "advection": {
+          "description": "Advect the field with the Darcy velocity of `Study::perfusion`.",
+          "type": "boolean"
+        },
         "boundaries": {
           "default": [],
           "description": "Boundary conditions by mesh tag; tags not listed are zero flux.",
@@ -54,17 +79,89 @@
           "type": "array"
         },
         "decay": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "minimum": 0,
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
           "default": 0.0,
-          "description": "First-order decay rate in 1/s, must be >= 0.",
-          "format": "double",
-          "minimum": 0,
-          "type": "number"
+          "description": "First-order decay rate in 1/s, must be >= 0 (a number or a table over a map)."
         },
         "diffusion": {
-          "description": "Diffusion coefficient in um^2/s, must be > 0.",
-          "exclusiveMinimum": 0,
-          "format": "double",
-          "type": "number"
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Diffusion coefficient in um^2/s, must be > 0 (a number or a table over a map)."
         },
         "id": {
           "description": "Unique field id: an ASCII letter, then ASCII letters, digits and `_` (it names the\nPETSc options prefix of the field, `<id>_`).",
@@ -77,11 +174,88 @@
           "format": "double",
           "type": "number"
         },
+        "porosity": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Fraction of the volume the field lives in (dimensionless), must be > 0 (a number or a\ntable over a map)."
+        },
         "source": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
           "default": 0.0,
-          "description": "Uniform source term in mM/s.",
-          "format": "double",
-          "type": "number"
+          "description": "Source term in mM/s (a number or a table over a map)."
         }
       },
       "required": [
@@ -101,6 +275,140 @@
           "type": "integer"
         }
       },
+      "type": "object"
+    },
+    "Perfusion": {
+      "additionalProperties": false,
+      "description": "Darcy perfusion: the pressure field `p` solves `div(K grad p) = 0` with the pressures of\n`boundaries`; the flow is `u = -(K / viscosity) grad p`, with `K` anisotropic: `k_along`\nalong the direction of the `direction` map, `k_across` across it.",
+      "properties": {
+        "boundaries": {
+          "description": "Pressure boundary conditions by mesh tag, at least one, with unique tags.",
+          "items": {
+            "$ref": "#/$defs/PressureBoundary"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "direction": {
+          "$ref": "#/$defs/Direction"
+        },
+        "k_across": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Permeability across the flow direction in um^2, must be > 0."
+        },
+        "k_along": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "exclusiveMinimum": 0,
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Permeability along the flow direction in um^2, must be > 0."
+        },
+        "viscosity": {
+          "description": "Dynamic viscosity in Pa*s, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "viscosity",
+        "k_along",
+        "k_across",
+        "direction",
+        "boundaries"
+      ],
+      "type": "object"
+    },
+    "PressureBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "pressure": {
+          "description": "Fixed pressure in Pa.",
+          "format": "double",
+          "type": "number"
+        },
+        "tag": {
+          "description": "Name of the boundary tag in the mesh.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "pressure"
+      ],
       "type": "object"
     },
     "SolverOptions": {
@@ -168,6 +476,17 @@
       "default": {
         "refinements": 0
       }
+    },
+    "perfusion": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Perfusion"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Darcy perfusion of the tissue; required for fields with `advection`."
     },
     "scene": {
       "description": "Path of the `scene/1` file; relative paths resolve against the\ndirectory of the study file (`Study::load` stores the absolute path).",

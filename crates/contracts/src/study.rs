@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{ContractError, base_dir, check_version, read_json, resolve};
+use crate::{ContractError, Scene, base_dir, check_version, read_json, resolve};
 
 pub const STUDY_VERSION: &str = "study/1";
 
@@ -21,6 +21,9 @@ pub struct Study {
     /// Diffusing fields, at least one, with unique ids.
     #[schemars(length(min = 1))]
     pub fields: Vec<FieldSpec>,
+    /// Darcy perfusion of the tissue; required for fields with `advection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perfusion: Option<Perfusion>,
     pub time: TimeSpec,
     #[serde(default)]
     pub mesh: MeshOptions,
@@ -35,22 +38,248 @@ pub struct FieldSpec {
     /// PETSc options prefix of the field, `<id>_`).
     #[schemars(extend("pattern" = "^[A-Za-z][A-Za-z0-9_]*$"))]
     pub id: String,
-    /// Diffusion coefficient in um^2/s, must be > 0.
-    #[schemars(extend("exclusiveMinimum" = 0))]
-    pub diffusion: f64,
-    /// First-order decay rate in 1/s, must be >= 0.
-    #[schemars(range(min = 0))]
-    #[serde(default)]
-    pub decay: f64,
-    /// Uniform source term in mM/s.
-    #[serde(default)]
-    pub source: f64,
+    /// Diffusion coefficient in um^2/s, must be > 0 (a number or a table over a map).
+    #[schemars(schema_with = "positive_coefficient_schema")]
+    pub diffusion: Coefficient,
+    /// First-order decay rate in 1/s, must be >= 0 (a number or a table over a map).
+    #[schemars(schema_with = "nonnegative_coefficient_schema")]
+    #[serde(default = "zero")]
+    pub decay: Coefficient,
+    /// Source term in mM/s (a number or a table over a map).
+    #[schemars(schema_with = "any_coefficient_schema")]
+    #[serde(default = "zero")]
+    pub source: Coefficient,
+    /// Fraction of the volume the field lives in (dimensionless), must be > 0 (a number or a
+    /// table over a map).
+    #[schemars(schema_with = "positive_coefficient_schema")]
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub porosity: Coefficient,
+    /// Advect the field with the Darcy velocity of `Study::perfusion`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub advection: bool,
     /// Uniform initial concentration in mM.
     #[serde(default)]
     pub initial: f64,
     /// Boundary conditions by mesh tag; tags not listed are zero flux.
     #[serde(default)]
     pub boundaries: Vec<BoundarySpec>,
+}
+
+fn zero() -> Coefficient {
+    Coefficient::Constant(0.0)
+}
+
+fn one() -> Coefficient {
+    Coefficient::Constant(1.0)
+}
+
+fn is_one(c: &Coefficient) -> bool {
+    *c == Coefficient::Constant(1.0)
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A coefficient: a constant (a JSON number) or a piecewise linear function of the values of a
+/// scene map (a JSON object, see [`Table`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Coefficient {
+    Constant(f64),
+    Table(Table),
+}
+
+/// `{"map": "zonation", "points": [[0, 500], [1, 900]]}`: the coefficient is the linear
+/// interpolation of the `[value, output]` points at the map value, held constant beyond them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Table {
+    /// Id of a map of the scene.
+    pub map: String,
+    /// `[value, output]` points, at least 2, the values strictly increasing.
+    #[schemars(length(min = 2))]
+    pub points: Vec<[f64; 2]>,
+}
+
+impl Coefficient {
+    /// The map a table refers to; `None` for a constant.
+    pub fn maps(&self) -> Option<&str> {
+        match self {
+            Coefficient::Constant(_) => None,
+            Coefficient::Table(t) => Some(&t.map),
+        }
+    }
+
+    /// The coefficient at the map value `value`: linear interpolation between the points, the
+    /// end outputs beyond them; the constant itself for a constant.
+    pub fn eval(&self, value: f64) -> f64 {
+        let t = match self {
+            Coefficient::Constant(c) => return *c,
+            Coefficient::Table(t) => t,
+        };
+        let (first, last) = (t.points[0], t.points[t.points.len() - 1]);
+        if value <= first[0] {
+            return first[1];
+        }
+        if value >= last[0] {
+            return last[1];
+        }
+        let i = t.points.partition_point(|p| p[0] <= value);
+        let (a, b) = (t.points[i - 1], t.points[i]);
+        a[1] + (b[1] - a[1]) * (value - a[0]) / (b[0] - a[0])
+    }
+
+    /// Check finiteness, the table shape and `check` on the constant or on every table output.
+    fn validate(&self, what: &str, rule: Rule) -> Result<(), ContractError> {
+        let outputs: Vec<f64> = match self {
+            Coefficient::Constant(c) => vec![*c],
+            Coefficient::Table(t) => {
+                if t.points.len() < 2 {
+                    return Err(invalid(format!("{what}: table needs at least 2 points")));
+                }
+                for p in &t.points {
+                    finite(&format!("{what}: table point"), p[0])?;
+                }
+                if !t.points.windows(2).all(|w| w[0][0] < w[1][0]) {
+                    return Err(invalid(format!(
+                        "{what}: table values must be strictly increasing"
+                    )));
+                }
+                t.points.iter().map(|p| p[1]).collect()
+            }
+        };
+        for x in outputs {
+            finite(what, x)?;
+            match rule {
+                Rule::Positive if x <= 0.0 => {
+                    return Err(invalid(format!("{what} must be > 0, got {x}")));
+                }
+                Rule::NonNegative if x < 0.0 => {
+                    return Err(invalid(format!("{what} must be >= 0, got {x}")));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Rule {
+    Positive,
+    NonNegative,
+    Any,
+}
+
+/// Schema of a [`Coefficient`] whose constant and table outputs satisfy `output`.
+fn coefficient_schema(output: serde_json::Value) -> schemars::Schema {
+    let mut number = serde_json::json!({"type": "number"});
+    number
+        .as_object_mut()
+        .expect("object")
+        .extend(output.as_object().expect("object").clone());
+    schemars::json_schema!({
+        "anyOf": [
+            number,
+            {
+                "type": "object",
+                "required": ["map", "points"],
+                "additionalProperties": false,
+                "properties": {
+                    "map": {"type": "string", "description": "Id of a map of the scene."},
+                    "points": {
+                        "type": "array",
+                        "minItems": 2,
+                        "description": "`[value, output]` points, the values strictly increasing.",
+                        "items": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "prefixItems": [{"type": "number"}, number]
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn positive_coefficient_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    coefficient_schema(serde_json::json!({"exclusiveMinimum": 0}))
+}
+
+fn nonnegative_coefficient_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    coefficient_schema(serde_json::json!({"minimum": 0}))
+}
+
+fn any_coefficient_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    coefficient_schema(serde_json::json!({}))
+}
+
+/// Darcy perfusion: the pressure field `p` solves `div(K grad p) = 0` with the pressures of
+/// `boundaries`; the flow is `u = -(K / viscosity) grad p`, with `K` anisotropic: `k_along`
+/// along the direction of the `direction` map, `k_across` across it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Perfusion {
+    /// Dynamic viscosity in Pa*s, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub viscosity: f64,
+    /// Permeability along the flow direction in um^2, must be > 0.
+    #[schemars(schema_with = "positive_coefficient_schema")]
+    pub k_along: Coefficient,
+    /// Permeability across the flow direction in um^2, must be > 0.
+    #[schemars(schema_with = "positive_coefficient_schema")]
+    pub k_across: Coefficient,
+    pub direction: Direction,
+    /// Pressure boundary conditions by mesh tag, at least one, with unique tags.
+    #[schemars(length(min = 1))]
+    pub boundaries: Vec<PressureBoundary>,
+}
+
+/// The flow direction: that of the gradient of a scene map (e.g. a zonation coordinate).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Direction {
+    /// Id of a map of the scene.
+    pub map: String,
+    /// Gradient magnitude in 1/um below which the direction fades to isotropic, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub g0: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PressureBoundary {
+    /// Name of the boundary tag in the mesh.
+    pub tag: String,
+    /// Fixed pressure in Pa.
+    pub pressure: f64,
+}
+
+/// Check that every map a coefficient table or the perfusion direction names is in
+/// `scene.maps`.
+pub fn check_maps(study: &Study, scene: &Scene) -> Result<(), ContractError> {
+    let mut named: Vec<&str> = Vec::new();
+    for f in &study.fields {
+        for c in [&f.diffusion, &f.decay, &f.source, &f.porosity] {
+            named.extend(c.maps());
+        }
+    }
+    if let Some(p) = &study.perfusion {
+        named.extend(p.k_along.maps());
+        named.extend(p.k_across.maps());
+        named.push(&p.direction.map);
+    }
+    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    match named.iter().find(|m| !available.iter().any(|a| a == *m)) {
+        Some(m) => Err(ContractError::UnknownMap {
+            map: m.to_string(),
+            available,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Boundary condition on one mesh tag, serialized as
@@ -195,6 +424,17 @@ impl Study {
             }
             f.validate()?;
         }
+        if let Some(p) = &self.perfusion {
+            p.validate()?;
+        }
+        if self.perfusion.is_none()
+            && let Some(f) = self.fields.iter().find(|f| f.advection)
+        {
+            return Err(invalid(format!(
+                "field '{}': advection needs a 'perfusion' section",
+                f.id
+            )));
+        }
         self.time.validate()
     }
 }
@@ -209,25 +449,14 @@ impl FieldSpec {
                 "field id '{id}' must match ^[A-Za-z][A-Za-z0-9_]*$"
             )));
         }
-        for (name, x) in [
-            ("diffusion", self.diffusion),
-            ("decay", self.decay),
-            ("source", self.source),
-            ("initial", self.initial),
+        finite(&format!("field '{id}': initial"), self.initial)?;
+        for (name, c, rule) in [
+            ("diffusion", &self.diffusion, Rule::Positive),
+            ("decay", &self.decay, Rule::NonNegative),
+            ("source", &self.source, Rule::Any),
+            ("porosity", &self.porosity, Rule::Positive),
         ] {
-            finite(&format!("field '{id}': {name}"), x)?;
-        }
-        if self.diffusion <= 0.0 {
-            return Err(invalid(format!(
-                "field '{id}': diffusion must be > 0, got {}",
-                self.diffusion
-            )));
-        }
-        if self.decay < 0.0 {
-            return Err(invalid(format!(
-                "field '{id}': decay must be >= 0, got {}",
-                self.decay
-            )));
+            c.validate(&format!("field '{id}': {name}"), rule)?;
         }
         let mut tags = HashSet::new();
         for b in &self.boundaries {
@@ -236,6 +465,47 @@ impl FieldSpec {
             if !tags.insert(b.tag.as_str()) {
                 return Err(invalid(format!(
                     "field '{id}': duplicate boundary tag '{}'",
+                    b.tag
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Perfusion {
+    fn validate(&self) -> Result<(), ContractError> {
+        finite("perfusion.viscosity", self.viscosity)?;
+        if self.viscosity <= 0.0 {
+            return Err(invalid(format!(
+                "perfusion.viscosity must be > 0, got {}",
+                self.viscosity
+            )));
+        }
+        self.k_along.validate("perfusion.k_along", Rule::Positive)?;
+        self.k_across
+            .validate("perfusion.k_across", Rule::Positive)?;
+        finite("perfusion.direction.g0", self.direction.g0)?;
+        if self.direction.g0 <= 0.0 {
+            return Err(invalid(format!(
+                "perfusion.direction.g0 must be > 0, got {}",
+                self.direction.g0
+            )));
+        }
+        if self.boundaries.is_empty() {
+            return Err(invalid(
+                "perfusion.boundaries must have at least one boundary".into(),
+            ));
+        }
+        let mut tags = HashSet::new();
+        for b in &self.boundaries {
+            finite(
+                &format!("perfusion.boundaries: tag '{}' pressure", b.tag),
+                b.pressure,
+            )?;
+            if !tags.insert(b.tag.as_str()) {
+                return Err(invalid(format!(
+                    "perfusion.boundaries: duplicate tag '{}'",
                     b.tag
                 )));
             }
@@ -281,7 +551,7 @@ mod tests {
     #[test]
     fn non_finite_numbers_are_rejected() {
         let mut s = study();
-        s.fields[0].diffusion = f64::NAN;
+        s.fields[0].diffusion = Coefficient::Constant(f64::NAN);
         assert_eq!(
             s.validate().unwrap_err().to_string(),
             "field 'oxygen': diffusion must be finite, got NaN"

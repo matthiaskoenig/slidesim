@@ -17,6 +17,9 @@ pub enum ContractError {
     },
     #[error("unsupported length unit '{found}', expected 'um'")]
     UnsupportedLengthUnit { found: String },
+    /// A table or direction names a map the scene does not define.
+    #[error("unknown map '{map}', the scene defines: [{}]", available.join(", "))]
+    UnknownMap { map: String, available: Vec<String> },
     /// A value violates a contract rule; the message names the field.
     #[error("{0}")]
     Invalid(String),

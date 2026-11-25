@@ -29,6 +29,7 @@ fn scene_at(path: PathBuf, dimension: u8) -> Scene {
             format: MeshFormat::Gmsh,
             path,
         },
+        maps: Vec::new(),
     }
 }
 

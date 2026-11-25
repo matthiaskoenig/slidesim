@@ -46,6 +46,8 @@ struct FieldSummary {
 /// the module documentation). Collective.
 pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     let study = Study::load(study_path).context("cannot load the study")?;
+    // Replaced by the perfusion of milestone 2 (Task 3).
+    anyhow::ensure!(study.perfusion.is_none(), "perfusion is not supported yet");
     let scene = Scene::load(&study.scene).context("cannot load the scene")?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;

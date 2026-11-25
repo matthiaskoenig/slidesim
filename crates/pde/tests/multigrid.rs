@@ -16,8 +16,8 @@ use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    BoundarySpec, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene,
-    TimeSpec, Units,
+    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
+    SCENE_VERSION, Scene, TimeSpec, Units,
 };
 use mesh::Mesh;
 use pde::{
@@ -51,6 +51,7 @@ fn tissue_small(p: &Petsc, refinements: u32) -> Mesh {
             format: MeshFormat::Gmsh,
             path: fixture("tissue_small.msh"),
         },
+        maps: Vec::new(),
     };
     Mesh::load(p, &scene, refinements).unwrap()
 }
@@ -242,9 +243,11 @@ fn levels_must_be_a_hierarchy() {
 fn tissue_field() -> FieldSpec {
     FieldSpec {
         id: "u".to_string(),
-        diffusion: D,
-        decay: K,
-        source: 0.0,
+        diffusion: Coefficient::Constant(D),
+        decay: Coefficient::Constant(K),
+        source: Coefficient::Constant(0.0),
+        porosity: Coefficient::Constant(1.0),
+        advection: false,
         initial: 0.0,
         boundaries: vec![BoundarySpec {
             tag: "vessel_wall".to_string(),

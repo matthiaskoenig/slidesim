@@ -29,6 +29,7 @@ fn scene(file: &str, dimension: u8) -> Scene {
             format: MeshFormat::Gmsh,
             path: fixture(file),
         },
+        maps: Vec::new(),
     }
 }
 

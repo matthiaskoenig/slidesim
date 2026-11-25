@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use contracts::{Condition, Scene, Study};
+use contracts::{Coefficient, Condition, Scene, Study, Table, check_maps};
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,7 +201,15 @@ fn schemas_match_load() {
         contracts::schema_scene(),
         "scene-minimal.json"
     ));
+    assert!(schema_accepts(
+        contracts::schema_study(),
+        "study-perfusion.json"
+    ));
+    assert!(schema_accepts(contracts::schema_scene(), "scene-maps.json"));
+    // Strictly increasing table values and unique tags are checked by `load` only.
     for f in [
+        "study-table-negative-diffusion.json",
+        "study-perfusion-no-boundary.json",
         "study-bad-version.json",
         "study-both-conditions.json",
         "study-no-condition.json",
@@ -257,5 +265,109 @@ fn example_studies_are_valid() {
         );
         let scene = Scene::load(&loaded.scene).unwrap();
         assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
+    }
+}
+
+#[test]
+fn scene_maps_load_and_resolve() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    assert_eq!(scene.maps.len(), 1);
+    let m = &scene.maps[0];
+    assert_eq!(m.id, "zonation");
+    assert!(m.path.is_absolute());
+    assert!(m.path.ends_with("testdata/contracts/maps/zonation.tif"));
+    assert_eq!(m.um_per_px, 1.5);
+    assert_eq!(m.no_value, Some(-1.0));
+}
+
+#[test]
+fn study_perfusion_round_trip() {
+    let study = Study::load(data("study-perfusion.json")).unwrap();
+    assert_eq!(
+        study.fields[0].diffusion,
+        Coefficient::Table(Table {
+            map: "zonation".into(),
+            points: vec![[0.0, 500.0], [1.0, 900.0]]
+        })
+    );
+    assert_eq!(study.fields[0].porosity, Coefficient::Constant(0.15));
+    assert!(study.fields[0].advection);
+    let p = study.perfusion.as_ref().unwrap();
+    assert_eq!(p.viscosity, 0.0024);
+    assert_eq!(p.direction.g0, 0.00043);
+    assert_eq!(p.boundaries.len(), 2);
+    let back: Study = serde_json::from_value(serde_json::to_value(&study).unwrap()).unwrap();
+    assert_eq!(back, study);
+    let reloaded =
+        Study::from_value(serde_json::to_value(&study).unwrap(), &data("x.json")).unwrap();
+    assert_eq!(reloaded.perfusion, study.perfusion);
+}
+
+#[test]
+fn table_eval() {
+    let c = Coefficient::Table(Table {
+        map: "m".into(),
+        points: vec![[0.0, 1.0], [1.0, 3.0]],
+    });
+    assert_eq!(c.eval(-1.0), 1.0);
+    assert_eq!(c.eval(0.5), 2.0);
+    assert_eq!(c.eval(2.0), 3.0);
+    assert_eq!(c.maps(), Some("m"));
+    assert_eq!(Coefficient::Constant(4.0).eval(9.0), 4.0);
+    assert_eq!(Coefficient::Constant(4.0).maps(), None);
+}
+
+#[test]
+fn table_not_increasing() {
+    let e = study_err("study-table-not-increasing.json");
+    assert!(
+        e.contains("diffusion") && e.contains("strictly increasing"),
+        "{e}"
+    );
+}
+
+#[test]
+fn table_negative_diffusion() {
+    let e = study_err("study-table-negative-diffusion.json");
+    assert!(e.contains("diffusion") && e.contains("> 0"), "{e}");
+}
+
+#[test]
+fn perfusion_without_boundary() {
+    let e = study_err("study-perfusion-no-boundary.json");
+    assert!(e.contains("perfusion.boundaries"), "{e}");
+}
+
+#[test]
+fn perfusion_duplicate_tag() {
+    let e = study_err("study-perfusion-duplicate-tag.json");
+    assert!(e.contains("duplicate") && e.contains("portal_wall"), "{e}");
+}
+
+#[test]
+fn unknown_map_lists_available() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    let mut study = Study::load(data("study-perfusion.json")).unwrap();
+    check_maps(&study, &scene).unwrap();
+    study.perfusion.as_mut().unwrap().direction.map = "zonation2".into();
+    let e = check_maps(&study, &scene).unwrap_err().to_string();
+    assert!(e.contains("zonation2") && e.contains("zonation"), "{e}");
+}
+
+#[test]
+fn milestone_1_studies_still_load() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    let mut files = vec![root.join("contracts/study-minimal.json")];
+    for d in std::fs::read_dir(root.join("studies")).unwrap() {
+        files.push(d.unwrap().path().join("study.json"));
+    }
+    for f in files {
+        let s = Study::load(&f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        assert!(s.perfusion.is_none());
+        for field in &s.fields {
+            assert!(matches!(field.diffusion, Coefficient::Constant(_)));
+            assert_eq!(field.porosity, Coefficient::Constant(1.0));
+            assert!(!field.advection);
+        }
     }
 }

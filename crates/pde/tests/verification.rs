@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    BoundarySpec, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene,
-    TimeSpec, Units,
+    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
+    SCENE_VERSION, Scene, TimeSpec, Units,
 };
 use mesh::{Mesh, MeshError};
 use pde::{DiffusionReaction, PdeError, Problem};
@@ -50,6 +50,7 @@ fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
             format: MeshFormat::Gmsh,
             path: fixture("unit_square.msh"),
         },
+        maps: Vec::new(),
     };
     Mesh::load(p, &scene, refinements).unwrap()
 }
@@ -69,9 +70,11 @@ const LAMBDA: f64 = 2.0 * PI * PI * D + K;
 fn field(diffusion: f64, decay: f64) -> FieldSpec {
     FieldSpec {
         id: "u".to_string(),
-        diffusion,
-        decay,
-        source: 0.0,
+        diffusion: Coefficient::Constant(diffusion),
+        decay: Coefficient::Constant(decay),
+        source: Coefficient::Constant(0.0),
+        porosity: Coefficient::Constant(1.0),
+        advection: false,
         initial: 0.0,
         boundaries: SIDES
             .iter()
@@ -87,9 +90,11 @@ fn field(diffusion: f64, decay: f64) -> FieldSpec {
 fn natural_field(decay: f64, boundaries: Vec<BoundarySpec>) -> FieldSpec {
     FieldSpec {
         id: "u".to_string(),
-        diffusion: D,
-        decay,
-        source: 0.0,
+        diffusion: Coefficient::Constant(D),
+        decay: Coefficient::Constant(decay),
+        source: Coefficient::Constant(0.0),
+        porosity: Coefficient::Constant(1.0),
+        advection: false,
         initial: 0.0,
         boundaries,
     }
@@ -482,7 +487,7 @@ fn uniform_initial_and_source_and_dirichlet_values() {
     // u = 2 everywhere, on the boundary too, with k u = f: a steady state from the start.
     let mut field = field(D, K);
     field.initial = 2.0;
-    field.source = 2.0 * K;
+    field.source = Coefficient::Constant(2.0 * K);
     for b in &mut field.boundaries {
         b.condition = Condition::Dirichlet { value: 2.0 };
     }
@@ -580,6 +585,25 @@ fn field_id_must_be_an_options_prefix() {
         };
         let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
         assert!(matches!(e, PdeError::Unsupported(_)), "{id:?}: {e}");
+    }
+}
+
+/// Coefficient tables, porosity and advection are not supported yet (milestone 2, Task 3).
+#[test]
+fn coefficient_tables_are_unsupported() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 0);
+    let table = Coefficient::Table(contracts::Table {
+        map: "m".to_string(),
+        points: vec![[0.0, 1.0], [1.0, 2.0]],
+    });
+    let mut fields = vec![natural_field(0.0, Vec::new()); 3];
+    fields[0].diffusion = table;
+    fields[1].porosity = Coefficient::Constant(0.5);
+    fields[2].advection = true;
+    for field in &fields {
+        let e = Problem::new(&mesh, field, &fixed(1.0, 0.1), &ceed(), "").unwrap_err();
+        assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
     }
 }
 

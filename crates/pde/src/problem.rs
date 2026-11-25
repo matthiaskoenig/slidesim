@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ceed::Ceed;
-use contracts::{Condition, FieldSpec, TimeSpec};
+use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
 use mesh::Mesh;
 use petsc::{ExactFinalTime, Implicit, OptionsScope, ProblemType, Ts, VecMut, VecRef, Vector, sys};
 
@@ -122,6 +122,19 @@ impl Problem {
         petsc_options: &str,
     ) -> Result<Problem> {
         let prefix = options_prefix(&field.id)?;
+        // Replaced by the coefficient fields of milestone 2 (Task 3).
+        let constant = |c: &Coefficient| match c {
+            Coefficient::Constant(x) => Ok(*x),
+            Coefficient::Table(_) => Err(PdeError::Unsupported("coefficient tables".into())),
+        };
+        let (d, k, f) = (
+            constant(&field.diffusion)?,
+            constant(&field.decay)?,
+            constant(&field.source)?,
+        );
+        if constant(&field.porosity)? != 1.0 || field.advection {
+            return Err(PdeError::Unsupported("porosity and advection".into()));
+        }
         let options = OptionsScope::new(
             &prefix,
             &[ERRORS_IF_NOT_CONVERGED, TOLERANCE, petsc_options],
@@ -157,9 +170,8 @@ impl Problem {
             .clone()
             .set_field_names(0, &field.id, &[CONCENTRATION_UNIT])?;
 
-        let (d, k) = (field.diffusion, field.decay);
         let mut source = SourceField::new(&disc)?;
-        source.values_mut().fill(field.source);
+        source.values_mut().fill(f);
         let load = if fluxes.is_empty() {
             None
         } else {
