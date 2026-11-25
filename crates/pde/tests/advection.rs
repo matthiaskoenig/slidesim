@@ -223,12 +223,13 @@ fn orders_low_peclet() {
 }
 
 /// Cell Peclet numbers 400, 200, 100. SUPG's rate in the L2 norm for advection-dominated flow
-/// is between 1 and 2 (1.5 in theory for general meshes); the test fixes the lower bound. For
-/// this smooth solution the orders were 2.19 and 2.11.
+/// is between 1 and 2 (1.5 in theory for general meshes); for this smooth solution the orders
+/// were 2.19 and 2.11. The bound 1.4 sits below the theoretical 1.5 and catches a loss of the
+/// stabilization's consistency (order 1).
 #[test]
 fn orders_high_peclet() {
     let p = Petsc::init(&[]).unwrap();
-    assert_orders(&advection_errors(&p, "orders_high_peclet", 100.0, 3), 0.9);
+    assert_orders(&advection_errors(&p, "orders_high_peclet", 100.0, 3), 1.4);
 }
 
 /// The refinements of the front.

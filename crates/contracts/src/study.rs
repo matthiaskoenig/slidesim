@@ -564,6 +564,25 @@ mod tests {
             s.validate().unwrap_err().to_string(),
             "field 'oxygen': boundary 'inlet' value must be finite, got inf"
         );
+        // A table point (JSON has no NaN: only a study built in code can carry one).
+        let mut s = study();
+        s.fields[0].decay = Coefficient::Table(Table {
+            map: "m".into(),
+            points: vec![[0.0, 0.1], [f64::NAN, 0.2]],
+        });
+        assert_eq!(
+            s.validate().unwrap_err().to_string(),
+            "field 'oxygen': decay: table point must be finite, got NaN"
+        );
+        let mut s = study();
+        s.fields[0].source = Coefficient::Table(Table {
+            map: "m".into(),
+            points: vec![[0.0, 0.1], [1.0, f64::NEG_INFINITY]],
+        });
+        assert_eq!(
+            s.validate().unwrap_err().to_string(),
+            "field 'oxygen': source must be finite, got -inf"
+        );
         let mut s = study();
         s.time.end = f64::INFINITY;
         assert_eq!(

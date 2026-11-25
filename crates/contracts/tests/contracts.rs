@@ -401,3 +401,92 @@ fn milestone_1_studies_still_load() {
         }
     }
 }
+
+/// The JSON of the file `name` of `testdata/contracts`.
+fn json(name: &str) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap()
+}
+
+/// The error of `Study::from_value` for `study-perfusion.json` changed by `change`.
+fn perfusion_study_err(change: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut value = json("study-perfusion.json");
+    change(&mut value);
+    Study::from_value(value, &data("study-perfusion.json"))
+        .unwrap_err()
+        .to_string()
+}
+
+#[test]
+fn table_needs_two_points() {
+    let e = perfusion_study_err(|v| {
+        v["fields"][0]["diffusion"]["points"] = serde_json::json!([[0.0, 500.0]]);
+    });
+    assert_eq!(
+        e,
+        "field 'tracer': diffusion: table needs at least 2 points"
+    );
+}
+
+#[test]
+fn decay_table_is_nonnegative() {
+    // A table output of 0 is a valid decay, a negative one is not.
+    let mut value = json("study-perfusion.json");
+    value["fields"][0]["decay"] =
+        serde_json::json!({"map": "zonation", "points": [[0.0, 0.0], [1.0, 0.5]]});
+    Study::from_value(value, &data("study-perfusion.json")).unwrap();
+    let e = perfusion_study_err(|v| {
+        v["fields"][0]["decay"] =
+            serde_json::json!({"map": "zonation", "points": [[0.0, 0.1], [1.0, -0.5]]});
+    });
+    assert_eq!(e, "field 'tracer': decay must be >= 0, got -0.5");
+}
+
+#[test]
+fn advection_needs_perfusion() {
+    let e = perfusion_study_err(|v| {
+        v.as_object_mut().unwrap().remove("perfusion");
+    });
+    assert_eq!(e, "field 'tracer': advection needs a 'perfusion' section");
+    // Without advection the same study is valid.
+    let mut value = json("study-perfusion.json");
+    value.as_object_mut().unwrap().remove("perfusion");
+    value["fields"][0]["advection"] = serde_json::Value::from(false);
+    Study::from_value(value, &data("study-perfusion.json")).unwrap();
+}
+
+#[test]
+fn scene_map_rules() {
+    let err = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = json("scene-maps.json");
+        change(&mut value);
+        Scene::from_value(value, &data("scene-maps.json"))
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        err(&|v| v["maps"][0]["id"] = "2zonation".into()),
+        "map id '2zonation' must match ^[A-Za-z][A-Za-z0-9_]*$"
+    );
+    assert_eq!(
+        err(&|v| v["maps"][0]["id"] = "zonation-1".into()),
+        "map id 'zonation-1' must match ^[A-Za-z][A-Za-z0-9_]*$"
+    );
+    assert_eq!(
+        err(&|v| {
+            let map = v["maps"][0].clone();
+            v["maps"].as_array_mut().unwrap().push(map);
+        }),
+        "duplicate map id 'zonation'"
+    );
+    for px in [0.0, -1.5] {
+        assert_eq!(
+            err(&|v| v["maps"][0]["um_per_px"] = px.into()),
+            format!("map 'zonation': um_per_px must be > 0, got {px}")
+        );
+    }
+    // Without no_value the map is valid: NaN pixels are the only ones without data.
+    let mut value = json("scene-maps.json");
+    value["maps"][0].as_object_mut().unwrap().remove("no_value");
+    let scene = Scene::from_value(value, &data("scene-maps.json")).unwrap();
+    assert_eq!(scene.maps[0].no_value, None);
+}
