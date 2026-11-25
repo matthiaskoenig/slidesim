@@ -185,7 +185,10 @@ fn schema_accepts(schema: serde_json::Value, file: &str) -> bool {
 
 #[test]
 fn schemas_match_load() {
-    assert!(schema_accepts(contracts::schema_study(), "study-minimal.json"));
+    assert!(schema_accepts(
+        contracts::schema_study(),
+        "study-minimal.json"
+    ));
     assert!(schema_accepts(
         contracts::schema_scene(),
         "scene-minimal.json"
