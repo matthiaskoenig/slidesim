@@ -31,14 +31,14 @@ mod matrix;
 mod ts;
 mod vector;
 
-use std::ffi::{CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use petsc_sys as sys;
 
-pub use dm::Dm;
+pub use dm::{Dm, Point};
 use error::check;
 pub use error::{Error, Result};
 #[doc(hidden)]
@@ -65,6 +65,16 @@ pub(crate) fn to_int(n: usize, what: &str) -> Result<sys::PetscInt> {
     })
 }
 
+/// `s` as a C string, or an error naming `what` if it contains a NUL character.
+pub(crate) fn c_string(s: &str, what: &str) -> Result<CString> {
+    CString::new(s).map_err(|_| {
+        Error::new(
+            sys::PETSC_ERR_ARG_WRONG,
+            format!("{what} {s:?} contains a NUL character"),
+        )
+    })
+}
+
 /// An initialized PETSc (and MPI, if PETSc initialized it). Dropping it finalizes PETSc.
 pub struct Petsc {
     // PETSc keeps pointers to the arguments: they live until PetscFinalize.
@@ -79,14 +89,7 @@ impl Petsc {
     pub fn init(args: &[&str]) -> Result<Petsc> {
         let args = std::iter::once("slidesim")
             .chain(args.iter().copied())
-            .map(|a| {
-                CString::new(a).map_err(|_| {
-                    Error::new(
-                        sys::PETSC_ERR_ARG_WRONG,
-                        format!("PETSc option {a:?} contains a NUL character"),
-                    )
-                })
-            })
+            .map(|a| c_string(a, "PETSc option"))
             .collect::<Result<Vec<_>>>()?;
         if INITIALIZED.swap(true, Ordering::SeqCst) {
             return Err(Error::new(
@@ -115,6 +118,85 @@ impl Petsc {
     /// `PETSC_COMM_WORLD`.
     pub fn comm(&self) -> Comm {
         Comm::new(unsafe { sys::PETSC_COMM_WORLD })
+    }
+
+    /// `PETSC_COMM_SELF`: this process alone.
+    pub fn comm_self(&self) -> Comm {
+        Comm::self_()
+    }
+
+    /// The value of the option `name` (for example `-ksp_type`) in the global options database:
+    /// `None` if it is not set, `Some("")` if it is set without a value (`PetscOptionsFindPair`).
+    pub fn option(&self, name: &str) -> Result<Option<String>> {
+        let name = c_string(name, "PETSc option")?;
+        let mut value: *const c_char = null();
+        let mut set = false;
+        // SAFETY: `value` points into the options database, and is copied before any other call.
+        chk!(unsafe {
+            sys::PetscOptionsFindPair(null_mut(), null(), name.as_ptr(), &mut value, &mut set)
+        });
+        Ok(set.then(|| {
+            if value.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(value) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        }))
+    }
+
+    /// Sets the option `name` (starting with `-`) to `value`, or without a value, in the global
+    /// options database (`PetscOptionsSetValue`).
+    pub fn set_option(&self, name: &str, value: Option<&str>) -> Result<()> {
+        if !name.starts_with('-') {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_WRONG,
+                format!("PETSc option {name:?} does not start with '-'"),
+            ));
+        }
+        let name = c_string(name, "PETSc option")?;
+        let value = value
+            .map(|v| c_string(v, "PETSc option value"))
+            .transpose()?;
+        // SAFETY: PETSc copies both strings.
+        chk!(unsafe {
+            sys::PetscOptionsSetValue(
+                null_mut(),
+                name.as_ptr(),
+                value.as_ref().map_or(null(), |v| v.as_ptr()),
+            )
+        });
+        Ok(())
+    }
+
+    /// Removes the option `name` from the global options database (`PetscOptionsClearValue`).
+    pub fn clear_option(&self, name: &str) -> Result<()> {
+        let name = c_string(name, "PETSc option")?;
+        chk!(unsafe { sys::PetscOptionsClearValue(null_mut(), name.as_ptr()) });
+        Ok(())
+    }
+
+    /// Runs `body` with the option `name` set to `value` (or without a value) in the global
+    /// options database, then restores the option as it was, also when `body` fails. An error of
+    /// `body` takes precedence over one of restoring.
+    pub fn with_option<T, E: From<Error>>(
+        &self,
+        name: &str,
+        value: Option<&str>,
+        body: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let previous = self.option(name)?;
+        self.set_option(name, value)?;
+        let result = body();
+        let restored = match previous.as_deref() {
+            None => self.clear_option(name),
+            Some("") => self.set_option(name, None),
+            Some(v) => self.set_option(name, Some(v)),
+        };
+        let value = result?;
+        restored?;
+        Ok(value)
     }
 }
 
@@ -166,6 +248,49 @@ impl Comm {
         let mut size: c_int = 0;
         unsafe { sys::MPI_Comm_size(self.0, &mut size) };
         size as usize
+    }
+
+    /// The sum of `x` over all processes (`MPI_Allreduce`).
+    pub fn sum_int(&self, x: sys::PetscInt) -> Result<sys::PetscInt> {
+        let op = unsafe { sys::petsc_sys_mpi_sum() };
+        self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_int() }, op)
+    }
+
+    /// The maximum of `x` over all processes (`MPI_Allreduce`).
+    pub fn max_int(&self, x: sys::PetscInt) -> Result<sys::PetscInt> {
+        let op = unsafe { sys::petsc_sys_mpi_max() };
+        self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_int() }, op)
+    }
+
+    /// The sum of `x` over all processes (`MPI_Allreduce`).
+    pub fn sum_real(&self, x: sys::PetscReal) -> Result<sys::PetscReal> {
+        let op = unsafe { sys::petsc_sys_mpi_sum() };
+        self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
+    }
+
+    /// `MPI_Allreduce` of one value; `datatype` is the MPI type of `T`.
+    fn all_reduce<T: Copy>(&self, x: T, datatype: sys::MPI_Datatype, op: sys::MPI_Op) -> Result<T> {
+        error::ensure_alive("MPI_Allreduce")?;
+        let mut y = x;
+        // SAFETY: one value of `datatype` in and out; MPI aborts on errors by default, and any
+        // other return is reported.
+        let ierr = unsafe {
+            sys::MPI_Allreduce(
+                (&raw const x).cast(),
+                (&raw mut y).cast(),
+                1,
+                datatype,
+                op,
+                self.0,
+            )
+        };
+        if ierr != 0 {
+            return Err(Error::new(
+                sys::PETSC_ERR_MPI,
+                format!("MPI_Allreduce failed with MPI error {ierr}"),
+            ));
+        }
+        Ok(y)
     }
 
     pub fn as_raw(&self) -> sys::MPI_Comm {

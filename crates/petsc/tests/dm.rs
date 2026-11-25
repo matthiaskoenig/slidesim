@@ -1,0 +1,200 @@
+//! Tests of the DMPlex queries, the options database and the reductions over a communicator.
+//! nextest runs each test in its own process, so every test initializes PETSc once.
+
+use std::path::Path;
+use std::ptr::{null, null_mut};
+
+use petsc::sys;
+use petsc::{Comm, Dm, Petsc};
+
+/// A box mesh of 2 x 2 quadrilaterals of [0, 2] x [0, 1], with the boundary label `marker`.
+fn quad_box(comm: &Comm) -> Dm {
+    let mut dm: sys::DM = null_mut();
+    let faces = [2, 2];
+    let (lower, upper) = ([0.0, 0.0], [2.0, 1.0]);
+    // SAFETY: valid arguments; `dm` receives a new DM whose reference `Dm` takes.
+    unsafe {
+        assert_eq!(
+            sys::DMPlexCreateBoxMesh(
+                comm.as_raw(),
+                2,
+                false,
+                faces.as_ptr(),
+                lower.as_ptr(),
+                upper.as_ptr(),
+                null(),
+                true,
+                0,
+                false,
+                &mut dm
+            ),
+            0
+        );
+        Dm::from_raw(dm)
+    }
+}
+
+#[test]
+fn plex_strata_and_dimension() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    assert_eq!(dm.dimension().unwrap(), 2);
+    assert_eq!(dm.coordinate_dimension().unwrap(), 2);
+    // Cells first, then vertices, then edges.
+    assert_eq!(dm.height_stratum(0).unwrap(), 0..4);
+    assert_eq!(dm.depth_stratum(0).unwrap(), 4..13);
+    assert_eq!(dm.depth_stratum(1).unwrap(), 13..25);
+    assert_eq!(dm.height_stratum(1).unwrap(), dm.depth_stratum(1).unwrap());
+}
+
+#[test]
+fn cell_volumes_and_numbering() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    for c in dm.height_stratum(0).unwrap() {
+        assert!((dm.cell_volume(c).unwrap() - 0.5).abs() < 1e-14);
+    }
+    // One process owns every cell: the global numbers are 0..4.
+    let mut numbers = dm.cell_numbering().unwrap();
+    numbers.sort();
+    assert_eq!(numbers, [0, 1, 2, 3]);
+}
+
+#[test]
+fn cell_volume_of_a_vertex_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let vertex = dm.depth_stratum(0).unwrap().start;
+    assert!(dm.cell_volume(vertex).is_err());
+}
+
+#[test]
+fn labels_and_strata() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let names = dm.label_names().unwrap();
+    for name in ["depth", "marker", "Face Sets"] {
+        assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+    }
+    assert!(dm.has_label("marker").unwrap());
+    assert!(!dm.has_label("nothing").unwrap());
+    assert_eq!(dm.label_values("marker").unwrap(), [1]);
+    // The boundary: 8 edges and 8 vertices.
+    let edges = dm.depth_stratum(1).unwrap();
+    let points = dm.stratum_points("marker", 1).unwrap();
+    assert_eq!(points.len(), 16);
+    assert_eq!(points.iter().filter(|p| edges.contains(p)).count(), 8);
+    // Absent labels and values have no points.
+    assert!(dm.label_values("nothing").unwrap().is_empty());
+    assert!(dm.stratum_points("nothing", 1).unwrap().is_empty());
+    assert!(dm.stratum_points("marker", 7).unwrap().is_empty());
+}
+
+#[test]
+fn label_name_with_nul_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let e = dm.has_label("a\0b").unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONG);
+}
+
+#[test]
+fn refine_quadruples_cells_and_keeps_labels() {
+    let p = Petsc::init(&[]).unwrap();
+    let coarse = quad_box(&p.comm());
+    let mut fine = coarse.refine().unwrap();
+    assert_eq!(fine.height_stratum(0).unwrap().len(), 16);
+    // The boundary is twice as finely divided: 16 edges and 16 vertices.
+    assert_eq!(fine.stratum_points("marker", 1).unwrap().len(), 32);
+    assert!(fine.coarse_dm().unwrap().is_none());
+    fine.set_coarse_dm(&coarse).unwrap();
+    let c = fine.coarse_dm().unwrap().unwrap();
+    assert_eq!(c.as_raw(), coarse.as_raw());
+}
+
+#[test]
+fn distribute_on_one_process_is_none() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    assert!(dm.distribute(0).unwrap().is_none());
+    assert_eq!(dm.comm().size(), 1);
+}
+
+#[test]
+fn plex_from_missing_file_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let e = Dm::plex_from_file(&p.comm(), Path::new("/nonexistent/mesh.msh"), "mesh", true)
+        .unwrap_err();
+    assert!(e.message.contains("/nonexistent/mesh.msh"), "{e}");
+}
+
+#[test]
+fn plex_from_file_with_unknown_extension_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let e = Dm::plex_from_file(&p.comm(), Path::new("/nonexistent/mesh.xyz"), "mesh", true)
+        .unwrap_err();
+    assert!(e.message.contains("mesh.xyz"), "{e}");
+}
+
+#[test]
+fn options_get_set_clear() {
+    let p = Petsc::init(&["-from_init", "3"]).unwrap();
+    assert_eq!(p.option("-from_init").unwrap().as_deref(), Some("3"));
+    assert_eq!(p.option("-unset").unwrap(), None);
+    p.set_option("-flag", None).unwrap();
+    assert_eq!(p.option("-flag").unwrap().as_deref(), Some(""));
+    p.set_option("-flag", Some("yes")).unwrap();
+    assert_eq!(p.option("-flag").unwrap().as_deref(), Some("yes"));
+    p.clear_option("-flag").unwrap();
+    assert_eq!(p.option("-flag").unwrap(), None);
+    assert_eq!(
+        p.set_option("no_dash", None).unwrap_err().code,
+        sys::PETSC_ERR_ARG_WRONG
+    );
+}
+
+#[test]
+fn with_option_restores_the_previous_state() {
+    let p = Petsc::init(&["-kept", "1"]).unwrap();
+    let seen = p
+        .with_option("-kept", Some("2"), || p.option("-kept"))
+        .unwrap();
+    assert_eq!(seen.as_deref(), Some("2"));
+    assert_eq!(p.option("-kept").unwrap().as_deref(), Some("1"));
+    let seen = p.with_option("-new", None, || p.option("-new")).unwrap();
+    assert_eq!(seen.as_deref(), Some(""));
+    assert_eq!(p.option("-new").unwrap(), None);
+    // Also when the body fails.
+    let e = p
+        .with_option("-new", Some("x"), || -> petsc::Result<()> {
+            Err(Dm::plex_from_file(&p.comm(), Path::new("/x.msh"), "m", true).unwrap_err())
+        })
+        .unwrap_err();
+    assert!(e.message.contains("/x.msh"), "{e}");
+    assert_eq!(p.option("-new").unwrap(), None);
+}
+
+#[test]
+fn reductions_over_one_process() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    assert_eq!(comm.sum_int(3).unwrap(), 3);
+    assert_eq!(comm.max_int(-1).unwrap(), -1);
+    assert_eq!(comm.sum_real(0.25).unwrap(), 0.25);
+    let one = p.comm_self();
+    assert_eq!((one.rank(), one.size()), (0, 1));
+    assert_eq!(one.sum_int(5).unwrap(), 5);
+}
+
+#[test]
+fn refined_cell_volumes_need_local_coordinates() {
+    let p = Petsc::init(&[]).unwrap();
+    let fine = quad_box(&p.comm()).refine().unwrap();
+    let cells = fine.height_stratum(0).unwrap();
+    // The refined DM has global coordinates only: a noncollective query cannot make local ones.
+    let e = fine.cell_volume(cells.start).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONGSTATE);
+    fine.set_up_local_coordinates().unwrap();
+    let total: f64 = cells.map(|c| fine.cell_volume(c).unwrap()).sum();
+    assert!((total - 2.0).abs() < 1e-14);
+}
