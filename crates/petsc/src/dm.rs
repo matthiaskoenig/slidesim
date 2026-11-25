@@ -351,13 +351,18 @@ impl Dm {
     /// cells of an edge of a 2D mesh, for example.
     pub fn support(&self, point: Point) -> Result<Vec<Point>> {
         let mut n = 0;
+        // SAFETY: `self.raw` is a live DMPlex; PETSc writes the support size into `n` (an error
+        // for a point outside the chart is returned, not undefined).
         chk!(unsafe { sys::DMPlexGetSupportSize(self.raw, point, &mut n) });
         let mut support: *const sys::PetscInt = null();
-        // SAFETY: PETSc lends `n` points of the DM.
+        // SAFETY: PETSc points `support` into the DM's own support storage, `n` entries long,
+        // valid as long as the DM is not changed; nothing here changes it.
         chk!(unsafe { sys::DMPlexGetSupport(self.raw, point, &mut support) });
         if n == 0 || support.is_null() {
             return Ok(Vec::new());
         }
+        // SAFETY: `support` is non-null and holds `n > 0` initialized `PetscInt`s (above), and
+        // the slice is copied before `self` can be borrowed mutably again.
         Ok(unsafe { std::slice::from_raw_parts(support, n as usize) }.to_vec())
     }
 

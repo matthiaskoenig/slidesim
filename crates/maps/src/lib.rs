@@ -243,6 +243,10 @@ impl Map {
 
     /// Gradient `[d/dx, d/dy]` per um at `x`: central differences at the pixel centres
     /// (one-sided at the array border), interpolated bilinearly.
+    ///
+    /// Stricter than [`Map::sample`]: the central differences of the four pixels around `x`
+    /// read their neighbours too, so a no-value or NaN pixel one pixel beyond those four fails
+    /// the gradient (an error naming the map and `x`) while the sample at `x` succeeds.
     pub fn gradient(&self, x: [f64; 2]) -> Result<[f64; 2], MapError> {
         let (r, c, ty, tx) = self.locate(x)?;
         let g00 = self.pixel_gradient(r, c, x)?;

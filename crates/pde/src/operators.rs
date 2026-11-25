@@ -283,9 +283,11 @@ impl Transport {
     }
 
     /// Assembles the operator with its current shift again into `matrix`, from
-    /// [`Transport::assemble`] of an operator on the same discretization: the entries keep
-    /// their places (the coordinate pattern depends on the discretization only), their values
-    /// are computed again. Collective.
+    /// [`Transport::assemble`] of this operator or of one on the same discretization with the
+    /// same terms and the same backflow entries ([`PointData::with_backflow`]): the coordinate
+    /// pattern is that of libCEED for the discretization followed by the backflow entries, so
+    /// the entries keep their places and only their values are computed again (with the shift
+    /// and the coefficients at the time of the call). Collective.
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
         self.update_context()?;
         let values = self.op.assemble_coo_values()?;
