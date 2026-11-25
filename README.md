@@ -54,8 +54,8 @@ cargo nextest run --workspace   # one process per test; some start mpiexec
 cargo test --doc --workspace    # doctests, among them compile_fail tests of the bindings
 ```
 
-`.config/nextest.toml` gives the tests which start `mpiexec` a test thread per process, and ends
-a test which hangs after ten minutes.
+`.config/nextest.toml` runs the tests which start `mpiexec` alone, because MPI processes stall
+when other tests take their CPUs, and ends a test which hangs after ten minutes.
 
 ## Run
 

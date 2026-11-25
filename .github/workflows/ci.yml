@@ -69,7 +69,7 @@ jobs:
           . deps/install/native-debug/env.sh
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        # .config/nextest.toml: test threads for the processes of mpiexec, and a timeout.
+        # .config/nextest.toml: tests which start mpiexec run alone, and a timeout.
         run: |
           . deps/install/native-debug/env.sh
           cargo nextest run --workspace --no-tests=pass
