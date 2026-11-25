@@ -13,11 +13,13 @@ pub const STUDY_VERSION: &str = "study/1";
 #[serde(deny_unknown_fields)]
 pub struct Study {
     /// Contract version, exactly `study/1`.
+    #[schemars(extend("const" = "study/1"))]
     pub version: String,
     /// Path of the `scene/1` file; relative paths resolve against the
     /// directory of the study file (`Study::load` stores the absolute path).
     pub scene: PathBuf,
     /// Diffusing fields, at least one, with unique ids.
+    #[schemars(length(min = 1))]
     pub fields: Vec<FieldSpec>,
     pub time: TimeSpec,
     #[serde(default)]
@@ -32,8 +34,10 @@ pub struct FieldSpec {
     /// Unique field id.
     pub id: String,
     /// Diffusion coefficient in um^2/s, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub diffusion: f64,
     /// First-order decay rate in 1/s, must be >= 0.
+    #[schemars(range(min = 0))]
     #[serde(default)]
     pub decay: f64,
     /// Uniform source term in mM/s.
@@ -68,6 +72,7 @@ pub enum Condition {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("oneOf" = [{"required": ["dirichlet"]}, {"required": ["flux"]}]))]
 struct BoundaryRepr {
     /// Name of the boundary tag in the mesh.
     tag: String,
@@ -117,8 +122,10 @@ impl From<BoundarySpec> for BoundaryRepr {
 #[serde(deny_unknown_fields)]
 pub struct TimeSpec {
     /// End time in s, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub end: f64,
     /// Time step in s (initial step if adaptive), must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
     pub dt: f64,
     /// Use adaptive time stepping.
     #[serde(default)]

@@ -12,8 +12,10 @@ pub const SCENE_VERSION: &str = "scene/1";
 #[serde(deny_unknown_fields)]
 pub struct Scene {
     /// Contract version, exactly `scene/1`.
+    #[schemars(extend("const" = "scene/1"))]
     pub version: String,
     /// Spatial dimension of the mesh (2 or 3).
+    #[schemars(range(min = 2, max = 3))]
     pub dimension: u8,
     pub units: Units,
     pub mesh: MeshRef,

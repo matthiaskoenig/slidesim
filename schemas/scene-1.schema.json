@@ -51,8 +51,8 @@
     "dimension": {
       "description": "Spatial dimension of the mesh (2 or 3).",
       "format": "uint8",
-      "maximum": 255,
-      "minimum": 0,
+      "maximum": 3,
+      "minimum": 2,
       "type": "integer"
     },
     "mesh": {
@@ -62,6 +62,7 @@
       "$ref": "#/$defs/Units"
     },
     "version": {
+      "const": "scene/1",
       "description": "Contract version, exactly `scene/1`.",
       "type": "string"
     }

@@ -159,3 +159,60 @@ fn schemas_are_current() {
         );
     }
 }
+
+#[test]
+fn boundary_needs_exactly_one_condition() {
+    for f in ["study-both-conditions.json", "study-no-condition.json"] {
+        let e = study_err(f);
+        assert!(
+            e.contains("boundary 'inlet': exactly one of 'dirichlet' and 'flux' is required"),
+            "{f}: {e}"
+        );
+    }
+}
+
+#[test]
+fn bad_dimension() {
+    let e = Scene::load(data("scene-bad-dimension.json")).unwrap_err();
+    assert_eq!(e.to_string(), "dimension must be 2 or 3, got 4");
+}
+
+fn schema_accepts(schema: serde_json::Value, file: &str) -> bool {
+    let text = std::fs::read_to_string(data(file)).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    jsonschema::validator_for(&schema).unwrap().is_valid(&doc)
+}
+
+#[test]
+fn schemas_match_load() {
+    assert!(schema_accepts(contracts::schema_study(), "study-minimal.json"));
+    assert!(schema_accepts(
+        contracts::schema_scene(),
+        "scene-minimal.json"
+    ));
+    for f in [
+        "study-bad-version.json",
+        "study-both-conditions.json",
+        "study-no-condition.json",
+        "study-empty-fields.json",
+        "study-zero-diffusion.json",
+        "study-negative-diffusion.json",
+        "study-negative-decay.json",
+        "study-zero-dt.json",
+        "study-zero-end.json",
+        "study-unknown-key.json",
+    ] {
+        assert!(
+            !schema_accepts(contracts::schema_study(), f),
+            "schema accepts {f}"
+        );
+        assert!(Study::load(data(f)).is_err(), "load accepts {f}");
+    }
+    for f in ["scene-bad-version.json", "scene-bad-dimension.json"] {
+        assert!(
+            !schema_accepts(contracts::schema_scene(), f),
+            "schema accepts {f}"
+        );
+        assert!(Scene::load(data(f)).is_err(), "load accepts {f}");
+    }
+}
