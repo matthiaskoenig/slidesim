@@ -13,6 +13,9 @@ case "$MODE" in
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=SCRIPTDIR/../../deps/versions.env
+. "$ROOT/deps/versions.env"
+SRC="$ROOT/deps/src"
 PREFIX="$ROOT/deps/install/native-$MODE"
 JOBS="$(nproc)"
 
@@ -27,14 +30,34 @@ cp -a "$ROOT/deps/src/libceed" "$ROOT/deps/build/libceed-$MODE"
   make -j"$JOBS" install prefix="$PREFIX" OPT="$FLAGS" CC=mpicc
 )
 
-# PETSc with its own BLAS/LAPACK, no C++ or Fortran.
+# flex, a build tool of PT-Scotch (its strategy parser), which PETSc does not download. Not
+# linked into anything. -D_GNU_SOURCE declares reallocarray for flex 2.6.4 on glibc >= 2.26.
+FLEX="$ROOT/deps/build/flex-$MODE"
+rm -rf "$FLEX"
+mkdir -p "$FLEX/src"
+tar xzf "$SRC/flex-$FLEX_VERSION.tar.gz" -C "$FLEX/src" --strip-components=1
+(
+  cd "$FLEX/src"
+  ./configure --quiet --prefix="$FLEX/install" --disable-nls --disable-shared \
+    CFLAGS="-O2 -D_GNU_SOURCE"
+  make -j"$JOBS"
+  make install
+)
+
+# PETSc with its own BLAS/LAPACK and the PT-Scotch graph partitioner (which needs bison and flex
+# to build), no C++ or Fortran. Every package comes from a pinned tarball in deps/src (fetch.sh).
+# PT-Scotch is compiled with PETSc's C flags, so with COPTFLAGS.
 rm -rf "$ROOT/deps/build/petsc-$MODE"
 cp -a "$ROOT/deps/src/petsc" "$ROOT/deps/build/petsc-$MODE"
 (
   cd "$ROOT/deps/build/petsc-$MODE"
   unset PETSC_DIR PETSC_ARCH
+  export PATH="$FLEX/install/bin:$PATH"
   ./configure --prefix="$PREFIX" --with-cc=mpicc --with-cxx=0 --with-fc=0 \
-    --download-f2cblaslapack --with-shared-libraries=1 \
+    --download-f2cblaslapack="$SRC/f2cblaslapack-$F2CBLASLAPACK_VERSION.tar.gz" \
+    --download-ptscotch="$SRC/scotch-v$PTSCOTCH_VERSION.tar.gz" \
+    --download-bison="$SRC/bison-$BISON_VERSION.tar.gz" \
+    --with-shared-libraries=1 \
     --with-debugging="$DEBUGGING" COPTFLAGS="$FLAGS"
   make -j"$JOBS" all
   make install

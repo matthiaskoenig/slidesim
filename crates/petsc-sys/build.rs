@@ -66,6 +66,21 @@ fn link_native(petsc_dir: &Path) {
     );
     link_line(&petsc);
     link_line(&run("mpicc", &["-show"], &[]));
+    // The shim calls PT-Scotch directly (`libpetsc.so` links it, but its symbols are not
+    // re-exported to the shim).
+    if petsc_has(petsc_dir, "PTSCOTCH") {
+        println!("cargo:rustc-link-lib=scotch");
+    }
+}
+
+/// Whether the PETSc installation defines `PETSC_HAVE_<package>` in its `petscconf.h`.
+fn petsc_has(petsc_dir: &Path, package: &str) -> bool {
+    let conf = petsc_dir.join("include/petscconf.h");
+    println!("cargo:rerun-if-changed={}", conf.display());
+    let text = std::fs::read_to_string(&conf)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", conf.display()));
+    let define = format!("#define PETSC_HAVE_{package} 1");
+    text.lines().any(|l| l.trim() == define)
 }
 
 /// Include directories of PETSc and MPI.

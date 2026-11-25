@@ -10,7 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev pkg-config python3
+        # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
+        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev pkg-config python3 cmake m4
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: taiki-e/install-action@v2
@@ -26,6 +27,7 @@ jobs:
             | tar xz --strip-components=1 -C "$WASI_SDK_PATH"
           echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
       - name: Cache native dependencies
+        # The key changes with the pinned versions and the build scripts (PETSc's configure).
         id: deps-cache
         uses: actions/cache@v4
         with:

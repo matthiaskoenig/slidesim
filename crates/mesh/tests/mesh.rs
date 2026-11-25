@@ -233,9 +233,78 @@ fn dimension_mismatch_is_error() {
     );
 }
 
-/// The tests `parallel_on_*_processes` run on several processes: the paths a single process does not take
-/// (the distributed mesh, reductions over processes, the readability check of process 0).
-const PARALLEL_TESTS: [&str; 8] = [
+/// The edge cut of the distributed mesh `dm` (distributed without overlap): the number of interior
+/// faces whose two cells are owned by different processes, over all processes. Without overlap,
+/// such a face is on both processes and is a ghost on exactly one of them; every other face is
+/// on one process only. Collective.
+fn edge_cut(dm: &Dm) -> i32 {
+    let faces = dm.height_stratum(1).unwrap();
+    let ghosts = dm.ghost_points().unwrap();
+    let cut = ghosts.iter().filter(|p| faces.contains(p)).count();
+    dm.comm().sum_int(cut as i32).unwrap()
+}
+
+/// The number of cells this process owns.
+fn owned_cells(dm: &Dm) -> usize {
+    let numbers = dm.cell_numbering().unwrap();
+    numbers.iter().filter(|&&g| g >= 0).count()
+}
+
+/// Distributed meshes are partitioned compactly: the edge cut of the default partitioner is at
+/// most a third of the cut of PETSc's `simple` partitioner (which splits the cells by their number
+/// in the file), and every process owns cells.
+#[test]
+fn partition_is_compact() {
+    let p = Petsc::init(&[]).unwrap();
+    let scene = scene("tissue_small.msh");
+    let mesh = Mesh::load(&p, &scene, 0).unwrap();
+    let simple = p
+        .with_option("-petscpartitioner_type", Some("simple"), || {
+            Mesh::load(&p, &scene, 0)
+        })
+        .unwrap();
+    let (dm, dm_simple) = (mesh.finest(), simple.finest());
+    let (cut, cut_simple) = (edge_cut(dm), edge_cut(dm_simple));
+    let ranks = p.comm().size();
+    if p.comm().rank() == 0 {
+        println!("edge cut on {ranks} processes: default {cut}, simple {cut_simple}");
+    }
+    assert!(
+        3 * cut <= cut_simple,
+        "edge cut {cut} is more than a third of the simple partitioner's {cut_simple}"
+    );
+    assert!(
+        owned_cells(dm) > 0,
+        "process {} owns no cell",
+        p.comm().rank()
+    );
+    assert_eq!(global_cells(dm), global_cells(dm_simple));
+}
+
+/// Loading a mesh again gives the same partition: it depends on the mesh and the number of
+/// processes only, not on the partitionings before in this process.
+#[test]
+fn partition_is_reproducible() {
+    let p = Petsc::init(&[]).unwrap();
+    let scene = scene("tissue_small.msh");
+    let first = Mesh::load(&p, &scene, 0).unwrap();
+    for _ in 0..2 {
+        let again = Mesh::load(&p, &scene, 0).unwrap();
+        let (a, b) = (first.finest(), again.finest());
+        // Not assert_eq: the coordinates are long.
+        assert!(
+            a.cell_numbering().unwrap() == b.cell_numbering().unwrap()
+                && a.local_coordinates().unwrap() == b.local_coordinates().unwrap(),
+            "process {}: the partition differs",
+            p.comm().rank()
+        );
+    }
+}
+
+/// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
+/// not take (the distributed mesh, its partition, reductions over processes, the readability check
+/// of process 0).
+const PARALLEL_TESTS: [&str; 10] = [
     "mpi_world_has_the_expected_size",
     "tissue_area",
     "refinement_quadruples_cells",
@@ -244,6 +313,8 @@ const PARALLEL_TESTS: [&str; 8] = [
     "levels_are_coarse_first_and_linked",
     "missing_mesh_file_is_error",
     "malformed_mesh_file_is_error",
+    "partition_is_compact",
+    "partition_is_reproducible",
 ];
 
 #[test]

@@ -2,9 +2,11 @@
 //!
 //! [`Mesh::load`] reads the gmsh file of a [`Scene`] into a DMPlex whose labels carry the gmsh
 //! physical names (`-dm_plex_gmsh_use_regions`), distributes it over the processes
-//! (`DMPlexDistribute`, no overlap) and refines it uniformly (`DMRefine`). The levels, coarse
-//! first, are linked for multigrid (`DMSetCoarseDM`). The labels of the physical names are the
-//! mesh's [`Tag`]s; they survive distribution and refinement, so every level has them.
+//! (`DMPlexDistribute`, no overlap) and refines it uniformly (`DMRefine`). The graph partitioner
+//! PT-Scotch decides which process owns which cell, if PETSc has it (see [`PARTITIONER`]). The
+//! levels, coarse first, are linked for multigrid (`DMSetCoarseDM`). The labels of the physical
+//! names are the mesh's [`Tag`]s; they survive distribution and refinement, so every level has
+//! them.
 //!
 //! A tag is data from the mesh file: this crate knows no tag names.
 
@@ -31,6 +33,15 @@ const PETSC_LABELS: [&str; 9] = [
 
 /// The PETSc option which names the labels of a gmsh mesh after its physical names.
 const USE_REGIONS: &str = "-dm_plex_gmsh_use_regions";
+
+/// The partitioner which distributes the mesh, if PETSc has it: PT-Scotch keeps the cells of a
+/// process together, so few faces are shared between processes (a small edge cut, little
+/// communication). Without it, PETSc's `simple` partitioner splits the cells by their number in
+/// the file, which scatters them. The option `-petscpartitioner_type` selects another.
+pub const PARTITIONER: &str = "ptscotch";
+
+/// The partitioner without [`PARTITIONER`].
+const FALLBACK_PARTITIONER: &str = "simple";
 
 /// A named part of the mesh: a gmsh physical group.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +109,7 @@ impl Mesh {
                 scene: scene.dimension,
             });
         }
+        select_partitioner(petsc, &coarse)?;
         if let Some(distributed) = coarse.distribute(0)? {
             coarse = distributed;
         }
@@ -149,6 +161,22 @@ fn read(petsc: &Petsc, comm: &Comm, path: &Path) -> petsc::Result<Dm> {
     petsc.with_option(USE_REGIONS, Some("true"), || {
         Dm::plex_from_file(comm, path, "mesh", true)
     })
+}
+
+/// Sets the partitioner of `dm`: [`PARTITIONER`] if PETSc has it, else [`FALLBACK_PARTITIONER`],
+/// unless the option `-petscpartitioner_type` selects another. Resets PT-Scotch's random
+/// generator, so that the partition depends on the mesh and the number of processes only, not on
+/// earlier partitionings in the process. Collective.
+fn select_partitioner(petsc: &Petsc, dm: &Dm) -> petsc::Result<()> {
+    petsc.reset_partitioner_random();
+    let partitioner = dm.partitioner()?;
+    let default = if petsc.has_external_package(PARTITIONER)? {
+        PARTITIONER
+    } else {
+        FALLBACK_PARTITIONER
+    };
+    partitioner.set_type(default)?;
+    partitioner.set_from_options()
 }
 
 /// An error on every process unless process 0 finds the mesh file `path` and can read it.

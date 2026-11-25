@@ -9,9 +9,14 @@ use petsc::{Comm, Dm, Petsc};
 
 /// A box mesh of 2 x 2 quadrilaterals of [0, 2] x [0, 1], with the boundary label `marker`.
 fn quad_box(comm: &Comm) -> Dm {
+    box_mesh(comm, [2, 2], [2.0, 1.0])
+}
+
+/// A box mesh of `faces` quadrilaterals of [0, upper[0]] x [0, upper[1]], with the boundary label
+/// `marker`.
+fn box_mesh(comm: &Comm, faces: [sys::PetscInt; 2], upper: [f64; 2]) -> Dm {
     let mut dm: sys::DM = null_mut();
-    let faces = [2, 2];
-    let (lower, upper) = ([0.0, 0.0], [2.0, 1.0]);
+    let lower = [0.0, 0.0];
     // SAFETY: valid arguments; `dm` receives a new DM whose reference `Dm` takes.
     unsafe {
         assert_eq!(
@@ -223,10 +228,76 @@ fn ghost_points_of_a_distributed_mesh() {
     assert_eq!(owned(dm.depth_stratum(1).unwrap()), 12);
 }
 
-/// The tests `parallel_on_*_processes` run on several processes: points shared between them.
-const PARALLEL_TESTS: [&str; 2] = [
+#[test]
+fn partitioner_type_is_set_and_read_from_options() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let partitioner = dm.partitioner().unwrap();
+    partitioner.set_type("simple").unwrap();
+    assert_eq!(partitioner.type_name().unwrap(), "simple");
+    // Without the option, the type stays as set.
+    partitioner.set_from_options().unwrap();
+    assert_eq!(partitioner.type_name().unwrap(), "simple");
+    p.with_option("-petscpartitioner_type", Some("gather"), || {
+        partitioner.set_from_options()
+    })
+    .unwrap();
+    assert_eq!(partitioner.type_name().unwrap(), "gather");
+    // The DM hands out the same partitioner.
+    assert_eq!(dm.partitioner().unwrap().type_name().unwrap(), "gather");
+    let e = partitioner.set_type("no_such_partitioner").unwrap_err();
+    assert!(e.message.contains("no_such_partitioner"), "{e}");
+    assert_eq!(partitioner.type_name().unwrap(), "gather");
+}
+
+/// The native builds of PETSc have the graph partitioner PT-Scotch (scripts/deps/build-native.sh).
+#[test]
+fn has_external_package() {
+    let p = Petsc::init(&[]).unwrap();
+    assert!(p.has_external_package("ptscotch").unwrap());
+    assert!(p.has_external_package("PTScotch").unwrap());
+    assert!(!p.has_external_package("no_such_package").unwrap());
+    let e = p.has_external_package("a\0b").unwrap_err();
+    assert!(e.message.contains("NUL"), "{e}");
+}
+
+/// The global cell numbers and the local coordinates of a 24 x 24 box mesh distributed by
+/// PT-Scotch, after a reset of its random generator.
+fn ptscotch_partition(p: &Petsc) -> (Vec<sys::PetscInt>, Vec<f64>) {
+    let mut dm = box_mesh(&p.comm(), [24, 24], [1.0, 1.0]);
+    dm.partitioner().unwrap().set_type("ptscotch").unwrap();
+    p.reset_partitioner_random();
+    if let Some(distributed) = dm.distribute(0).unwrap() {
+        dm = distributed;
+    }
+    (
+        dm.cell_numbering().unwrap(),
+        dm.local_coordinates().unwrap(),
+    )
+}
+
+/// After a reset of PT-Scotch's random generator, distributing the same mesh again gives the same
+/// partition.
+#[test]
+fn partitioner_random_reset_repeats_the_partition() {
+    let p = Petsc::init(&[]).unwrap();
+    let first = ptscotch_partition(&p);
+    for _ in 0..2 {
+        // Not assert_eq: the coordinates are long.
+        assert!(
+            ptscotch_partition(&p) == first,
+            "process {}: the partition differs",
+            p.comm().rank()
+        );
+    }
+}
+
+/// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
+/// partitions.
+const PARALLEL_TESTS: [&str; 3] = [
     "mpi_world_has_the_expected_size",
     "ghost_points_of_a_distributed_mesh",
+    "partitioner_random_reset_repeats_the_partition",
 ];
 
 #[test]

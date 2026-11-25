@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use petsc_sys as sys;
 
-pub use dm::{Dm, InsertMode, LocalOffsets, Point};
+pub use dm::{Dm, InsertMode, LocalOffsets, Partitioner, Point};
 use error::check;
 pub use error::{Error, Result};
 #[doc(hidden)]
@@ -155,6 +155,25 @@ impl Petsc {
     /// `PETSC_COMM_SELF`: this process alone.
     pub fn comm_self(&self) -> Comm {
         Comm::self_()
+    }
+
+    /// Whether PETSc was built with the external package `name`, for example `ptscotch`
+    /// (`PetscHasExternalPackage`; case insensitive).
+    pub fn has_external_package(&self, name: &str) -> Result<bool> {
+        let name = c_string(name, "package name")?;
+        let mut has = false;
+        // SAFETY: PETSc reads the name during the call.
+        chk!(unsafe { sys::PetscHasExternalPackage(name.as_ptr(), &mut has) });
+        Ok(has)
+    }
+
+    /// Resets the random generator of the graph partitioner PT-Scotch to its initial seed
+    /// (`SCOTCH_randomReset`), so that the next partitioning gives the same partition as the
+    /// first in this process; does nothing if PETSc has no PT-Scotch. The generator is global and
+    /// otherwise continues from one partitioning to the next. Call it on every process.
+    pub fn reset_partitioner_random(&self) {
+        // SAFETY: no arguments; PT-Scotch is initialized lazily.
+        unsafe { sys::petsc_sys_ptscotch_random_reset() };
     }
 
     /// The value of the option `name` (for example `-ksp_type`) in the global options database:

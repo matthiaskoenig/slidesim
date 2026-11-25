@@ -14,3 +14,6 @@ MPI_Op petsc_sys_mpi_max(void);
 
 /* PetscFree of an array PETSc allocated for the caller. */
 PetscErrorCode petsc_sys_free(void *p);
+
+/* SCOTCH_randomReset if PETSc has PT-Scotch, else nothing. */
+void petsc_sys_ptscotch_random_reset(void);

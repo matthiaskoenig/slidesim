@@ -1,6 +1,7 @@
 //! `DM`: meshes (DMPlex).
 
 use std::ffi::{CStr, c_char};
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -144,6 +145,18 @@ impl Dm {
         // SAFETY: `raw` receives a new DM, or stays null.
         chk!(unsafe { sys::DMPlexDistribute(self.raw, overlap, null_mut(), &mut raw) });
         Ok((!raw.is_null()).then_some(Dm { raw }))
+    }
+
+    /// The graph partitioner [`Dm::distribute`] decides with which process owns which cell
+    /// (`DMPlexGetPartitioner`), borrowed from the DM.
+    pub fn partitioner(&self) -> Result<Partitioner<'_>> {
+        let mut raw = null_mut();
+        // SAFETY: `raw` receives the partitioner, borrowed from the DM.
+        chk!(unsafe { sys::DMPlexGetPartitioner(self.raw, &mut raw) });
+        Ok(Partitioner {
+            raw,
+            _dm: PhantomData,
+        })
     }
 
     /// The DM refined once, on the same communicator (`DMRefine`). A DMPlex is refined
@@ -332,6 +345,42 @@ impl Dm {
         // SAFETY: the IS (or null) is ours to destroy.
         chk!(unsafe { sys::DMGetStratumIS(self.raw, name.as_ptr(), value, &mut is) });
         take_is(is, true)
+    }
+}
+
+/// The graph partitioner of a DMPlex (`PetscPartitioner`), borrowed from it ([`Dm::partitioner`]).
+#[derive(Debug)]
+pub struct Partitioner<'a> {
+    raw: sys::PetscPartitioner,
+    _dm: PhantomData<&'a Dm>,
+}
+
+impl Partitioner<'_> {
+    /// The partitioner type (`PetscPartitionerGetType`), for example `simple` or `ptscotch`.
+    pub fn type_name(&self) -> Result<String> {
+        let mut name: sys::PetscPartitionerType = null();
+        // SAFETY: `name` receives a string of the partitioner, or stays null.
+        chk!(unsafe { sys::PetscPartitionerGetType(self.raw, &mut name) });
+        // SAFETY: null or a NUL terminated string of the partitioner, valid for this call.
+        Ok(unsafe { string_from(name) }.unwrap_or_default())
+    }
+
+    /// Sets the partitioner type (`PetscPartitionerSetType`): `simple` (the cells split by their
+    /// number), or a graph partitioner PETSc was built with, for example `ptscotch`. An error if
+    /// PETSc has no such type. Collective.
+    pub fn set_type(&self, name: &str) -> Result<()> {
+        let name = c_string(name, "partitioner type")?;
+        // SAFETY: PETSc copies the name.
+        chk!(unsafe { sys::PetscPartitionerSetType(self.raw, name.as_ptr()) });
+        Ok(())
+    }
+
+    /// Takes the settings from the options database, for example the type from
+    /// `-petscpartitioner_type` (`PetscPartitionerSetFromOptions`). Collective.
+    pub fn set_from_options(&self) -> Result<()> {
+        // SAFETY: a valid partitioner.
+        chk!(unsafe { sys::PetscPartitionerSetFromOptions(self.raw) });
+        Ok(())
     }
 }
 
