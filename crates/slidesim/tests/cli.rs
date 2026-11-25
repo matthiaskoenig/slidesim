@@ -101,6 +101,17 @@ fn summary(out: &Path, field: &str) -> [Vec<f64>; 3] {
     })
 }
 
+/// A copy of the tissue_oxygen study in `dir` with `refinements` mesh refinements and the other
+/// settings of the original (the full study is too slow for the debug build of PETSc).
+fn coarse_study(dir: &Path, refinements: u32) -> PathBuf {
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(study().with_file_name("scene.json").display().to_string());
+    doc["mesh"]["refinements"] = Value::from(refinements);
+    let path = dir.join("coarse_study.json");
+    std::fs::write(&path, doc.to_string()).unwrap();
+    path
+}
+
 fn lobule_study() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/lobule_toy/study.json")
 }
@@ -182,29 +193,56 @@ fn lobule_toy_flows_from_portal_to_central() {
     // The defect of the advecting velocity at each output time of the tracer (none before the
     // first step).
     let defects = summary_json(&out)["fields"]["sucrose"]["advection_defect"].clone();
-    assert_eq!(defects.as_array().unwrap().len(), 3, "{defects}");
+    let defects = defects.as_array().unwrap();
+    assert_eq!(defects.len(), 3, "{defects:?}");
+    assert!(defects[0].is_null(), "{defects:?}");
+    // Observed: -411 and -229 against an inflow of 2105 um^2/s at 1 mM (about 20 % and 11 %): the
+    // non-conservation of the P1 velocity, small against the flux (bound: a quarter).
+    for defect in &defects[1..] {
+        let defect = defect.as_f64().expect("a finite defect");
+        assert!(
+            defect.abs() < 0.25 * portal * 1.0,
+            "{defect} against {portal}"
+        );
+    }
 }
 
-#[test]
-fn lobule_toy_tracer_reaches_central() {
-    let out = scratch("lobule_toy_tracer_reaches_central");
-    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
-    let path = out.join("sucrose_2.vtu");
-    let points = vtu_array(&path, "Position", 3);
-    let sucrose = vtu_array(&path, "sucrose.mM", 1);
+/// The mean of the tracer in the output `path` over the nodes within `radius` um of `centre`.
+fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
+    let points = vtu_array(path, "Position", 3);
+    let sucrose = vtu_array(path, "sucrose.mM", 1);
     assert_eq!(points.len(), 3 * sucrose.len());
     let near: Vec<f64> = points
         .as_chunks::<3>()
         .0
         .iter()
         .zip(&sucrose)
-        .filter(|(x, _)| ((x[0] - CENTRAL[0]).powi(2) + (x[1] - CENTRAL[1]).powi(2)).sqrt() < 30.0)
+        .filter(|(x, _)| ((x[0] - centre[0]).powi(2) + (x[1] - centre[1]).powi(2)).sqrt() < radius)
         .map(|(_, &c)| c)
         .collect();
-    // Nodes within 10 um of the wall of the hole (radius 20 um).
     assert!(near.len() > 10, "{}", near.len());
-    let mean = near.iter().sum::<f64>() / near.len() as f64;
-    assert!(mean > 0.1, "{mean}");
+    near.iter().sum::<f64>() / near.len() as f64
+}
+
+#[test]
+fn lobule_toy_tracer_reaches_central() {
+    let out = scratch("lobule_toy_tracer_reaches_central");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    // Nodes within 10 um of the wall of a hole (radius 20 um). The portal hole is at (90, 90).
+    let portal = [90.0, 90.0];
+    let end = mean_near(&out.join("sucrose_2.vtu"), CENTRAL, 30.0);
+    assert!(end > 0.1, "{end}");
+    // The front is still on its way at t = 5: more tracer at the portal than at the central hole.
+    let middle = out.join("sucrose_1.vtu");
+    let (at_portal, at_central) = (
+        mean_near(&middle, portal, 30.0),
+        mean_near(&middle, CENTRAL, 30.0),
+    );
+    assert!(at_portal > 0.9, "{at_portal}");
+    assert!(
+        at_central < 0.5 * at_portal,
+        "{at_central} against {at_portal}"
+    );
 }
 
 #[test]
@@ -226,7 +264,11 @@ fn unknown_map_fails_before_solving() {
     let run = slidesim(&args(&bad, &out, &[]));
     assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
     assert!(run.stderr.contains("zonation2"), "{}", run.stderr);
-    assert!(run.stderr.contains("zonation"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("the scene defines: [zonation]"),
+        "{}",
+        run.stderr
+    );
     assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
     let vtus = std::fs::read_dir(&out)
         .map(|d| {
@@ -245,7 +287,7 @@ fn runs_tissue_oxygen() {
     std::fs::write(out.join("oxygen_0.vtu"), "stale").unwrap();
     std::fs::write(out.join("summary.json"), "stale").unwrap();
     // PETSc options after `--`, per field with the prefix `<field id>_`.
-    let run = slidesim(&args(&study(), &out, &["-oxygen_ts_monitor"]));
+    let run = slidesim(&args(&coarse_study(&out, 1), &out, &["-oxygen_ts_monitor"]));
     assert_success(&run);
     assert!(
         run.stdout.contains("120 TS (oxygen_) dt 0.5 time 60."),
@@ -438,10 +480,11 @@ fn usage_error_exits_1() {
 fn two_ranks_match_one() {
     let dir = scratch("two_ranks_match_one");
     // A missing output directory is created, with its parents.
+    let study = coarse_study(&dir, 1);
     let serial = dir.join("serial/out");
-    assert_success(&slidesim(&args(&study(), &serial, &[])));
+    assert_success(&slidesim(&args(&study, &serial, &[])));
     let parallel = dir.join("parallel/out");
-    let Some(run) = slidesim_parallel(2, &args(&study(), &parallel, &[])) else {
+    let Some(run) = slidesim_parallel(2, &args(&study, &parallel, &[])) else {
         return;
     };
     assert_success(&run);
