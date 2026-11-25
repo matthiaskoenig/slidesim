@@ -10,6 +10,15 @@ Run from the repository root:
   `HOLE_RADIUS` um at `HOLE_CENTERS`, named as slideviz (`mesh/build_mesh.py`) names them: area
   `tissue` (3), edges `vessel_wall` (11, the hole boundaries) and `section_edge` (12, the outer
   boundary). Mesh size about `TISSUE_SIZE` um.
+
+Written by hand, not by this script:
+
+- `inverted_triangle.msh`: the square [0, 1] x [0, 1] um as two triangles, area `domain` (1).
+  Triangle 1 lists its vertices counterclockwise, (0, 0), (1, 0), (1, 1); triangle 2 clockwise,
+  (0, 0), (0, 1), (1, 1): an inverted element, which gmsh never writes. PETSc keeps the vertex
+  order of the file, so its Jacobian determinant is negative.
+- `unit_tetrahedron.msh`: the tetrahedron (0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1) um, volume
+  `domain` (1): a 3D mesh, for errors of code which supports 2D only.
 """
 
 from pathlib import Path

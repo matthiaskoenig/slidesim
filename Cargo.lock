@@ -598,6 +598,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pde"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "ceed",
+ "ceed-sys",
+ "contracts",
+ "mesh",
+ "petsc",
+ "thiserror",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
