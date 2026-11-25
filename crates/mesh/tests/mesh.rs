@@ -1,8 +1,12 @@
 //! Tests of loading gmsh meshes. nextest runs each test in its own process, so every test
-//! initializes PETSc once.
+//! initializes PETSc once. `parallel_on_*_processes` run some of them again under `mpiexec`.
 
 use std::f64::consts::PI;
+use std::io::{ErrorKind, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError, Tag};
@@ -231,4 +235,124 @@ fn dimension_mismatch_is_error() {
             path.display()
         )
     );
+}
+
+/// Set in the runs [`parallel`] starts under `mpiexec`: the number of processes.
+const MPI_RANKS: &str = "SLIDESIM_MESH_MPI_RANKS";
+
+/// The tests [`parallel`] runs on several processes: the paths a single process does not take
+/// (the distributed mesh, reductions over processes, the readability check of process 0).
+const PARALLEL_TESTS: [&str; 8] = [
+    "mpi_world_has_the_expected_size",
+    "tissue_area",
+    "refinement_quadruples_cells",
+    "tags_are_the_physical_names",
+    "tags_survive_refinement",
+    "levels_are_coarse_first_and_linked",
+    "missing_mesh_file_is_error",
+    "malformed_mesh_file_is_error",
+];
+
+/// How long one run under `mpiexec` may take: a hang (a process waiting for another which left a
+/// collective call with an error) fails the test.
+const PARALLEL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Runs each of [`PARALLEL_TESTS`] of this test binary under `mpiexec -n ranks`, one run per
+/// test (PETSc is initialized once per process). Skipped if there is no `mpiexec`.
+fn parallel(ranks: usize) {
+    if std::env::var_os(MPI_RANKS).is_some() {
+        // A run under mpiexec: do not start runs from it.
+        return;
+    }
+    let version = match Command::new("mpiexec").arg("--version").output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            eprintln!("skipped: no mpiexec");
+            return;
+        }
+        Err(e) => panic!("cannot run mpiexec: {e}"),
+    };
+    let open_mpi = version.contains("Open MPI") || version.contains("OpenRTE");
+    let exe = std::env::current_exe().unwrap();
+    for test in PARALLEL_TESTS {
+        let mut cmd = Command::new("mpiexec");
+        if open_mpi {
+            // More processes than cores is fine for these small meshes.
+            cmd.arg("--oversubscribe");
+        }
+        cmd.args(["-n", &ranks.to_string()])
+            .arg(&exe)
+            .args(["--exact", test, "--test-threads", "1", "--color", "never"])
+            .env(MPI_RANKS, ranks.to_string())
+            // Its own process group, so that a timeout kills mpiexec and every process.
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let (status, stdout, stderr) = run_with_timeout(cmd, PARALLEL_TIMEOUT);
+        let output = format!("{stdout}\n{stderr}");
+        let status = status.unwrap_or_else(|| {
+            panic!("{test} on {ranks} processes timed out after {PARALLEL_TIMEOUT:?}:\n{output}")
+        });
+        assert!(
+            status.success(),
+            "{test} on {ranks} processes failed ({status}):\n{output}"
+        );
+        // Each process ran the test (and not zero tests): output of the processes may be
+        // interleaved, so count the summaries in the whole text.
+        let ran = stdout.matches("1 passed; 0 failed").count();
+        assert_eq!(
+            ran, ranks,
+            "{test} ran on {ran} of {ranks} processes:\n{output}"
+        );
+    }
+}
+
+/// Runs `cmd` (in its own process group) for at most `timeout`: its exit status, or `None` if it
+/// was killed (with its whole process group) for taking longer; and its stdout and stderr.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> (Option<ExitStatus>, String, String) {
+    let mut child = cmd.spawn().unwrap();
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            pipe.read_to_string(&mut text).unwrap();
+            text
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().unwrap()));
+    let stderr = read(Box::new(child.stderr.take().unwrap()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if start.elapsed() > timeout {
+            // The group id is the pid of mpiexec (`process_group(0)`).
+            let group = format!("-{}", child.id());
+            Command::new("kill")
+                .args(["-KILL", "--", &group])
+                .status()
+                .unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    (status, stdout.join().unwrap(), stderr.join().unwrap())
+}
+
+#[test]
+fn mpi_world_has_the_expected_size() {
+    let p = Petsc::init(&[]).unwrap();
+    let ranks = std::env::var(MPI_RANKS).map_or(1, |n| n.parse().unwrap());
+    assert_eq!(p.comm().size(), ranks);
+}
+
+#[test]
+fn parallel_on_2_processes() {
+    parallel(2);
+}
+
+#[test]
+fn parallel_on_3_processes() {
+    parallel(3);
 }
