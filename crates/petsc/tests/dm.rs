@@ -294,8 +294,9 @@ fn partitioner_random_reset_repeats_the_partition() {
 
 /// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
 /// partitions.
-const PARALLEL_TESTS: [&str; 3] = [
+const PARALLEL_TESTS: [&str; 4] = [
     "mpi_world_has_the_expected_size",
+    "barrier_waits_for_every_process",
     "ghost_points_of_a_distributed_mesh",
     "partitioner_random_reset_repeats_the_partition",
 ];
@@ -304,6 +305,32 @@ const PARALLEL_TESTS: [&str; 3] = [
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();
     assert_eq!(p.comm().size(), test_support::ranks());
+}
+
+#[test]
+fn barrier_waits_for_every_process() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    // One file per number of processes: the runs on 2 and 3 processes may overlap.
+    let file = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("barrier")
+        .join(comm.size().to_string());
+    if comm.rank() == 0 {
+        if file.exists() {
+            std::fs::remove_file(&file).unwrap();
+        }
+        // Late, after the others reached the barrier.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+    }
+    comm.barrier().unwrap();
+    assert!(
+        file.exists(),
+        "process {} passed the barrier early",
+        comm.rank()
+    );
+    comm.barrier().unwrap();
 }
 
 #[test]

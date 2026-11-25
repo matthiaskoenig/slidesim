@@ -296,6 +296,21 @@ impl Comm {
         self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
     }
 
+    /// Waits until every process has called it (`MPI_Barrier`).
+    pub fn barrier(&self) -> Result<()> {
+        error::ensure_alive("MPI_Barrier")?;
+        // SAFETY: a valid communicator while PETSc is initialized; MPI aborts on errors by
+        // default, and any other return is reported.
+        let ierr = unsafe { sys::MPI_Barrier(self.0) };
+        if ierr != 0 {
+            return Err(Error::new(
+                sys::PETSC_ERR_MPI,
+                format!("MPI_Barrier failed with MPI error {ierr}"),
+            ));
+        }
+        Ok(())
+    }
+
     /// `MPI_Allreduce` of one value; `datatype` is the MPI type of `T`.
     fn all_reduce<T: Copy>(&self, x: T, datatype: sys::MPI_Datatype, op: sys::MPI_Op) -> Result<T> {
         error::ensure_alive("MPI_Allreduce")?;
