@@ -248,7 +248,7 @@ impl Problem {
     /// the remainder in two, rather than take a tiny last step). Fixed steps go on with
     /// `TimeSpec::dt` after it; adaptive steps with the adaptor's choice. Collective.
     ///
-    /// Errors: [`PdeError::InvalidTime`] if `t` is before the current time;
+    /// Errors: [`PdeError::InvalidTime`] if `t` is before the current time or not finite;
     /// [`PdeError::Diverged`] if a solver does not converge or a step fails (then
     /// [`Problem::time`] is the time of the last step which succeeded), and [`PdeError::Petsc`]
     /// for other failures of PETSc. Either leaves the solvers in an unknown state: from then on
@@ -257,7 +257,7 @@ impl Problem {
     /// [`Problem::solution`], [`Problem::l2_error`], [`Problem::total_mass`]).
     pub fn step_to(&mut self, t: f64) -> Result<()> {
         self.ensure_usable()?;
-        if t.is_nan() || t < self.t {
+        if !t.is_finite() || t < self.t {
             return Err(PdeError::InvalidTime { t, time: self.t });
         }
         if t == self.t {

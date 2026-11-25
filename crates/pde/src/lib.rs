@@ -59,7 +59,7 @@ pub enum PdeError {
     /// `t` the time reached (in s), at the last step which succeeded.
     #[error("time integration failed at t = {t} s: {reason}")]
     Diverged { reason: String, t: f64 },
-    /// A time to step to which is before the current time (or not a number).
+    /// A time to step to which is before the current time, or not finite.
     #[error("cannot step to t = {t} s from t = {time} s")]
     InvalidTime { t: f64, time: f64 },
     /// A [`Problem`] whose time integration failed earlier (`failure`, at the time `t` in s): its

@@ -397,6 +397,27 @@ fn steps_end_at_the_requested_times() {
 }
 
 #[test]
+fn step_to_a_time_which_is_not_finite_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &fixed(1.0, 0.1), &ceed(), ACCURATE).unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem.step_to(0.1).unwrap();
+    for t in [f64::INFINITY, f64::NAN, f64::NEG_INFINITY] {
+        let e = problem.step_to(t).unwrap_err();
+        let PdeError::InvalidTime { time, .. } = &e else {
+            panic!("expected InvalidTime for {t}, got {e}");
+        };
+        assert_eq!(*time, 0.1);
+    }
+    // Rejected before any step: the problem is not poisoned.
+    assert_eq!(problem.time(), 0.1);
+    problem.step_to(0.2).unwrap();
+    assert_eq!(problem.time(), 0.2);
+}
+
+#[test]
 fn fixed_steps_keep_their_size_after_requested_times() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 1);
