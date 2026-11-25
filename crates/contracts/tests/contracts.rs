@@ -66,6 +66,14 @@ fn length_unit() {
 }
 
 #[test]
+fn bad_field_id() {
+    assert_eq!(
+        study_err("study-bad-field-id.json"),
+        "field id 'oxygen-2' must match ^[A-Za-z][A-Za-z0-9_]*$"
+    );
+}
+
+#[test]
 fn negative_diffusion() {
     assert_eq!(
         study_err("study-negative-diffusion.json"),
@@ -204,6 +212,7 @@ fn schemas_match_load() {
         "study-zero-dt.json",
         "study-zero-end.json",
         "study-unknown-key.json",
+        "study-bad-field-id.json",
     ] {
         assert!(
             !schema_accepts(contracts::schema_study(), f),

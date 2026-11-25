@@ -67,7 +67,8 @@
           "type": "number"
         },
         "id": {
-          "description": "Unique field id.",
+          "description": "Unique field id: an ASCII letter, then ASCII letters, digits and `_` (it names the\nPETSc options prefix of the field, `<id>_`).",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
           "type": "string"
         },
         "initial": {

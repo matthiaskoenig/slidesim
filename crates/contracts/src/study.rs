@@ -31,7 +31,9 @@ pub struct Study {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
-    /// Unique field id.
+    /// Unique field id: an ASCII letter, then ASCII letters, digits and `_` (it names the
+    /// PETSc options prefix of the field, `<id>_`).
+    #[schemars(extend("pattern" = "^[A-Za-z][A-Za-z0-9_]*$"))]
     pub id: String,
     /// Diffusion coefficient in um^2/s, must be > 0.
     #[schemars(extend("exclusiveMinimum" = 0))]
@@ -200,6 +202,13 @@ impl Study {
 impl FieldSpec {
     fn validate(&self) -> Result<(), ContractError> {
         let id = &self.id;
+        let valid_id = id.starts_with(|c: char| c.is_ascii_alphabetic())
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_id {
+            return Err(invalid(format!(
+                "field id '{id}' must match ^[A-Za-z][A-Za-z0-9_]*$"
+            )));
+        }
         for (name, x) in [
             ("diffusion", self.diffusion),
             ("decay", self.decay),
