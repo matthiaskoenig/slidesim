@@ -15,12 +15,12 @@
 #   SLIDE                slide stem without the stain [mouse_apap_000mg_m1]
 #   ANIMAL               prefix of the prediction files [SLIDE without "mouse_apap_"]
 #   LUMEN, NECROSIS      prediction files [SLIDEVIZ_DATA/predictions/ANIMAL_{lumen,necrosis}.npz]
-#   CENTRE_ROW, CENTRE_COL  field centre, H&E level 0 pixels [14000 12000]
+#   CENTRE_ROW, CENTRE_COL  field centre, H&E level 0 pixels [10114 16388]
 #   FIELD_UM             field edge in um [1500]
 #   MESH_SIZE_UM         element sizes SMALL:LARGE of build_mesh.py [5:20]
 #   OUT                  output folder [.superpowers/sdd/2026-11-25-slidesim-m2-perfusion/task-9-real]
 #   STUDIES              studies to run, may be empty [baseline calibrated whole_blood radial10]
-#   BASELINE_REFINEMENTS extra refinement levels of the baseline, may be empty [1]
+#   BASELINE_REFINEMENTS extra refinement levels of the baseline, may be empty [0 1]
 #   NP                   MPI processes [4]
 #   MPIEXEC_FLAGS        extra mpiexec flags, e.g. --oversubscribe []
 #   PETSC_ENV            env.sh of the PETSc/libCEED install [deps/install/native-opt/env.sh]
@@ -36,13 +36,13 @@ SLIDE=${SLIDE:-mouse_apap_000mg_m1}
 ANIMAL=${ANIMAL:-${SLIDE#mouse_apap_}}
 LUMEN=${LUMEN:-$SLIDEVIZ_DATA/predictions/${ANIMAL}_lumen.npz}
 NECROSIS=${NECROSIS:-$SLIDEVIZ_DATA/predictions/${ANIMAL}_necrosis.npz}
-CENTRE_ROW=${CENTRE_ROW:-14000}
-CENTRE_COL=${CENTRE_COL:-12000}
+CENTRE_ROW=${CENTRE_ROW:-10114}
+CENTRE_COL=${CENTRE_COL:-16388}
 FIELD_UM=${FIELD_UM:-1500}
 MESH_SIZE_UM=${MESH_SIZE_UM:-5:20}
 OUT=${OUT:-$ROOT/.superpowers/sdd/2026-11-25-slidesim-m2-perfusion/task-9-real}
 STUDIES=${STUDIES-baseline calibrated whole_blood radial10}
-BASELINE_REFINEMENTS=${BASELINE_REFINEMENTS-1}
+BASELINE_REFINEMENTS=${BASELINE_REFINEMENTS-0 1}
 NP=${NP:-4}
 MPIEXEC_FLAGS=${MPIEXEC_FLAGS:-}
 PETSC_ENV=${PETSC_ENV:-$ROOT/deps/install/native-opt/env.sh}
