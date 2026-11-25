@@ -2,17 +2,15 @@
 //! test in its own process, so every test initializes PETSc once. `parallel_on_2_processes` runs
 //! some of them again under `mpiexec`, as does `parallel_on_3_processes`.
 
-use std::io::{ErrorKind, Read};
-use std::os::unix::process::CommandExt;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError};
 use pde::{DiffusionReaction, Discretization, PdeError, SourceField};
-use petsc::{Petsc, Vector};
+use petsc::{Petsc, ShellOperator, VecMut, VecRef, Vector};
 
 fn fixture(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -153,6 +151,63 @@ fn assembled_matches_shell() {
     let y = apply(&disc, op, &x);
     let error = distance(&disc, &y, &expected) / expected.norm2().unwrap();
     assert!(error < 1e-14, "relative |A x - A_coo x| = {error}");
+}
+
+/// A shell operator forwarding to a shared [`DiffusionReaction`], whose coefficients can change
+/// while PETSc owns the shell (as an implicit time integrator changes the shift each step).
+struct Shared(Rc<RefCell<DiffusionReaction>>);
+
+impl ShellOperator for Shared {
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
+        self.0.borrow().mult(x, y)
+    }
+
+    fn diagonal(&self, d: &mut VecMut<'_>) -> petsc::Result<()> {
+        self.0.borrow().diagonal(d)
+    }
+}
+
+#[test]
+fn changed_coefficients_reach_mult_and_diagonal() {
+    let p = Petsc::init(&[]).unwrap();
+    let (disc, op) = tissue_operator(&p);
+    let op = Rc::new(RefCell::new(op));
+    let shell = disc.shell_matrix(Shared(Rc::clone(&op))).unwrap();
+    let mut x = disc.global_vector().unwrap();
+    let rank = p.comm().rank();
+    x.with_array_mut(|a| {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = (i as f64 + 1000.0 * rank as f64).cos();
+        }
+    })
+    .unwrap();
+    // Applied once with the first coefficients, then changed.
+    let mut before = disc.global_vector().unwrap();
+    shell.mult(&x, &mut before).unwrap();
+    let mut diagonal_before = disc.global_vector().unwrap();
+    shell.diagonal(&mut diagonal_before).unwrap();
+    {
+        let mut op = op.borrow_mut();
+        op.d = 1.5;
+        op.k = 0.1;
+        op.shift = 10.0;
+    }
+    let mut y = disc.global_vector().unwrap();
+    shell.mult(&x, &mut y).unwrap();
+    let mut diagonal = disc.global_vector().unwrap();
+    shell.diagonal(&mut diagonal).unwrap();
+    // The assembled matrix of the new coefficients.
+    let assembled = op.borrow().assemble().unwrap();
+    let mut expected = disc.global_vector().unwrap();
+    assembled.mult(&x, &mut expected).unwrap();
+    let error = distance(&disc, &y, &expected) / expected.norm2().unwrap();
+    assert!(error < 1e-14, "relative |A x - A_coo x| = {error}");
+    assembled.diagonal(&mut expected).unwrap();
+    let error = distance(&disc, &diagonal, &expected) / expected.norm2().unwrap();
+    assert!(error < 1e-13, "relative |diag - diag(A)| = {error}");
+    // And they differ from those of the first coefficients.
+    assert!(distance(&disc, &y, &before) > 0.1 * expected.norm2().unwrap());
+    assert!(distance(&disc, &diagonal, &diagonal_before) > 0.1 * expected.norm2().unwrap());
 }
 
 #[test]
@@ -353,19 +408,17 @@ fn level_out_of_range_is_error() {
     );
 }
 
-/// Set in the runs [`parallel`] starts under `mpiexec`: the number of processes.
-const MPI_RANKS: &str = "SLIDESIM_PDE_MPI_RANKS";
-
-/// The tests [`parallel`] runs on several processes: operators and assembly on a distributed
+/// The tests `parallel_on_*_processes` run on several processes: operators and assembly on a distributed
 /// mesh (ghost dofs shared between processes, global numbering by owner), and errors found on
 /// some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one without
 /// cells.
-const PARALLEL_TESTS: [&str; 10] = [
+const PARALLEL_TESTS: [&str; 11] = [
     "mpi_world_has_the_expected_size",
     "mass_integrates_area",
     "diffusion_kills_constants",
     "diagonal_matches_assembled",
     "assembled_matches_shell",
+    "changed_coefficients_reach_mult_and_diagonal",
     "essential_dofs_leave_global_vectors",
     "apply_local_uses_essential_values",
     "source_integrates_over_the_domain",
@@ -373,106 +426,18 @@ const PARALLEL_TESTS: [&str; 10] = [
     "inverted_element_is_error",
 ];
 
-/// How long one run under `mpiexec` may take: a hang (a process waiting for another which left a
-/// collective call with an error) fails the test.
-const PARALLEL_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Runs each of [`PARALLEL_TESTS`] of this test binary under `mpiexec -n ranks`, one run per
-/// test (PETSc is initialized once per process). Skipped if there is no `mpiexec`.
-fn parallel(ranks: usize) {
-    if std::env::var_os(MPI_RANKS).is_some() {
-        // A run under mpiexec: do not start runs from it.
-        return;
-    }
-    let version = match Command::new("mpiexec").arg("--version").output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            eprintln!("skipped: no mpiexec");
-            return;
-        }
-        Err(e) => panic!("cannot run mpiexec: {e}"),
-    };
-    let open_mpi = version.contains("Open MPI") || version.contains("OpenRTE");
-    let exe = std::env::current_exe().unwrap();
-    for test in PARALLEL_TESTS {
-        let mut cmd = Command::new("mpiexec");
-        if open_mpi {
-            // More processes than cores is fine for these small meshes.
-            cmd.arg("--oversubscribe");
-        }
-        cmd.args(["-n", &ranks.to_string()])
-            .arg(&exe)
-            .args(["--exact", test, "--test-threads", "1", "--color", "never"])
-            .env(MPI_RANKS, ranks.to_string())
-            // Its own process group, so that a timeout kills mpiexec and every process.
-            .process_group(0)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let (status, stdout, stderr) = run_with_timeout(cmd, PARALLEL_TIMEOUT);
-        let output = format!("{stdout}\n{stderr}");
-        let status = status.unwrap_or_else(|| {
-            panic!("{test} on {ranks} processes timed out after {PARALLEL_TIMEOUT:?}:\n{output}")
-        });
-        assert!(
-            status.success(),
-            "{test} on {ranks} processes failed ({status}):\n{output}"
-        );
-        // Each process ran the test (and not zero tests): output of the processes may be
-        // interleaved, so count the summaries in the whole text.
-        let ran = stdout.matches("1 passed; 0 failed").count();
-        assert_eq!(
-            ran, ranks,
-            "{test} ran on {ran} of {ranks} processes:\n{output}"
-        );
-    }
-}
-
-/// Runs `cmd` (in its own process group) for at most `timeout`: its exit status, or `None` if it
-/// was killed (with its whole process group) for taking longer; and its stdout and stderr.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> (Option<ExitStatus>, String, String) {
-    let mut child = cmd.spawn().unwrap();
-    let read = |mut pipe: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            pipe.read_to_string(&mut text).unwrap();
-            text
-        })
-    };
-    let stdout = read(Box::new(child.stdout.take().unwrap()));
-    let stderr = read(Box::new(child.stderr.take().unwrap()));
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break Some(status);
-        }
-        if start.elapsed() > timeout {
-            // The group id is the pid of mpiexec (`process_group(0)`).
-            let group = format!("-{}", child.id());
-            Command::new("kill")
-                .args(["-KILL", "--", &group])
-                .status()
-                .unwrap();
-            child.wait().unwrap();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    (status, stdout.join().unwrap(), stderr.join().unwrap())
-}
-
 #[test]
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();
-    let ranks = std::env::var(MPI_RANKS).map_or(1, |n| n.parse().unwrap());
-    assert_eq!(p.comm().size(), ranks);
+    assert_eq!(p.comm().size(), test_support::ranks());
 }
 
 #[test]
 fn parallel_on_2_processes() {
-    parallel(2);
+    test_support::parallel(2, &PARALLEL_TESTS);
 }
 
 #[test]
 fn parallel_on_3_processes() {
-    parallel(3);
+    test_support::parallel(3, &PARALLEL_TESTS);
 }

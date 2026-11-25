@@ -15,6 +15,7 @@ petsc = { path = "../petsc" }
 thiserror = "2"
 
 [dev-dependencies]
+test-support = { path = "../test-support" }
 contracts = { path = "../contracts" }
 
 [build-dependencies]

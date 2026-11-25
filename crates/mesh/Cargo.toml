@@ -10,3 +10,6 @@ publish = false
 contracts = { path = "../contracts" }
 petsc = { path = "../petsc" }
 thiserror = "2"
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

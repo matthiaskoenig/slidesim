@@ -465,6 +465,7 @@ version = "0.1.0"
 dependencies = [
  "contracts",
  "petsc",
+ "test-support",
  "thiserror",
 ]
 
@@ -607,6 +608,7 @@ dependencies = [
  "contracts",
  "mesh",
  "petsc",
+ "test-support",
  "thiserror",
 ]
 
@@ -905,6 +907,10 @@ dependencies = [
  "quote",
  "syn 3.0.10",
 ]
+
+[[package]]
+name = "test-support"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
