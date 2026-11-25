@@ -124,7 +124,7 @@ slideviz:
 ## Decided design
 
 Marks: **(user)** decided by the user in the brainstorming; **(spec)** decided in the spec;
-**(call)** Claude's call, open to correction in review.
+**(call)** a design call made during the design, open to correction in review.
 
 ### Maps in `scene/1`
 
