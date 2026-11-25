@@ -41,10 +41,13 @@ const RUN_HELP: &str = "\
 Output files in DIR:
   <field id>_<index>.vtu  the field at the output time number <index> (of time.outputs, from 0),
                           for ParaView: point data '<field id>.mM'
-  summary.json            per field: times (s), l2_norm (mM*um), total_mass (mM*um^2, the
-                          integral of the field weighed by the porosity); with perfusion also
-                          perfusion.tag_flows (um^2/s per pressure tag, positive into the
-                          domain) and, per field with advection, advection_defect
+  summary.json            per field and output time: times (s), l2_norm (mM*um), total_mass
+                          (mM*um^2, the integral of the field weighed by the porosity) and
+                          mass_balance (mM*um^2/s, null at time 0): storage_rate, source,
+                          advection_defect and, per boundary tag, the advective and diffusive
+                          inflow (storage_rate = source + inflows - advection_defect); with
+                          perfusion also perfusion.tag_flows (um^2/s per pressure tag,
+                          positive into the domain)
   pressure.vtu            with perfusion: the pressure, point data 'pressure.Pa'
   velocity.vtu            with perfusion: the Darcy velocity (um/s), the point vector 'velocity'
 Files <field id>_<index>.vtu, pressure.vtu and velocity.vtu of an earlier run in DIR are removed

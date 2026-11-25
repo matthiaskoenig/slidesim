@@ -597,10 +597,10 @@ fn level_out_of_range_is_error() {
     );
 }
 
-/// The tests `parallel_on_*_processes` run on several processes: operators and assembly on a distributed
-/// mesh (ghost dofs shared between processes, global numbering by owner), and errors found on
-/// some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one without
-/// cells.
+/// The tests `parallel_on_*_processes` run on several processes: operators and assembly on a
+/// distributed mesh (ghost dofs shared between processes, global numbering by owner), and errors
+/// found on some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one
+/// without cells.
 const PARALLEL_TESTS: [&str; 17] = [
     "mpi_world_has_the_expected_size",
     "mass_integrates_area",

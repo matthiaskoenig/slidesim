@@ -67,10 +67,13 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 `out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
 an earlier run there are removed first. `slidesim run --help` describes them.
 
+`summary.json` has, per field and output time, the mass balance of the last step
+(`mass_balance`: rate of change of the amount, sources, advective and diffusive inflow per
+boundary tag, and the `advection_defect` of the velocity).
+
 A study with a `perfusion` section solves the Darcy flow first (maps named by the study are read
 from the scene) and also writes `pressure.vtu` and `velocity.vtu`; `summary.json` then has the flow
-through each pressure tag (`perfusion.tag_flows`) and, for a field with advection, its
-`advection_defect` per output time. `testdata/studies/lobule_toy` is an example:
+through each pressure tag (`perfusion.tag_flows`). `testdata/studies/lobule_toy` is an example:
 
 ```bash
 target/debug/slidesim run testdata/studies/lobule_toy/study.json --out out

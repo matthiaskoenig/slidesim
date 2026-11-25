@@ -41,7 +41,7 @@ mod multigrid;
 mod operators;
 mod problem;
 
-pub use balance::{MassBalance, UNTAGGED};
+pub use balance::{BoundaryInflow, MassBalance, UNTAGGED};
 pub use coefficients::{PointData, coefficient_values};
 pub use discretization::Discretization;
 pub use flow::Flow;

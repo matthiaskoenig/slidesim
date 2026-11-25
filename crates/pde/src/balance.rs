@@ -17,7 +17,7 @@ pub const UNTAGGED: &str = "(untagged)";
 /// The balance of the amount of substance `int phi c` of a field `c` (porosity `phi`) at the end
 /// of a time step, each term in mM*um^2/s, from the discrete equations of [`crate::Problem`]:
 ///
-/// `storage_rate = source + sum(boundary) - advection_defect`,
+/// `storage_rate = source + sum(boundary totals) - advection_defect`,
 ///
 /// up to the residuals of the linear solves.
 ///
@@ -41,38 +41,60 @@ pub const UNTAGGED: &str = "(untagged)";
 ///
 /// which defines `advection_defect`. On `Gamma_N` the backflow term cancels the inflowing part
 /// of `int (u . n) c`, which leaves the outflow `int_Gamma_N (u . n)^+ c`; on the Dirichlet
-/// edges `Gamma_D` the advective flux `int (u . n) c` is whole, in and out. For a velocity which conserves mass (`div u = 0` with a
-/// continuous normal component) it is zero; the Darcy velocity of P1 pressures has jumps of
-/// `u . n` between the cells (and within a cell a divergence where the permeability varies),
-/// and `advection_defect` is their effect, `sum_edges int [u . n] c`: the non-conservation of
-/// the primal velocity, reported, not corrected. Hence the terms:
+/// edges `Gamma_D` the advective flux `int (u . n) c` is whole, in and out. For a velocity
+/// which conserves mass (`div u = 0` with a continuous normal component) it is zero; the Darcy
+/// velocity of P1 pressures has jumps of `u . n` between the cells (and within a cell a
+/// divergence where the permeability varies), and `advection_defect` is their effect,
+/// `sum_edges int [u . n] c`: the non-conservation of the primal velocity, reported, not
+/// corrected. Hence the terms:
 ///
 /// - `storage_rate`: `int phi c_t`, with `c_t` the time derivative of the BDF formula at the end
 ///   of the step (Dirichlet values are constant);
 /// - `source`: `int phi (f - k c)`, the sources less the decay;
-/// - `boundary`: the inflow through each tag (positive into the domain): at a Dirichlet tag
-///   `sum R_i` over its dofs (a dof of several Dirichlet tags counts for the one listed last,
-///   as its value does) minus the advective flux; at a flux tag `int q` over its edges minus
-///   the advective flux; at the other tags of edges of the boundary, minus the advective flux
-///   alone (free outflow: no diffusive flux). The advective flux of an edge is
-///   `int (u . n) c` on an edge a Dirichlet tag marks, else the outflow `int (u . n)^+ c`
-///   (backflow brings nothing in); both by the Gauss points of the edge. An edge of
-///   the boundary counts for one tag: of the tags of the conditions of the field the one listed
-///   last which marks it, else the first tag of edges of the mesh which marks it, else
-///   [`UNTAGGED`]. The entries: the tags of the conditions in the order listed, then the other
-///   tags of edges of the mesh which mark edges of the boundary, in the order of the mesh, then
-///   [`UNTAGGED`] if there are edges of the boundary without tag;
+/// - `boundary`: the inflow through each tag, positive into the domain, as a
+///   [`BoundaryInflow`] of an advective and a diffusive part, whose sum is the term of the
+///   balance. An edge of the boundary counts for one tag: of the tags of the conditions of the
+///   field the one listed last which marks it, else the first tag of edges of the mesh which
+///   marks it, else [`UNTAGGED`]. The entries: the tags of the conditions in the order listed,
+///   then the other tags of edges of the mesh which mark edges of the boundary, in the order of
+///   the mesh, then [`UNTAGGED`] if there are edges of the boundary without tag;
 /// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`.
 ///
 /// The velocity on an edge of the boundary is that of the flow at its Gauss points
 /// ([`crate::Flow::edge_velocity`]): the pressure gradient of its cell with the permeability
-/// at the points.
+/// at the points. On an edge without Dirichlet condition where the flow has a normal component
+/// although the pressure equation has no flow there (a no-flow wall: the condition of the
+/// pressure is natural, so the P1 velocity meets it weakly only), the outflow of that component
+/// leaves the domain: the advective part of the tag of that edge shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassBalance {
     pub storage_rate: f64,
     pub source: f64,
-    pub boundary: Vec<(String, f64)>,
+    pub boundary: Vec<BoundaryInflow>,
     pub advection_defect: f64,
+}
+
+/// The inflow through the edges of the boundary one tag counts for (see [`MassBalance`]), in
+/// mM*um^2/s, positive into the domain, as two parts:
+///
+/// - `advective`: minus the advective flux by the Gauss points of the edges, `-int (u . n) c`
+///   on an edge a Dirichlet tag marks (in and out), else `-int (u . n)^+ c` (the outflow; the
+///   backflow term lets nothing in); zero without advection;
+/// - `diffusive`: at a Dirichlet tag the consistent flux `sum R_i` over its dofs (a dof of
+///   several Dirichlet tags counts for the one listed last, as its value does); at a flux tag
+///   `int q` over its edges; zero elsewhere (free outflow: no diffusive flux).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundaryInflow {
+    pub tag: String,
+    pub advective: f64,
+    pub diffusive: f64,
+}
+
+impl BoundaryInflow {
+    /// The inflow, `advective + diffusive`: the term of the balance.
+    pub fn total(&self) -> f64 {
+        self.advective + self.diffusive
+    }
 }
 
 /// What the mass balance of a problem is computed from.
@@ -246,18 +268,22 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
         .iter()
         .map(|&m| comm.max_int(m))
         .collect::<petsc::Result<Vec<_>>>()?;
-    let mut boundary: Vec<(String, f64)> = names
+    let mut boundary: Vec<BoundaryInflow> = names
         .iter()
         .zip(&outflow)
-        .map(|(tag, o)| (tag.clone(), -o))
+        .map(|(tag, o)| BoundaryInflow {
+            tag: tag.clone(),
+            advective: -o,
+            diffusive: 0.0,
+        })
         .collect();
     for ((tag, _), inflow) in fluxes.iter().zip(&flux_inflows) {
         let entry = names.iter().position(|n| n == tag).expect("a condition");
-        boundary[entry].1 += inflow;
+        boundary[entry].diffusive += inflow;
     }
     for (tag, inflow) in dirichlet.iter().zip(&dirichlet_inflows) {
         let entry = names.iter().position(|n| n == tag).expect("a condition");
-        boundary[entry].1 += inflow;
+        boundary[entry].diffusive += inflow;
     }
     for (i, tag) in others
         .iter()
@@ -266,7 +292,11 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
         .enumerate()
     {
         if marks[i] > 0 {
-            boundary.push((tag.to_string(), -outflow[num_conditions + i]));
+            boundary.push(BoundaryInflow {
+                tag: tag.to_string(),
+                advective: -outflow[num_conditions + i],
+                diffusive: 0.0,
+            });
         }
     }
     Ok(MassBalance {

@@ -24,7 +24,9 @@ use contracts::{
 };
 use maps::Maps;
 use mesh::Mesh;
-use pde::{Discretization, Flow, Inputs, PdeError, PointData, Problem, Terms, Transport};
+use pde::{
+    BoundaryInflow, Discretization, Flow, Inputs, PdeError, PointData, Problem, Terms, Transport,
+};
 use petsc::Petsc;
 
 /// The four sides of `unit_square.msh`, each of length 1.
@@ -435,12 +437,12 @@ fn supg_tau_of_pure_advection() {
 /// `storage_rate - source - sum(boundary) + advection_defect`, relative to the largest of the
 /// terms.
 fn imbalance(balance: &pde::MassBalance) -> f64 {
-    let boundary: f64 = balance.boundary.iter().map(|(_, q)| q).sum();
+    let boundary: f64 = balance.boundary.iter().map(BoundaryInflow::total).sum();
     let residual = balance.storage_rate - balance.source - boundary + balance.advection_defect;
     let scale = balance
         .boundary
         .iter()
-        .map(|(_, q)| q.abs())
+        .flat_map(|b| [b.advective.abs(), b.diffusive.abs()])
         .chain([
             balance.storage_rate.abs(),
             balance.source.abs(),
@@ -494,20 +496,23 @@ fn mass_balance_closes() {
         let imbalance = imbalance(&balance);
         assert!(imbalance < 1e-8, "t = {t}: imbalance {imbalance:e}");
         // The tags: those of the conditions first, then the other edges of the boundary.
-        let mut tags: Vec<&str> = balance.boundary.iter().map(|(t, _)| t.as_str()).collect();
+        let mut tags: Vec<&str> = balance.boundary.iter().map(|b| b.tag.as_str()).collect();
         assert_eq!(tags[..2], ["left", "top"]);
         tags.sort_unstable();
         assert_eq!(tags, ["bottom", "left", "right", "top"]);
-        let inflow = |tag: &str| {
-            balance
-                .boundary
-                .iter()
-                .find(|(t, _)| t == tag)
-                .map(|(_, q)| *q)
-                .unwrap()
-        };
-        assert!(inflow("left") > 0.0, "{balance:?}");
-        assert!(inflow("right") < 0.0, "{balance:?}");
+        let inflow = |tag: &str| balance.boundary.iter().find(|b| b.tag == tag).unwrap();
+        assert!(inflow("left").total() > 0.0, "{balance:?}");
+        assert!(inflow("left").advective > 0.0, "{balance:?}");
+        assert!(inflow("right").total() < 0.0, "{balance:?}");
+        // The diffusive parts: the consistent flux at the Dirichlet tag, the flux of the
+        // condition, none at the free outflow; the advective part of a flux tag is outflow
+        // only.
+        assert_eq!(inflow("right").diffusive, 0.0, "{balance:?}");
+        assert_eq!(inflow("bottom").diffusive, 0.0, "{balance:?}");
+        assert!((inflow("top").diffusive - 0.1).abs() < 1e-12, "{balance:?}");
+        for tag in ["right", "top", "bottom"] {
+            assert!(inflow(tag).advective <= 0.0, "{tag}: {balance:?}");
+        }
         // The P1 velocity has a normal component on the sides without flow (the condition is
         // natural, so weak), and jumps of it between the cells.
         assert!(balance.advection_defect.abs() > 1e-3, "{balance:?}");
@@ -556,15 +561,17 @@ fn mass_balance_of_a_uniform_flow() {
         balance.advection_defect.abs() < 1e-10 * scale,
         "{balance:?}"
     );
-    let tags: Vec<&str> = balance.boundary.iter().map(|(t, _)| t.as_str()).collect();
+    let tags: Vec<&str> = balance.boundary.iter().map(|b| b.tag.as_str()).collect();
     assert_eq!(tags[..2], ["top", "left"]);
-    for (tag, q) in &balance.boundary {
-        match tag.as_str() {
-            "top" => assert!((q - 0.1).abs() < 1e-10 * scale, "{balance:?}"),
-            "bottom" => assert!(q.abs() < 1e-10 * scale, "{balance:?}"),
-            "left" => assert!(*q > 0.0, "{balance:?}"),
-            "right" => assert!(*q < 0.0, "{balance:?}"),
-            _ => panic!("tag {tag}: {balance:?}"),
+    let small = |x: f64| x.abs() < 1e-10 * scale;
+    for b in &balance.boundary {
+        let q = b.total();
+        match b.tag.as_str() {
+            "top" => assert!(small(q - 0.1) && small(b.advective), "{balance:?}"),
+            "bottom" => assert!(small(q), "{balance:?}"),
+            "left" => assert!(q > 0.0 && b.advective > 0.0, "{balance:?}"),
+            "right" => assert!(q < 0.0 && b.diffusive == 0.0, "{balance:?}"),
+            tag => panic!("tag {tag}: {balance:?}"),
         }
     }
 }
