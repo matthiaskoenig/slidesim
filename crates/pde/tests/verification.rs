@@ -36,7 +36,10 @@ const SIDES: [&str; 4] = ["left", "right", "top", "bottom"];
 /// The inputs of a [`Problem`] of constant coefficients: no maps.
 fn no_maps() -> Inputs<'static> {
     static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
-    Inputs { maps: &NONE }
+    Inputs {
+        maps: &NONE,
+        flow: None,
+    }
 }
 
 fn phi([x, y]: [f64; 2]) -> f64 {
@@ -657,9 +660,9 @@ fn field_id_must_be_an_options_prefix() {
     }
 }
 
-/// Advection is not supported yet (milestone 2, Task 5).
+/// Advection needs a flow (see the tests of advection).
 #[test]
-fn advection_is_unsupported() {
+fn advection_without_flow_is_unsupported() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 0);
     let field = FieldSpec {
@@ -748,7 +751,10 @@ fn variable_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
             let mesh = unit_square(p, refinements);
             let bounds = mesh.local_bounds().expect("cells on every process");
             let maps = Maps::read(&specs, &["position_x", "position_y"], bounds).unwrap();
-            let inputs = Inputs { maps: &maps };
+            let inputs = Inputs {
+                maps: &maps,
+                flow: None,
+            };
             let mut problem =
                 Problem::new(&mesh, &field, &fixed(1.0, DT), &ceed(), ACCURATE, &inputs).unwrap();
             problem.set_initial_condition(phi).unwrap();

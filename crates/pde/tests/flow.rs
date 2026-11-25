@@ -340,6 +340,43 @@ fn pressure_order_anisotropic() {
     assert_orders(&errors);
 }
 
+/// The velocity of every level is at the quadrature points of that level, in the layout of any
+/// discretization of it (here one with the essential tags of a species): against the exact
+/// velocity of the anisotropic manufactured flow there, the error falls with the mesh size
+/// level by level, and is small, which a velocity of other points would not be.
+#[test]
+fn velocity_of_every_level_at_its_points() {
+    let p = Petsc::init(&[]).unwrap();
+    let manufactured = Manufactured::anisotropic();
+    let mesh = unit_square(&p, 3);
+    let flow = manufactured.solve("velocity_of_every_level_at_its_points", &mesh);
+    let ceed = ceed();
+    let mut errors = Vec::new();
+    for level in 0..mesh.levels().len() {
+        let species = Discretization::with_essential(&mesh, level, &ceed, 1, &["left"]).unwrap();
+        let velocity = flow.velocity(level);
+        assert_eq!(velocity.len(), species.num_quadrature_points());
+        let local: f64 = velocity
+            .iter()
+            .zip(species.quadrature_points())
+            .zip(species.quadrature_weights())
+            .map(|((u, &x), w)| {
+                let e = manufactured.velocity(x);
+                w * ((u[0] - e[0]).powi(2) + (u[1] - e[1]).powi(2))
+            })
+            .sum();
+        let error = species.dm().comm().sum_real(local).unwrap().sqrt();
+        let norm = velocity_l2_error(&mesh, level, velocity, |_| [0.0; 2]);
+        errors.push(error / norm);
+    }
+    println!("relative velocity errors by level: {errors:?}");
+    for pair in errors.windows(2) {
+        let order = (pair[0] / pair[1]).log2();
+        assert!(order >= 0.9, "{errors:?}");
+    }
+    assert!(errors[1] < 0.15, "{errors:?}");
+}
+
 #[test]
 fn isotropic_where_gradient_vanishes() {
     let p = Petsc::init(&[]).unwrap();
@@ -450,6 +487,7 @@ fn parity(ranks: usize, test: &str) {
                 ranks,
                 &[
                     "uniform_flow",
+                    "velocity_of_every_level_at_its_points",
                     "isotropic_where_gradient_vanishes",
                     "divergence_is_error",
                     "unknown_pressure_tag_lists_tags",

@@ -200,7 +200,8 @@ impl PointFailure {
 /// - `reaction`: the factor of `u`, for example `phi k` for the decay rate `k` (1/s);
 /// - `diffusion`: the symmetric diffusion tensor `D` as `[D00, D01, D11]`, for example
 ///   `phi d I` (um^2/s);
-/// - `velocity` (um/s) and `tau` (s), the SUPG parameter: for advection, zero unless set.
+/// - `velocity` (um/s) and `tau` (s), the SUPG parameter: for advection, zero unless set
+///   ([`PointData::with_velocity`], [`PointData::stabilized`]).
 ///
 /// The operators of a discretization may share it (as an `Rc`): they share the copy libCEED
 /// reads too.
@@ -260,12 +261,67 @@ impl PointData {
         PointData::new(mass.to_vec(), reaction.to_vec(), diffusion)
     }
 
-    /// The data with the velocity `velocity` (um/s) at the points.
+    /// The data with the velocity `velocity` (um/s) at the points, and `tau` zero: the Galerkin
+    /// form of advection, unless [`PointData::stabilized`].
     ///
     /// Panics unless it has one value per point.
     pub fn with_velocity(mut self, velocity: Vec<[f64; 2]>) -> PointData {
         assert_eq!(velocity.len(), self.len(), "velocities for the points");
         self.velocity = velocity;
+        self.tau = vec![0.0; self.len()];
+        self.packed = OnceCell::new();
+        self
+    }
+
+    /// The data with the SUPG parameter `tau` (s) at the points of `disc`, from the velocity
+    /// `u`, the diffusion tensor `D` and the reaction `r` there (Shakib, Hughes and Johan 1991,
+    /// for the steady terms, with the reaction as in Codina 2000):
+    ///
+    /// `tau = ((2 |u| / h)^2 + 9 (4 d_u / h^2)^2 + r^2)^(-1/2)`,
+    ///
+    /// `d_u = u . D u / |u|^2` the diffusion along the flow, and `h` the length of the cell
+    /// along the flow, `h = 2 |u| / sum_i |u . grad N_i|` over the P1 basis functions `N_i` of
+    /// the cell (Tezduyar's `h_UGN`; for a triangle the longest chord parallel to `u`). `tau` is
+    /// zero where the velocity is zero. Its limits are the classical ones: `h / (2 |u|)` for
+    /// pure advection, `h^2 / (12 d_u)` where diffusion dominates.
+    ///
+    /// The transient term of SUPG (the porosity times `u_t` in the residual its test function
+    /// takes) is in the operators ([`crate::Terms::Mass`]); `tau` itself leaves out the time
+    /// step (the `(2 / dt)^2` of Shakib, Hughes and Johan): it would change with every step of
+    /// an adaptive integrator, and make the stabilization vanish for small steps, which brings
+    /// back the oscillations SUPG removes.
+    ///
+    /// Panics unless the data has one value per quadrature point of `disc`.
+    pub fn stabilized(mut self, disc: &Discretization) -> PointData {
+        let n = disc.num_quadrature_points();
+        assert_eq!(self.len(), n, "point data for the quadrature points");
+        let inverse = disc
+            .inverse_jacobians()
+            .expect("the quadrature data of a discretization is readable");
+        let gradients = disc.reference_gradients();
+        self.tau = (0..n)
+            .map(|p| {
+                let [u0, u1] = self.velocity[p];
+                let speed2 = u0 * u0 + u1 * u1;
+                if speed2 == 0.0 {
+                    return 0.0;
+                }
+                // u . grad N_i = sum_c u_c sum_j dN_i/dX_j b_jc = dN_i/dX . w, w_j = b_jc u_c.
+                let [[b00, b01], [b10, b11]] = inverse[p];
+                let w = [b00 * u0 + b01 * u1, b10 * u0 + b11 * u1];
+                // 2 |u| / h.
+                let rate: f64 = gradients
+                    .iter()
+                    .map(|g| (g[0] * w[0] + g[1] * w[1]).abs())
+                    .sum();
+                let h = 2.0 * speed2.sqrt() / rate;
+                let [d00, d01, d11] = self.diffusion[p];
+                let along = (u0 * (d00 * u0 + d01 * u1) + u1 * (d01 * u0 + d11 * u1)) / speed2;
+                let diffusion = 4.0 * along / (h * h);
+                let r = self.reaction[p];
+                1.0 / (rate * rate + 9.0 * diffusion * diffusion + r * r).sqrt()
+            })
+            .collect();
         self.packed = OnceCell::new();
         self
     }

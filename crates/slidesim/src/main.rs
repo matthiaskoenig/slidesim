@@ -41,7 +41,8 @@ const RUN_HELP: &str = "\
 Output files in DIR:
   <field id>_<index>.vtu  the field at the output time number <index> (of time.outputs, from 0),
                           for ParaView: point data '<field id>.mM'
-  summary.json            per field: times (s), l2_norm (mM*um), total_mass (mM*um^2)
+  summary.json            per field: times (s), l2_norm (mM*um), total_mass (mM*um^2, the
+                          integral of the field weighed by the porosity)
 Files <field id>_<index>.vtu of an earlier run in DIR are removed first; other files stay.
 
 PETSc options after '--' go to PETSc's options database. The solvers of a field take the

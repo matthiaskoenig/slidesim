@@ -229,6 +229,33 @@ fn ghost_points_of_a_distributed_mesh() {
 }
 
 #[test]
+fn boundary_faces_and_supports() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mut dm = quad_box(&comm);
+    if let Some(distributed) = dm.distribute(0).unwrap() {
+        dm = distributed;
+    }
+    let cells = dm.height_stratum(0).unwrap();
+    let edges = dm.depth_stratum(1).unwrap();
+    let boundary = dm.boundary_faces().unwrap();
+    assert!(boundary.is_sorted());
+    // A boundary edge has one cell, a local one.
+    for &edge in &boundary {
+        assert!(edges.contains(&edge), "{edge}");
+        let support = dm.support(edge).unwrap();
+        assert_eq!(support.len(), 1, "edge {edge}: {support:?}");
+        assert!(cells.contains(&support[0]));
+    }
+    // The 2 x 2 box has 8 boundary edges, each on one process; the edges between the parts of
+    // processes are not among them.
+    let count = comm.sum_int(boundary.len() as sys::PetscInt).unwrap();
+    assert_eq!(count, 8);
+    // A cell has no support in 2D.
+    assert!(dm.support(cells.start).unwrap().is_empty());
+}
+
+#[test]
 fn partitioner_type_is_set_and_read_from_options() {
     let p = Petsc::init(&[]).unwrap();
     let dm = quad_box(&p.comm());
@@ -294,10 +321,11 @@ fn partitioner_random_reset_repeats_the_partition() {
 
 /// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
 /// partitions.
-const PARALLEL_TESTS: [&str; 4] = [
+const PARALLEL_TESTS: [&str; 5] = [
     "mpi_world_has_the_expected_size",
     "barrier_waits_for_every_process",
     "ghost_points_of_a_distributed_mesh",
+    "boundary_faces_and_supports",
     "partitioner_random_reset_repeats_the_partition",
 ];
 

@@ -6,10 +6,11 @@
 //! (`w det J`, `J^-1`) stored per quadrature point. Essential (Dirichlet) boundaries are
 //! constraints of its section: global vectors leave their dofs out. Its operators work on
 //! PETSc vectors, with libCEED viewing the arrays of local vectors in place:
-//! - [`Transport`]: mass, reaction and tensor diffusion with coefficients given at the quadrature
-//!   points ([`PointData`]), as a [`petsc::ShellOperator`], with its diagonal and its assembled
-//!   matrix;
-//! - [`SourceField`]: values at the quadrature points, integrated against the test functions.
+//! - [`Transport`]: mass, reaction, advection and tensor diffusion with coefficients given at the
+//!   quadrature points ([`PointData`]), stabilized by SUPG, as a [`petsc::ShellOperator`], with
+//!   its diagonal and its assembled matrix;
+//! - [`SourceField`]: values at the quadrature points, integrated against the test functions
+//!   (or the SUPG test functions of a [`Transport`]).
 //!
 //! Coefficients of a study, numbers or tables over maps, become values at the quadrature points
 //! of a discretization through [`coefficient_values`].
@@ -17,9 +18,10 @@
 //! [`configure_multigrid`] makes a linear solver geometric multigrid over the levels of the mesh
 //! ([`Discretization::hierarchy`]), with the operator discretized again on every level.
 //!
-//! A [`Problem`] steps one diffusion-reaction field of a study in time (BDF2, PETSc `TS`) on the
-//! finest level, preconditioned by that multigrid, with the coefficients of the field (and its
-//! porosity) at the quadrature points of every level.
+//! A [`Problem`] steps one field of a study in time (BDF2, PETSc `TS`) on the finest level,
+//! preconditioned by that multigrid, with the coefficients of the field (and its porosity) at
+//! the quadrature points of every level: diffusion and reaction, and advection by the velocity
+//! of a [`Flow`], stabilized by SUPG. Its [`MassBalance`] comes from its discrete equations.
 //!
 //! A [`Flow`] solves the steady Darcy perfusion of a study once: the pressure with an
 //! anisotropic permeability along the gradient of a map, the velocity at the quadrature points
@@ -31,6 +33,7 @@
 //! Supported: 2D triangle meshes, degree 1. Every constructor is collective on the
 //! communicator of the mesh.
 
+mod balance;
 mod coefficients;
 mod discretization;
 mod flow;
@@ -38,6 +41,7 @@ mod multigrid;
 mod operators;
 mod problem;
 
+pub use balance::{MassBalance, UNTAGGED};
 pub use coefficients::{PointData, coefficient_values};
 pub use discretization::Discretization;
 pub use flow::Flow;
@@ -85,6 +89,17 @@ pub enum PdeError {
     /// A time to step to which is before the current time, or not finite.
     #[error("cannot step to t = {t} s from t = {time} s")]
     InvalidTime { t: f64, time: f64 },
+    /// A tag through which the flow enters the domain (net inflow, [`Flow::tag_flows`]), without
+    /// a dirichlet condition of a field with advection. The same error on every process.
+    #[error(
+        "tag '{tag}' has inflow; field '{field}' with advection needs a dirichlet condition there"
+    )]
+    Inflow { tag: String, field: String },
+    /// A quantity of a [`Problem`] which needs a time step (the rate of change, for
+    /// [`Problem::mass_balance`]), asked for at the time `t` (in s) before the first step, or
+    /// before the first step after a new initial condition.
+    #[error("no time step since t = {t} s: the rate of change is known at the end of a step")]
+    NotStepped { t: f64 },
     /// A [`Problem`] whose time integration failed earlier (`failure`, at the time `t` in s): its
     /// solvers may be left in any state, so it does not step again.
     #[error("the problem failed at t = {t} s and cannot step again: {failure}")]
@@ -141,6 +156,7 @@ mod qfunctions {
         slidesim_pde_Mass,
         slidesim_pde_Values,
         slidesim_pde_Transport2D,
+        slidesim_pde_TransportSource2D,
         slidesim_pde_Velocity2D
     );
 
@@ -156,6 +172,7 @@ mod qfunctions {
     pub const MASS: &str = source!("mass.h:Mass");
     pub const VALUES: &str = source!("mass.h:Values");
     pub const TRANSPORT_2D: &str = source!("transport.h:Transport2D");
+    pub const TRANSPORT_SOURCE_2D: &str = source!("transport.h:TransportSource2D");
     pub const VELOCITY_2D: &str = source!("velocity.h:Velocity2D");
 
     /// The number of components of the quadrature data (`GEOMETRY_2D_SIZE` of `geometry.h`).

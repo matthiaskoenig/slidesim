@@ -11,8 +11,9 @@
 //!
 //! `{"fields": {"<field id>": {"times": [...], "l2_norm": [...], "total_mass": [...]}}}`
 //!
-//! with, per output time, the time reached (s), the L2 norm of the field (mM*um) and its
-//! integral over the domain (mM*um^2).
+//! with, per output time, the time reached (s), the L2 norm of the field (mM*um) and its amount
+//! of substance in the domain, the integral of the field weighed by the porosity (mM*um^2,
+//! [`Problem::total_mass`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -39,7 +40,7 @@ struct FieldSummary {
     times: Vec<f64>,
     /// mM*um.
     l2_norm: Vec<f64>,
-    /// mM*um^2.
+    /// The amount of substance, `int phi c` (porosity `phi`): mM*um^2.
     total_mass: Vec<f64>,
 }
 
@@ -64,7 +65,10 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     // The maps of the study are read in milestone 2, Task 6: until then a coefficient table is
     // an error of the problem (its map is unknown).
     let maps = Maps::default();
-    let inputs = Inputs { maps: &maps };
+    let inputs = Inputs {
+        maps: &maps,
+        flow: None,
+    };
     let mut problems = study
         .fields
         .iter()

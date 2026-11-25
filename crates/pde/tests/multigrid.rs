@@ -102,7 +102,7 @@ impl Steady {
         ksp.set_operators(&a, &a).unwrap();
         ksp.set_type("cg").unwrap();
         ksp.set_tolerances(Some(1e-10), None, Some(1000)).unwrap();
-        let multigrid = configure_multigrid(&mut ksp, &mesh, &levels).unwrap();
+        let multigrid = configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
         Steady {
             ksp,
             multigrid,
@@ -230,23 +230,82 @@ fn levels_must_be_a_hierarchy() {
     let mesh = tissue_small(&p, 1);
     let ceed = ceed();
     let mut ksp = Ksp::create(&p.comm()).unwrap();
-    // One operator for two levels.
+    // One operator for two levels, on level 1: the first is not on level 0.
     let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
-    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs[1..], 0.0)).unwrap_err();
+    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs[1..], 0.0), true).unwrap_err();
     assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
+    assert!(
+        e.to_string()
+            .contains("the first of 1 operators is not on level 0 of the mesh"),
+        "{e}"
+    );
     // Discretizations of each level, not linked.
     let discs: Vec<Discretization> = (0..2)
         .map(|level| Discretization::with_essential(&mesh, level, &ceed, 1, &BOUNDARY).unwrap())
         .collect();
-    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs, 0.0)).unwrap_err();
+    let e = configure_multigrid(&mut ksp, &mesh, &operators(&discs, 0.0), true).unwrap_err();
     assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
     assert!(e.to_string().contains("level 0"), "{e}");
+}
+
+#[test]
+fn last_level_must_be_the_operator_of_the_solver() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = tissue_small(&p, 1);
+    let ceed = ceed();
+    let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
+    let levels = operators(&discs, 0.0);
+    let fine = discs[1].shell_matrix(levels[1].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    // The operators of level 0 only, for a solver on level 1.
+    let e = configure_multigrid(&mut ksp, &mesh, &levels[..1], true).unwrap_err();
+    assert!(matches!(e, PdeError::NotHierarchy(_)), "{e}");
+    assert!(
+        e.to_string().contains("the last of 1 operators (level 0"),
+        "{e}"
+    );
+    // All levels: the sizes agree.
+    configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
+    // The operators of level 0 for a solver on level 0.
+    let coarse = discs[0].shell_matrix(levels[0].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&coarse, &coarse).unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels[..1], true).unwrap();
+}
+
+/// A nonsymmetric hierarchy (advection) estimates the intervals of its smoothers with GMRES and
+/// leaves the operators unmarked.
+#[test]
+fn nonsymmetric_levels_estimate_with_gmres() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = tissue_small(&p, 1);
+    let ceed = ceed();
+    let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
+    let levels = operators(&discs, 1.0);
+    let fine = discs[1].shell_matrix(levels[1].clone()).unwrap();
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    ksp.set_type("gmres").unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels, false).unwrap();
+    let smoother = ksp.pc().unwrap().mg_smoother(1).unwrap();
+    let estimator = smoother.chebyshev_est_eig_ksp().unwrap().unwrap();
+    assert_eq!(estimator.type_name().unwrap(), "gmres");
+    let mut ksp = Ksp::create(&p.comm()).unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
+    let smoother = ksp.pc().unwrap().mg_smoother(1).unwrap();
+    let estimator = smoother.chebyshev_est_eig_ksp().unwrap().unwrap();
+    assert_eq!(estimator.type_name().unwrap(), "cg");
 }
 
 /// The inputs of a [`Problem`] of constant coefficients: no maps.
 fn no_maps() -> Inputs<'static> {
     static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
-    Inputs { maps: &NONE }
+    Inputs {
+        maps: &NONE,
+        flow: None,
+    }
 }
 
 /// A field on `tissue_small` as in a study of oxygen: `d = D`, `k = K`, a fixed value on the

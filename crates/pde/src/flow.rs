@@ -8,7 +8,7 @@ use ceed::{Ceed, ElemRestriction, EvalMode, FieldVector, Operator, QFunction};
 use contracts::Perfusion;
 use maps::Maps;
 use mesh::Mesh;
-use petsc::{Fe, InsertMode, Ksp, OptionsScope, Vector, sys};
+use petsc::{Fe, Ksp, OptionsScope, Vector, sys};
 
 use crate::coefficients::map_gradients;
 use crate::operators::PointValues;
@@ -229,14 +229,7 @@ impl Flow {
             .clone()
             .set_field_names(0, "pressure", &[PRESSURE_UNIT])?;
 
-        let free = Discretization::new(mesh, finest, ceed, 1)?;
-        let same_layout = free.node_coordinates() == disc.node_coordinates();
-        if disc.dm().comm().max_int((!same_layout).into())? > 0 {
-            return Err(PdeError::Unsupported(
-                "local vectors of a level which differ with and without essential boundaries"
-                    .into(),
-            ));
-        }
+        let free = disc.without_essential(mesh, finest)?;
         let tag_flows = tag_flows(
             &disc,
             &free,
@@ -271,6 +264,11 @@ impl Flow {
     /// equation at the dofs the tag constrains (see [`Flow`]). The same on every process.
     pub fn tag_flows(&self) -> &[(String, f64)] {
         &self.tag_flows
+    }
+
+    /// The number of levels of the mesh of the flow: [`Flow::velocity`] has one per level.
+    pub fn levels(&self) -> usize {
+        self.velocity.len()
     }
 
     /// The pressure (Pa) on the finest level: a global vector of [`Flow::discretization`],
@@ -436,7 +434,7 @@ fn solve_level(
     ksp.set_options_prefix(PREFIX)?;
     ksp.set_operators(&a, &a)?;
     ksp.set_type("cg")?;
-    let _multigrid = configure_multigrid(&mut ksp, mesh, operators)?;
+    let _multigrid = configure_multigrid(&mut ksp, mesh, operators, true)?;
     ksp.set_from_options()?;
     let mut pressure = disc.global_vector()?;
     pressure.set(0.0)?;
@@ -556,46 +554,6 @@ fn tag_flows(
     let b = load(free, manufactured)?;
     residual.axpy(-1.0, &b)?;
 
-    // The indicator of the dofs of each tag, as a global vector: 1 where any process marks the
-    // dof.
-    let mut indicators = Vec::with_capacity(tags.len());
-    let mut local = free.local_vector()?;
-    for tag in tags {
-        let dofs = disc.essential_dofs(tag)?;
-        local.with_array_mut(|values| {
-            values.fill(0.0);
-            for &i in dofs {
-                values[i] = 1.0;
-            }
-        })?;
-        let mut indicator = free.global_vector()?;
-        indicator.set(0.0)?;
-        free.dm()
-            .local_to_global(&local, InsertMode::Add, &mut indicator)?;
-        indicator.with_array_mut(|values| {
-            for v in values {
-                *v = if *v > 0.0 { 1.0 } else { 0.0 };
-            }
-        })?;
-        indicators.push(indicator);
-    }
-    // A dof of several tags counts for the one listed last.
-    let mut taken = free.global_vector()?;
-    taken.set(0.0)?;
-    let mut flows = vec![0.0; tags.len()];
-    for (i, indicator) in indicators.iter_mut().enumerate().rev() {
-        taken.with_array_mut(|taken| {
-            indicator.with_array_mut(|values| {
-                for (v, t) in values.iter_mut().zip(taken.iter_mut()) {
-                    if *t > 0.0 {
-                        *v = 0.0;
-                    } else if *v > 0.0 {
-                        *t = 1.0;
-                    }
-                }
-            })
-        })??;
-        flows[i] = residual.dot(indicator)?;
-    }
+    let flows = disc.essential_sums(free, &residual, tags)?;
     Ok(tags.iter().map(|tag| tag.to_string()).zip(flows).collect())
 }

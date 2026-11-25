@@ -1,5 +1,6 @@
-//! One diffusion-reaction field stepped in time: BDF2 of PETSc's `TS` on the P1 discretization
-//! of the finest mesh level, with the coefficients of the field at the quadrature points.
+//! One field stepped in time: BDF2 of PETSc's `TS` on the P1 discretization of the finest mesh
+//! level, with the coefficients of the field at the quadrature points, and advection by the
+//! velocity of a [`Flow`] stabilized by SUPG.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,10 +11,11 @@ use maps::Maps;
 use mesh::Mesh;
 use petsc::{ExactFinalTime, Implicit, OptionsScope, ProblemType, Ts, VecMut, VecRef, Vector, sys};
 
+use crate::balance::{self, Parts};
 use crate::operators::PointValues;
 use crate::{
-    Discretization, Multigrid, PdeError, PointData, Result, SharedOperator, SourceField, Terms,
-    Transport, coefficient_values, configure_multigrid,
+    Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result, SharedOperator,
+    SourceField, Terms, Transport, coefficient_values, configure_multigrid,
 };
 
 /// The options every problem sets before those of the caller, who may override them: a solver
@@ -37,35 +39,55 @@ const CONCENTRATION_UNIT: &str = "mM";
 /// shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
 
-/// What a [`Problem`] takes besides its field: the maps its coefficient tables refer to.
+/// What a [`Problem`] takes besides its field: the maps its coefficient tables refer to, and
+/// the flow which carries a field with advection.
 #[derive(Debug, Clone, Copy)]
 pub struct Inputs<'a> {
     /// The maps, read for the cells of this process (see [`mesh::Mesh::local_bounds`]).
     pub maps: &'a Maps,
+    /// The Darcy flow of the study on the same mesh, for fields with advection (others ignore
+    /// it).
+    pub flow: Option<&'a Flow>,
 }
 
 /// The field `u` of a [`FieldSpec`] on a [`Mesh`], stepped in time:
 ///
-/// `phi u_t = div(phi d grad u) - phi k u + phi f`, with `phi` the porosity (dimensionless),
-/// `d` the diffusion coefficient (um^2/s), `k` the decay rate (1/s) and `f` the source (mM/s),
-/// on the finest level of the mesh, in the weak form of P1 elements:
+/// `phi u_t + w . grad u = div(phi d grad u) - phi k u + phi f`, with `phi` the porosity
+/// (dimensionless), `w` the Darcy velocity of the flow (um/s) if the field has advection (else
+/// zero), `d` the diffusion coefficient (um^2/s), `k` the decay rate (1/s) and `f` the source
+/// (mM/s), on the finest level of the mesh, in the weak form of P1 elements:
 ///
-/// `M_phi u_t + (K_(phi d) + M_(phi k)) u = int phi f v + sum_i int_(Gamma_i) q_i v`,
+/// `M_phi u_t + (A_w + K_(phi d) + M_(phi k)) u = int phi f v + sum_i int_(Gamma_i) q_i v`,
 ///
-/// `M_c` the mass matrix weighted with `c` and `K_c` the stiffness matrix of `c`. The
-/// coefficients are numbers or tables over maps ([`Coefficient`]), evaluated at the quadrature
-/// points of every level of the mesh ([`coefficient_values`]): the coarser levels of the
-/// multigrid preconditioner discretize the same equation again.
+/// `M_c` the mass matrix weighted with `c`, `A_w` advection (`int (w . grad u) v`) and `K_c` the
+/// stiffness matrix of `c`; with advection, every term but diffusion is tested with the SUPG
+/// test function `v + tau w . grad v` instead of `v` (streamline upwind Petrov-Galerkin, `tau`
+/// per point from [`PointData::stabilized`]; see [`Terms`]). With `div w = 0` (Darcy without
+/// sources) the advective form equals the conservative one. The coefficients are numbers or
+/// tables over maps ([`Coefficient`]), evaluated at the quadrature points of every level of the
+/// mesh ([`coefficient_values`]), with the velocity of the flow on that level
+/// ([`Flow::velocity`], solved on every level): the coarser levels of the multigrid
+/// preconditioner discretize the same equation again.
 ///
 /// Boundary conditions, by tag ([`FieldSpec::boundaries`]): a Dirichlet value is fixed on the
 /// tag (an essential boundary; where tags meet, the value of the tag listed last holds); a flux
 /// `q` is an inward diffusive flux (`phi d grad u . n`) on the boundary edges of the tag
-/// (mM*um/s); everywhere else the flux is zero (the natural boundary condition).
+/// (mM*um/s); everywhere else the diffusive flux is zero (the natural boundary condition). With
+/// advection, every tag through which the flow enters the domain (positive [`Flow::tag_flows`])
+/// needs a Dirichlet condition ([`PdeError::Inflow`] otherwise); where the flow leaves, without
+/// a condition, the outflow is free: the advective form needs no boundary term, and the
+/// diffusive flux is zero.
+///
+/// Conservation: [`Problem::total_mass`] is the amount of substance `int phi u`, and
+/// [`Problem::mass_balance`] its balance at the end of a step from the discrete equations (the
+/// consistent fluxes at the Dirichlet tags, the advective outflow at the others, and the
+/// non-conservation of the P1 Darcy velocity, see [`MassBalance`]).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
-/// step is one linear solve (`SNESKSPONLY`): CG with the Jacobian
-/// `shift M_phi + K_(phi d) + M_(phi k)` as a matrix-free shell operator ([`Transport`]),
+/// step is one linear solve (`SNESKSPONLY`) with the Jacobian
+/// `shift M_phi + A_w + K_(phi d) + M_(phi k)` as a matrix-free shell operator ([`Transport`]):
+/// CG without advection (the Jacobian is symmetric positive definite), GMRES with it;
 /// preconditioned by geometric multigrid over the levels of the mesh ([`configure_multigrid`]; a
 /// mesh without refinements is solved by its coarse solver, algebraic multigrid, alone). The
 /// operators are built once; a step changes the shift only, on every level, and when the shift
@@ -110,7 +132,14 @@ pub struct Problem {
     /// Why the time integration failed, if it did: then the problem does not step again.
     failure: Option<String>,
     disc: Discretization,
+    /// The finest level without essential boundaries, for the mass balance.
+    free: Discretization,
     dirichlet: Vec<(String, f64)>,
+    fluxes: Vec<(String, f64)>,
+    /// The tags of the conditions of the field, in the order listed.
+    conditions: Vec<String>,
+    /// The tags of edges of the mesh, in its order.
+    edge_tags: Vec<String>,
     values: PointValues,
     /// Dropped after the `TS`, which may read options until it is destroyed.
     _options: OptionsScope,
@@ -119,18 +148,20 @@ pub struct Problem {
 impl Problem {
     /// The problem of the field `field` on the finest level of `mesh`, at t = 0 with the uniform
     /// initial value `field.initial` and the source `field.source`, with its coefficients from
-    /// the maps of `inputs`, stepped as `time` says (its time step and adaptivity), and with the
-    /// PETSc options `petsc_options` (for example `-ksp_rtol 1e-8`), which override the
-    /// defaults of the problem and give way to options under the prefix already in the database
-    /// (see [`Problem`]). Collective.
+    /// the maps of `inputs` and, with advection, the velocity of the flow of `inputs` (solved on
+    /// `mesh`), stepped as `time` says (its time step and adaptivity), and with the PETSc
+    /// options `petsc_options` (for example `-ksp_rtol 1e-8`), which override the defaults of
+    /// the problem and give way to options under the prefix already in the database (see
+    /// [`Problem`]). Collective.
     ///
     /// Errors: [`PdeError::Unsupported`] if the field id cannot be an options prefix (it starts
     /// with an ASCII letter and has ASCII letters, digits and `_` only), a flux is on a tag
-    /// which is not of boundary edges, or the field has advection (not supported yet);
-    /// [`PdeError::Mesh`] for a tag the mesh does not have; [`PdeError::Map`] (on every
-    /// process) if a coefficient table cannot be evaluated at a quadrature point of a level,
-    /// naming the field and the coefficient; [`PdeError::Petsc`] if a problem of the same field
-    /// id is alive, or PETSc rejects the options.
+    /// which is not of boundary edges, or the field has advection without a flow (or with the
+    /// flow of another mesh); [`PdeError::Inflow`] if the field has advection and a tag with
+    /// inflow has no Dirichlet condition; [`PdeError::Mesh`] for a tag the mesh does not have;
+    /// [`PdeError::Map`] (on every process) if a coefficient table cannot be evaluated at a
+    /// quadrature point of a level, naming the field and the coefficient; [`PdeError::Petsc`]
+    /// if a problem of the same field id is alive, or PETSc rejects the options.
     pub fn new(
         mesh: &Mesh,
         field: &FieldSpec,
@@ -140,12 +171,16 @@ impl Problem {
         inputs: &Inputs,
     ) -> Result<Problem> {
         let prefix = options_prefix(&field.id)?;
-        if field.advection {
-            return Err(PdeError::Unsupported(format!(
-                "advection of field '{}'",
-                field.id
-            )));
-        }
+        let flow = match (field.advection, inputs.flow) {
+            (false, _) => None,
+            (true, Some(flow)) => Some(flow),
+            (true, None) => {
+                return Err(PdeError::Unsupported(format!(
+                    "advection of field '{}' without a flow (a perfusion)",
+                    field.id
+                )));
+            }
+        };
         let options = OptionsScope::new(
             &prefix,
             &[ERRORS_IF_NOT_CONVERGED, TOLERANCE, petsc_options],
@@ -172,8 +207,32 @@ impl Problem {
                 }
             }
         }
+        // Before the first step: the flow enters only where the field is fixed. The flows are the
+        // same on every process.
+        if let Some(flow) = flow {
+            for (tag, q) in flow.tag_flows() {
+                if *q > 0.0 && !dirichlet.iter().any(|(t, _)| t == tag) {
+                    return Err(PdeError::Inflow {
+                        tag: tag.clone(),
+                        field: field.id.clone(),
+                    });
+                }
+            }
+        }
+        let conditions = field
+            .boundaries
+            .iter()
+            .map(|b| Ok(mesh.tag(&b.tag)?.name))
+            .collect::<Result<Vec<_>>>()?;
+        let edge_tags = mesh
+            .tags()
+            .iter()
+            .filter(|tag| usize::from(tag.dim) + 1 == dim)
+            .map(|tag| tag.name.clone())
+            .collect();
         let essential: Vec<&str> = dirichlet.iter().map(|(tag, _)| tag.as_str()).collect();
         let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
+        let finest = levels.len() - 1;
         let disc = levels.last().expect("a mesh has a level").clone();
         // For viewers of the solution (see `Problem::local_solution`); the clone is a handle of
         // the same DM.
@@ -187,23 +246,43 @@ impl Problem {
             let fluxes: Vec<(&str, f64)> = fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
             Some(disc.boundary_load(&fluxes)?)
         };
+        // The velocity of the flow on each level, with advection.
+        let velocity = |level: usize, disc: &Discretization| -> Result<Option<&[[f64; 2]]>> {
+            let Some(flow) = flow else {
+                return Ok(None);
+            };
+            let other = flow.levels() != mesh.levels().len()
+                || flow.velocity(level).len() != disc.num_quadrature_points();
+            if disc.dm().comm().max_int(other.into())? > 0 {
+                return Err(PdeError::Unsupported(format!(
+                    "advection of field '{}' by a flow of another mesh (velocities for other \
+                     quadrature points)",
+                    field.id
+                )));
+            }
+            Ok(Some(flow.velocity(level)))
+        };
         // The coefficients of the finest level first: a map error names a point of the level
         // of the solution, where there is one.
         let fine = Coefficients::new(&disc, field, inputs.maps, true)?;
-        let data = Rc::new(fine.point_data(&disc));
+        let data = Rc::new(fine.point_data(&disc, velocity(finest, &disc)?));
         let jacobian = Rc::new(RefCell::new(Transport::new(
             &disc,
             Rc::clone(&data),
             Terms::Jacobian,
         )?));
+        let symmetric = flow.is_none();
         let mut shell = disc.shell_matrix(SharedOperator(Rc::clone(&jacobian)))?;
-        shell.set_spd()?;
+        if symmetric {
+            shell.set_spd()?;
+        }
         // The operators of the coarser levels, then the Jacobian on the finest.
-        let level_operators = levels[..levels.len() - 1]
+        let level_operators = levels[..finest]
             .iter()
-            .map(|level| {
+            .enumerate()
+            .map(|(l, level)| {
                 let coefficients = Coefficients::new(level, field, inputs.maps, false)?;
-                let data = Rc::new(coefficients.point_data(level));
+                let data = Rc::new(coefficients.point_data(level, velocity(l, level)?));
                 let op = Transport::new(level, data, Terms::Jacobian)?;
                 Ok(SharedOperator(Rc::new(RefCell::new(op))))
             })
@@ -211,15 +290,17 @@ impl Problem {
             .collect::<Result<Vec<_>>>()?;
         let equation = Equation {
             steady: Transport::new(&disc, Rc::clone(&data), Terms::Steady)?,
-            mass: Transport::new(&disc, data, Terms::Mass)?,
+            mass: Transport::new(&disc, Rc::clone(&data), Terms::Mass)?,
             jacobian,
             multigrid: None,
-            source: SourceField::new(&disc)?,
+            source: SourceField::stabilized(&disc, data)?,
             f: fine.source,
             porosity: fine.porosity,
             load,
             u_local: local_with_dirichlet(&disc, &dirichlet)?,
             work: disc.global_vector()?,
+            rate: disc.global_vector()?,
+            rate_shift: None,
             disc: disc.clone(),
         };
 
@@ -233,8 +314,11 @@ impl Problem {
         ts.set_time(0.0)?;
         ts.set_time_step(time.dt)?;
         let mut ksp = ts.snes()?.ksp()?;
-        ksp.set_type("cg")?;
-        let multigrid = configure_multigrid(&mut ksp, mesh, &level_operators)?;
+        ksp.set_type(if symmetric { "cg" } else { "gmres" })?;
+        // The SNES sets the same operators when it solves; set here, configure_multigrid checks
+        // the levels against them.
+        ksp.set_operators(&shell, &shell)?;
+        let multigrid = configure_multigrid(&mut ksp, mesh, &level_operators, symmetric)?;
         ts.set_from_options()?;
         // Unless the options replaced it.
         if ksp.pc()?.type_name()? == "mg" {
@@ -251,8 +335,12 @@ impl Problem {
             adaptive: time.adaptive,
             failure: None,
             values: PointValues::new(&disc)?,
+            free: disc.without_essential(mesh, finest)?,
             disc,
             dirichlet,
+            fluxes,
+            conditions,
+            edge_tags,
             _options: options,
         })
     }
@@ -267,6 +355,8 @@ impl Problem {
         self.ensure_usable()?;
         self.disc.interpolate(f, &mut self.u)?;
         self.ts.restart_step()?;
+        // The rate of change is unknown until the next step.
+        self.ts.context_mut().rate_shift = None;
         Ok(())
     }
 
@@ -422,15 +512,58 @@ impl Problem {
         Ok(local)
     }
 
-    /// The integral of the solution over the domain (in mM*um^2). Collective.
+    /// The amount of substance in the domain, `int phi u`: the integral of the solution weighed
+    /// by the porosity (in mM*um^2), whose rate of change is [`MassBalance::storage_rate`].
+    /// Collective.
     pub fn total_mass(&self) -> Result<f64> {
         let values = self.point_values()?;
         let local: f64 = values
             .iter()
+            .zip(&self.ts.context().porosity)
             .zip(self.disc.quadrature_weights())
-            .map(|(u, w)| w * u)
+            .map(|((u, phi), w)| w * phi * u)
             .sum();
         Ok(self.disc.dm().comm().sum_real(local)?)
+    }
+
+    /// The mass balance at the end of the last step, from the discrete equations: the rate of
+    /// change of [`Problem::total_mass`], the sources, the inflow through each tag of the
+    /// boundary and the defect of the advecting velocity (see [`MassBalance`]). Collective.
+    ///
+    /// Errors: [`PdeError::NotStepped`] before the first step, and before the first step after
+    /// [`Problem::set_initial_condition`]; [`PdeError::Poisoned`] after a failed
+    /// [`Problem::step_to`].
+    pub fn mass_balance(&self) -> Result<MassBalance> {
+        self.ensure_usable()?;
+        let equation = self.ts.context();
+        let Some(shift) = equation.rate_shift else {
+            return Err(PdeError::NotStepped { t: self.t });
+        };
+        // The BDF derivative is affine in the solution: u_t = shift u + (u_t - shift u) of the
+        // last Jacobian.
+        let mut rate = self.disc.global_vector()?;
+        rate.set(0.0)?;
+        rate.axpy(1.0, &equation.rate)?;
+        rate.axpy(shift, &self.u)?;
+        let mut c_t = self.disc.local_vector()?;
+        c_t.set(0.0)?;
+        self.disc.dm().global_to_local(&rate, &mut c_t)?;
+        let c = self.local_solution()?;
+        let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
+        let fluxes: Vec<(&str, f64)> = self.fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
+        balance::mass_balance(&Parts {
+            disc: &self.disc,
+            free: &self.free,
+            data: equation.steady.data(),
+            f: &equation.f,
+            porosity: &equation.porosity,
+            c: &c,
+            c_t: &c_t,
+            conditions: &self.conditions,
+            dirichlet: &dirichlet,
+            fluxes: &fluxes,
+            edge_tags: &self.edge_tags,
+        })
     }
 
     /// The solution at the quadrature points of the local cells, Dirichlet values included.
@@ -501,33 +634,39 @@ impl Coefficients {
         })
     }
 
-    /// The data of the operator: mass `phi`, reaction `phi k` and diffusion `phi d I`.
-    fn point_data(&self, disc: &Discretization) -> PointData {
+    /// The data of the operator: mass `phi`, reaction `phi k` and diffusion `phi d I`; and the
+    /// velocity `velocity` with SUPG, if given.
+    fn point_data(&self, disc: &Discretization, velocity: Option<&[[f64; 2]]>) -> PointData {
         let scaled = |c: &[f64]| -> Vec<f64> {
             c.iter()
                 .zip(&self.porosity)
                 .map(|(c, phi)| phi * c)
                 .collect()
         };
-        PointData::isotropic(
+        let data = PointData::isotropic(
             disc,
             &self.porosity,
             &scaled(&self.decay),
             &scaled(&self.diffusion),
-        )
+        );
+        match velocity {
+            Some(velocity) => data.with_velocity(velocity.to_vec()).stabilized(disc),
+            None => data,
+        }
     }
 }
 
 /// The equation of a [`Problem`] for its `TS`:
-/// `F(u, u_t) = M_phi u_t + (K_(phi d) + M_(phi k)) u - int phi f v - int_Gamma q v`.
+/// `F(u, u_t) = M_phi u_t + (A_w + K_(phi d) + M_(phi k)) u - int phi f v - int_Gamma q v`
+/// (with SUPG test functions for advection, see [`Problem`]).
 #[derive(Debug)]
 struct Equation {
     disc: Discretization,
-    /// `K_(phi d) + M_(phi k)`.
+    /// `A_w + K_(phi d) + M_(phi k)`.
     steady: Transport,
     /// `M_phi`.
     mass: Transport,
-    /// The Jacobian `shift M_phi + K_(phi d) + M_(phi k)`, shared with its shell matrix.
+    /// The Jacobian `shift M_phi + A_w + K_(phi d) + M_(phi k)`, shared with its shell matrix.
     jacobian: Rc<RefCell<Transport>>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
     multigrid: Option<Multigrid>,
@@ -542,6 +681,14 @@ struct Equation {
     /// The solution with its Dirichlet values, which stay.
     u_local: Vector,
     work: Vector,
+    /// `u_t - shift u` of the last Jacobian: the time derivative of an implicit step of `TS` is
+    /// affine in the solution (`u_t = shift u + rate` within a step, for `TSBDF` the
+    /// derivative of its interpolating polynomial), so `shift u + rate` is the derivative at
+    /// the solution of the last step.
+    rate: Vector,
+    /// The shift of the last Jacobian; `None` before the first, and after a new initial
+    /// condition.
+    rate_shift: Option<f64>,
 }
 
 impl Equation {
@@ -583,10 +730,14 @@ impl Implicit for Equation {
     fn jacobian(
         &mut self,
         _t: f64,
-        _u: &VecRef<'_>,
-        _u_t: &VecRef<'_>,
+        u: &VecRef<'_>,
+        u_t: &VecRef<'_>,
         shift: f64,
     ) -> petsc::Result<bool> {
+        self.rate.set(0.0)?;
+        self.rate.axpy(1.0, u_t)?;
+        self.rate.axpy(-shift, u)?;
+        self.rate_shift = Some(shift);
         let same = {
             let mut jacobian = self.jacobian.borrow_mut();
             // The operator applies the exact shift; the preconditioner follows changes beyond

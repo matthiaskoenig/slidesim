@@ -1,5 +1,5 @@
-//! Operators on a [`Discretization`]: transport (mass, reaction and diffusion with coefficients
-//! at the quadrature points) and sources at quadrature points.
+//! Operators on a [`Discretization`]: transport (mass, reaction, advection and diffusion with
+//! coefficients at the quadrature points, stabilized by SUPG) and sources at quadrature points.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -11,16 +11,24 @@ use crate::discretization::Shared;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{Discretization, PdeError, PointData, Result};
 
-/// The terms of the transport equation `m u_t + r u - div(D grad u) = f` a [`Transport`]
-/// operator applies (`m`, `r` and `D` from its [`PointData`]).
+/// The terms of the transport equation `m u_t + r u + vel . grad u - div(D grad u) = f` a
+/// [`Transport`] operator applies (`m`, `r`, `D`, the velocity `vel` and the SUPG parameter
+/// `tau` from its [`PointData`]), each tested with the SUPG test function
+/// `v + tau vel . grad v` except diffusion, which is tested with `v`: the residual SUPG weighs
+/// leaves out `-div(D grad u)`, which for P1 vanishes in each cell where `D` is constant (the
+/// usual practice for linear elements; it makes the method inconsistent by `tau D lap u`, an
+/// error of order `h^2` where diffusion dominates). Without velocity (or with `tau` zero) this
+/// is the Galerkin form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terms {
-    /// The steady terms, `R + K_D`: `R` the mass matrix weighted with `r`, `K_D` the stiffness
-    /// matrix of `D`.
+    /// The steady terms, `R + A + K_D`: `R` the mass matrix weighted with `r`, `A` advection
+    /// (`int (vel . grad u) v`), `K_D` the stiffness matrix of `D`, with the SUPG terms
+    /// `int tau (vel . grad v) (r u + vel . grad u)`.
     Steady,
-    /// The mass term, `M_m`: the mass matrix weighted with `m`.
+    /// The mass term, `M_m`: the mass matrix weighted with `m`, with the SUPG term
+    /// `int tau (vel . grad v) m u`.
     Mass,
-    /// The Jacobian of an implicit time step, `shift M_m + R + K_D`.
+    /// The Jacobian of an implicit time step, `shift M_m + R + A + K_D` (SUPG terms included).
     Jacobian,
 }
 
@@ -37,8 +45,9 @@ impl Terms {
 
 /// The transport operator on global vectors of a [`Discretization`], with the coefficients of a
 /// [`PointData`] at its quadrature points: of the weak form of
-/// `shift m u + r u - div(D grad u)`, the terms [`Terms`] selects. `shift` is the shift of an
-/// implicit time step (in 1/s), which [`Terms::Jacobian`] applies.
+/// `shift m u + r u + vel . grad u - div(D grad u)` (stabilized by SUPG, see [`Terms`]), the
+/// terms [`Terms`] selects. With a velocity the operator is not symmetric. `shift` is the shift
+/// of an implicit time step (in 1/s), which [`Terms::Jacobian`] applies.
 ///
 /// The coefficients are fixed; the shift may be changed between applications. As a
 /// [`ShellOperator`] it is a Jacobian: essential dofs are zero in its input (and absent from its
@@ -326,7 +335,9 @@ impl PointValues {
 }
 
 /// A field given at the quadrature points of a [`Discretization`] (a source in mM/s), and its
-/// integral against the test functions, `int f v`.
+/// integral against the test functions, `int f v`; or, stabilized
+/// ([`SourceField::stabilized`]), against the SUPG test functions of a [`Transport`] operator,
+/// `int f (v + tau vel . grad v)`.
 ///
 /// The values are stored as the discretization lays out values at points: point `q` of local
 /// cell `e` at `e * Q + q`, in the order of [`Discretization::quadrature_points`].
@@ -335,12 +346,14 @@ pub struct SourceField {
     values: Vec<f64>,
     shared: Rc<Shared>,
     op: Operator,
+    /// The point data of the SUPG test functions, whose packed values the operator reads.
+    _data: Option<Rc<PointData>>,
     /// A local vector for results.
     work: RefCell<Vector>,
 }
 
 impl SourceField {
-    /// The field on `disc`, zero at every point.
+    /// The field on `disc`, zero at every point, integrated against the test functions `v`.
     pub fn new(disc: &Discretization) -> Result<SourceField> {
         let shared = disc.shared();
         let ceed = &shared.ceed;
@@ -369,10 +382,79 @@ impl SourceField {
             Some(&shared.basis),
             FieldVector::Active,
         )?;
+        SourceField::with_operator(disc, op, None)
+    }
+
+    /// The field on `disc`, zero at every point, integrated against the SUPG test functions
+    /// `v + tau vel . grad v` of the velocity and `tau` of `data` (see [`Terms`]): the source
+    /// of the equation of a [`Transport`] operator with `data`.
+    ///
+    /// Errors: [`PdeError::Unsupported`] unless `data` has a value per quadrature point of
+    /// `disc`.
+    pub fn stabilized(disc: &Discretization, data: Rc<PointData>) -> Result<SourceField> {
+        let n = disc.num_quadrature_points();
+        if data.len() != n {
+            return Err(PdeError::Unsupported(format!(
+                "point data of {} points on a discretization of {n} quadrature points",
+                data.len()
+            )));
+        }
+        let shared = disc.shared();
+        let ceed = &shared.ceed;
+        let dim = shared.basis.dim();
+        // SAFETY: the fields match what TransportSource2D reads and writes; no context.
+        let mut qf = unsafe {
+            QFunction::interior(
+                ceed,
+                1,
+                Some(qf::slidesim_pde_TransportSource2D),
+                qf::TRANSPORT_SOURCE_2D,
+            )
+        }?;
+        qf.add_input("q_data", GEOMETRY_2D_SIZE, EvalMode::None)?;
+        qf.add_input("p_data", TRANSPORT_DATA_SIZE, EvalMode::None)?;
+        qf.add_input("f", 1, EvalMode::None)?;
+        qf.add_output("v", 1, EvalMode::Interp)?;
+        qf.add_output("dv", dim, EvalMode::Grad)?;
+        let mut op = Operator::new(ceed, &qf)?;
+        op.set_field(
+            "q_data",
+            Some(&shared.q_data_restriction),
+            None,
+            FieldVector::Passive(&shared.q_data),
+        )?;
+        data.with_packed(ceed, disc.points_per_cell(), |p_data| {
+            // libCEED keeps a reference to the vector.
+            op.set_field(
+                "p_data",
+                Some(&shared.p_data_restriction),
+                None,
+                FieldVector::Passive(p_data),
+            )?;
+            Ok(())
+        })?;
+        op.set_field(
+            "f",
+            Some(&shared.point_restriction),
+            None,
+            FieldVector::Active,
+        )?;
+        let (r, b) = (Some(&shared.restriction), Some(&shared.basis));
+        op.set_field("v", r, b, FieldVector::Active)?;
+        op.set_field("dv", r, b, FieldVector::Active)?;
+        SourceField::with_operator(disc, op, Some(data))
+    }
+
+    fn with_operator(
+        disc: &Discretization,
+        op: Operator,
+        data: Option<Rc<PointData>>,
+    ) -> Result<SourceField> {
         Ok(SourceField {
             values: vec![0.0; disc.num_quadrature_points()],
-            shared: Rc::clone(shared),
+            shared: Rc::clone(disc.shared()),
             op,
+            _data: data,
             work: RefCell::new(disc.local_vector()?),
         })
     }
@@ -387,8 +469,8 @@ impl SourceField {
         &mut self.values
     }
 
-    /// `b = int f v` for the test functions `v` of the global dofs, into the global vector `b`.
-    /// Collective.
+    /// `b = int f v` for the test functions `v` of the global dofs (the SUPG test functions if
+    /// stabilized), into the global vector `b`. Collective.
     pub fn apply(&self, b: &mut impl AsVecMut) -> Result<()> {
         let mut local = self.work.borrow_mut();
         local.with_array_mut(|y| self.op.apply_slices(&self.values, y))??;

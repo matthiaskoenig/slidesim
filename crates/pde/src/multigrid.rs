@@ -16,6 +16,16 @@ const SMOOTHING_STEPS: usize = 2;
 /// spectrum, which the coarser levels cannot represent (PETSc's default transform).
 const CHEBYSHEV_TRANSFORM: [f64; 4] = [0.0, 0.1, 0.0, 1.1];
 
+/// The interval of [`CHEBYSHEV_TRANSFORM`] for operators which are not symmetric (advection):
+/// `[0.5 emax, 1.2 emax]`. Their Jacobi preconditioned spectrum is complex, where a Chebyshev
+/// polynomial of the wider interval grows: with `[0.1 emax, 1.1 emax]` the preconditioned
+/// GMRES of a manufactured solution at the cell Peclet number 100 (on the unit square,
+/// refinement 2) stagnated beyond 300 iterations. With this interval the solves of the tests
+/// of advection took at most 24 iterations (Peclet 100), 8 (a front at Peclet 100) and 6
+/// (Peclet below 1), fewer than with `[0.25 emax, 1.1 emax]` or `[0.25 emax, 1.5 emax]`, also
+/// for large steps, where diffusion dominates.
+const CHEBYSHEV_TRANSFORM_NONSYMMETRIC: [f64; 4] = [0.0, 0.5, 0.0, 1.2];
+
 /// The levels of a geometric multigrid preconditioner from [`configure_multigrid`], for keeping
 /// them in step with the shift of the operator ([`Multigrid::set_shift`]).
 ///
@@ -37,7 +47,9 @@ pub struct Multigrid {
 /// the coefficients of its level (the same coefficient functions at its quadrature points) and
 /// the same terms and shift. The finest level is the operator of `ksp`, which should be the
 /// operator `levels` ends with (as a shell matrix). For a solve on a coarser level `l`,
-/// `levels` holds the operators of the levels `0..=l` only. Collective.
+/// `levels` holds the operators of the levels `0..=l` only. `symmetric` says whether the
+/// operators are symmetric positive definite (diffusion and reaction), or not (with advection).
+/// Collective.
 ///
 /// - Interpolation: `DMCreateInterpolation` from each level to the next, between the DMs of
 ///   the discretizations (nested P1 spaces; essential dofs are left out on both levels).
@@ -46,9 +58,11 @@ pub struct Multigrid {
 ///   [`SharedOperator`]), not the Galerkin product.
 /// - Smoothers, on every level but the coarse one: 2 iterations of Chebyshev, preconditioned
 ///   by Jacobi (the diagonal of the shell operator), on `[0.1 emax, 1.1 emax]` for the largest
-///   eigenvalue `emax` estimated by 10 iterations of CG (`KSPChebyshevEstEigSet`, with the
-///   estimator set to CG: it only applies the shell operator and Jacobi). The estimates are
-///   renewed when the operator of the level changes.
+///   eigenvalue `emax` estimated by 10 iterations of CG if `symmetric`, else on
+///   `[0.5 emax, 1.2 emax]` estimated by GMRES (`KSPChebyshevEstEigSet`, with the estimator
+///   set explicitly: it only applies the shell operator and Jacobi). The estimates are renewed
+///   when the operator of the level changes. The shell matrices of the levels, and the assembled
+///   coarse operator, are marked symmetric positive definite if `symmetric`.
 /// - Coarse level (level 0): one application of algebraic multigrid (`PCGAMG`, `preonly`) to
 ///   the assembled operator ([`crate::Transport::assemble`]), which runs on any
 ///   number of processes without external packages. A mesh of one level is solved this way
@@ -62,12 +76,14 @@ pub struct Multigrid {
 /// of `ksp` must be marked changed ([`Matrix::mark_changed`]; a `TS` does
 /// when [`petsc::Implicit::jacobian`] returns true) for the preconditioner to be rebuilt.
 ///
-/// Errors: [`PdeError::NotHierarchy`] unless `levels` has one operator per level of `mesh` from
-/// level 0 up to a level of the mesh, each on the discretization linked to the one before.
+/// Errors (on every process): [`PdeError::NotHierarchy`] unless `levels` has one operator per
+/// level of `mesh` from level 0 up to a level of the mesh, each on the discretization linked to
+/// the one before, and the last of the size of the operator of `ksp`, if it has one.
 pub fn configure_multigrid(
     ksp: &mut Ksp,
     mesh: &Mesh,
     levels: &[SharedOperator],
+    symmetric: bool,
 ) -> Result<Multigrid> {
     let n = levels.len();
     if n == 0 || n > mesh.levels().len() {
@@ -98,6 +114,20 @@ pub fn configure_multigrid(
             )));
         }
     }
+    // The finest operator of the levels is the operator of the solver, as far as the sizes tell.
+    if let Some(sizes) = ksp.operator_sizes()? {
+        let last = discs[n - 1].shared().global_sizes;
+        let other = sizes != last;
+        if discs[0].dm().comm().max_int(other.into())? > 0 {
+            return Err(PdeError::NotHierarchy(format!(
+                "the last of {n} operators (level {}, {} dofs) is not of the size of the operator \
+                 of the solver ({} rows)",
+                n - 1,
+                last.1,
+                sizes.1
+            )));
+        }
+    }
 
     let mut pc = ksp.pc()?;
     let prefix = pc.options_prefix()?;
@@ -113,24 +143,32 @@ pub fn configure_multigrid(
         smoother.set_type("chebyshev")?;
         smoother.set_pc_type("jacobi")?;
         smoother.set_tolerances(None, None, Some(SMOOTHING_STEPS))?;
-        let [a, b, c, d] = CHEBYSHEV_TRANSFORM;
+        let [a, b, c, d] = if symmetric {
+            CHEBYSHEV_TRANSFORM
+        } else {
+            CHEBYSHEV_TRANSFORM_NONSYMMETRIC
+        };
         smoother.chebyshev_est_eig_set(a, b, c, d)?;
         if let Some(mut estimator) = smoother.chebyshev_est_eig_ksp()? {
-            estimator.set_type("cg")?;
+            estimator.set_type(if symmetric { "cg" } else { "gmres" })?;
         }
         if level < n - 1 {
             // The DMs of the levels: PCMG passes the state of a solver with a DM (a TS) down
             // through them (DMRestrict); without them it would create DMs which cannot.
             smoother.set_dm(discs[level].dm(), false)?;
             let mut shell = discs[level].shell_matrix(levels[level].clone())?;
-            shell.set_spd()?;
+            if symmetric {
+                shell.set_spd()?;
+            }
             smoother.set_operators(&shell, &shell)?;
             intermediate.push(shell);
         }
     }
 
     let mut coarse = levels[0].0.borrow().assemble()?;
-    coarse.set_spd()?;
+    if symmetric {
+        coarse.set_spd()?;
+    }
     let mut coarse_solve = pc.mg_smoother(0)?;
     if n > 1 {
         coarse_solve.set_dm(discs[0].dm(), false)?;

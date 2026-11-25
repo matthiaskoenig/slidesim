@@ -28,6 +28,19 @@ pub struct Discretization {
     shared: Rc<Shared>,
 }
 
+/// An edge of the boundary of the domain ([`Discretization::boundary_edges`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundaryEdge {
+    /// The edge, a point of the DM.
+    pub(crate) point: petsc::Point,
+    /// Its cell, as an index of the local cells (see [`Discretization`]).
+    pub(crate) cell: usize,
+    /// The entries of local vectors of its two vertices.
+    pub(crate) ends: [usize; 2],
+    /// The outward normal, of the length of the edge.
+    pub(crate) normal: [f64; 2],
+}
+
 /// What the operators of a discretization share.
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -61,6 +74,8 @@ pub(crate) struct Shared {
     pub(crate) area_tags: Vec<String>,
     /// For each local cell, the index in `area_tags` of its area tag, if any.
     cell_tags: Vec<Option<u32>>,
+    /// The gradients of the basis functions on the reference cell (constant for P1).
+    reference_gradients: Vec<[f64; 2]>,
 }
 
 /// The quadrature degree of degree `degree` elements: mass matrices are integrated exactly.
@@ -211,6 +226,14 @@ impl Discretization {
 
         let basis = basis_of(ceed, &fe, 1)?;
         let basis_x = basis_of(ceed, &fe, dim)?;
+        // P1: the gradients at the first quadrature point, [q][p][d].
+        let tabulation = fe.tabulation()?;
+        let reference_gradients = (0..tabulation.num_basis)
+            .map(|b| {
+                let at = b * tabulation.dim;
+                [tabulation.derivatives[at], tabulation.derivatives[at + 1]]
+            })
+            .collect();
         let q = basis.num_quadrature_points();
         let restriction = restriction_of(ceed, &offsets, 1)?;
         let restriction_x = restriction_of(ceed, &x_offsets, dim)?;
@@ -315,6 +338,7 @@ impl Discretization {
                 essential,
                 area_tags,
                 cell_tags,
+                reference_gradients,
             }),
         })
     }
@@ -349,6 +373,30 @@ impl Discretization {
     /// determinant, so that `sum_q weights[q] f(x_q)` is the integral of `f` over the local cells.
     pub fn quadrature_weights(&self) -> &[f64] {
         &self.shared.weights
+    }
+
+    /// The gradients of the basis functions on PETSc's reference cell, against which the
+    /// inverse Jacobians of the quadrature data are taken (constant for P1).
+    pub(crate) fn reference_gradients(&self) -> &[[f64; 2]] {
+        &self.shared.reference_gradients
+    }
+
+    /// The inverse Jacobian `dX_j/dx_c` at each quadrature point of the local cells, as
+    /// `[[b00, b01], [b10, b11]]` (`b_jc`), in the layout of
+    /// [`Discretization::quadrature_points`].
+    pub(crate) fn inverse_jacobians(&self) -> Result<Vec<[[f64; 2]; 2]>> {
+        let q = self.points_per_cell();
+        Ok(self.shared.q_data.with_array(|values| {
+            values
+                .chunks_exact(GEOMETRY_2D_SIZE * q)
+                .flat_map(|cell| {
+                    (0..q).map(move |i| {
+                        let b = |k: usize| cell[k * q + i];
+                        [[b(1), b(2)], [b(3), b(4)]]
+                    })
+                })
+                .collect()
+        })?)
     }
 
     /// The number of quadrature points of each cell.
@@ -456,6 +504,72 @@ impl Discretization {
         Ok(load)
     }
 
+    /// The edges of the boundary of the domain on this process (each on one process), with
+    /// their cells and outward normals, for integrals over the boundary. Collective.
+    ///
+    /// Errors (on every process): [`PdeError::Unsupported`] for an edge which is not of one
+    /// local cell and two vertices.
+    pub(crate) fn boundary_edges(&self) -> Result<Vec<BoundaryEdge>> {
+        let dm = &self.shared.dm;
+        let cells = dm.height_stratum(0)?;
+        let vertices = dm.depth_stratum(0)?;
+        let ghosts = dm.ghost_points()?;
+        let q = self.points_per_cell();
+        let mut edges = Vec::new();
+        let mut failure = None;
+        for edge in dm.boundary_faces()? {
+            if ghosts.binary_search(&edge).is_ok() {
+                continue;
+            }
+            let support = dm.support(edge)?;
+            let mut ends = Vec::with_capacity(2);
+            for p in dm.closure(edge)? {
+                if vertices.contains(&p) {
+                    ends.push(dm.local_dofs(p)?.start);
+                }
+            }
+            let (&[cell], &[a, b]) = (support.as_slice(), ends.as_slice()) else {
+                failure.get_or_insert(format!(
+                    "boundary edge {edge} with {} cells and {} vertices",
+                    support.len(),
+                    ends.len()
+                ));
+                continue;
+            };
+            if !cells.contains(&cell) {
+                failure.get_or_insert(format!("boundary edge {edge} of point {cell}, not a cell"));
+                continue;
+            }
+            let cell = (cell - cells.start) as usize;
+            let ([xa, ya], [xb, yb]) = (self.shared.nodes[a], self.shared.nodes[b]);
+            // The tangent turned by -90 degrees, then away from the cell: from a point inside
+            // it (the mean of its quadrature points) to the middle of the edge.
+            let mut normal = [yb - ya, xa - xb];
+            let points = &self.shared.points[cell * q..(cell + 1) * q];
+            let inside = points
+                .iter()
+                .fold([0.0; 2], |s, x| [s[0] + x[0], s[1] + x[1]])
+                .map(|s| s / q as f64);
+            let middle = [0.5 * (xa + xb), 0.5 * (ya + yb)];
+            if normal[0] * (middle[0] - inside[0]) + normal[1] * (middle[1] - inside[1]) < 0.0 {
+                normal = [-normal[0], -normal[1]];
+            }
+            edges.push(BoundaryEdge {
+                point: edge,
+                cell,
+                ends: [a, b],
+                normal,
+            });
+        }
+        if dm.comm().max_int(failure.is_some().into())? > 0 {
+            return Err(PdeError::Unsupported(failure.unwrap_or_else(|| {
+                "a boundary edge which is not of one cell and two vertices, on another process"
+                    .to_string()
+            })));
+        }
+        Ok(edges)
+    }
+
     /// The number of quadrature points of the local cells.
     pub fn num_quadrature_points(&self) -> usize {
         self.shared.points.len()
@@ -503,6 +617,78 @@ impl Discretization {
             }
         })?;
         Ok(())
+    }
+
+    /// The discretization of the same level of `mesh` without essential boundaries, whose local
+    /// vectors are those of this one (the same entries for the same nodes): for residuals at
+    /// the essential dofs ([`Discretization::essential_sums`]). `level` is the level of this
+    /// one. Collective.
+    ///
+    /// Errors (on every process): [`PdeError::Unsupported`] if the local vectors differ.
+    pub(crate) fn without_essential(&self, mesh: &Mesh, level: usize) -> Result<Discretization> {
+        let free = Discretization::new(mesh, level, &self.shared.ceed, 1)?;
+        let same_layout = free.node_coordinates() == self.node_coordinates();
+        if self.dm().comm().max_int((!same_layout).into())? > 0 {
+            return Err(PdeError::Unsupported(
+                "local vectors of a level which differ with and without essential boundaries"
+                    .into(),
+            ));
+        }
+        Ok(free)
+    }
+
+    /// The sums of the entries of `residual`, a global vector of `free` (this level without
+    /// essential boundaries, [`Discretization::without_essential`]), over the dofs each of the
+    /// essential tags `tags` constrains here: a dof of several of them counts for the one
+    /// listed last, as its Dirichlet value does. The same on every process. Collective.
+    pub(crate) fn essential_sums(
+        &self,
+        free: &Discretization,
+        residual: &Vector,
+        tags: &[&str],
+    ) -> Result<Vec<f64>> {
+        // The indicator of the dofs of each tag, as a global vector of `free`: 1 where any
+        // process marks the dof.
+        let mut indicators = Vec::with_capacity(tags.len());
+        let mut local = free.local_vector()?;
+        for tag in tags {
+            let dofs = self.essential_dofs(tag)?;
+            local.with_array_mut(|values| {
+                values.fill(0.0);
+                for &i in dofs {
+                    values[i] = 1.0;
+                }
+            })?;
+            let mut indicator = free.global_vector()?;
+            indicator.set(0.0)?;
+            free.dm()
+                .local_to_global(&local, InsertMode::Add, &mut indicator)?;
+            indicator.with_array_mut(|values| {
+                for v in values {
+                    *v = if *v > 0.0 { 1.0 } else { 0.0 };
+                }
+            })?;
+            indicators.push(indicator);
+        }
+        // A dof of several tags counts for the one listed last.
+        let mut taken = free.global_vector()?;
+        taken.set(0.0)?;
+        let mut sums = vec![0.0; tags.len()];
+        for (i, indicator) in indicators.iter_mut().enumerate().rev() {
+            taken.with_array_mut(|taken| {
+                indicator.with_array_mut(|values| {
+                    for (v, t) in values.iter_mut().zip(taken.iter_mut()) {
+                        if *t > 0.0 {
+                            *v = 0.0;
+                        } else if *v > 0.0 {
+                            *t = 1.0;
+                        }
+                    }
+                })
+            })??;
+            sums[i] = residual.dot(indicator)?;
+        }
+        Ok(sums)
     }
 
     /// The entries of local vectors which the essential tag `tag` constrains (its dofs, and
