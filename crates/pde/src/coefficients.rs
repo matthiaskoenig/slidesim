@@ -6,7 +6,7 @@ use std::cell::OnceCell;
 
 use ceed::{CVector, Ceed};
 use contracts::Coefficient;
-use maps::{MapError, Maps};
+use maps::{Map, MapError, Maps};
 use petsc::sys::PetscInt;
 
 use crate::qfunctions::TRANSPORT_DATA_SIZE;
@@ -23,20 +23,48 @@ use crate::{Discretization, PdeError, Result};
 /// cell ([`Discretization::cell_area_tag`]); and the number of points which fail, on all
 /// processes.
 pub fn coefficient_values(disc: &Discretization, c: &Coefficient, maps: &Maps) -> Result<Vec<f64>> {
+    match c {
+        Coefficient::Constant(value) => Ok(vec![*value; disc.num_quadrature_points()]),
+        Coefficient::Table(table) => map_values(disc, &table.map, maps, f64::NAN, |map, x| {
+            map.sample(x).map(|value| c.eval(value))
+        }),
+    }
+}
+
+/// The gradient (per um, [`maps::Map::gradient`]) of the map `id` at the quadrature points of
+/// the local cells of `disc`, in the layout of [`Discretization::quadrature_points`]. `maps`
+/// holds the map, read for the cells of this process. Collective.
+///
+/// Errors (on every process): [`PdeError::Map`] as for [`coefficient_values`].
+pub(crate) fn map_gradients(disc: &Discretization, id: &str, maps: &Maps) -> Result<Vec<[f64; 2]>> {
+    map_values(disc, id, maps, [f64::NAN; 2], |map, x| map.gradient(x))
+}
+
+/// `f(map, x)` of the map `id` at the quadrature points `x` of the local cells of `disc`, in the
+/// layout of [`Discretization::quadrature_points`], with `failed` at the points where `f` fails.
+/// Collective.
+///
+/// Errors (on every process): [`PdeError::Map`] if the map is not in `maps` (on any process), or
+/// `f` fails at a point of any process: the error of the first such point of the lowest process
+/// which has one, with the area tag of its cell, and the number of points which fail on all
+/// processes.
+fn map_values<T: Copy>(
+    disc: &Discretization,
+    id: &str,
+    maps: &Maps,
+    failed: T,
+    f: impl Fn(&Map, [f64; 2]) -> Result<T, MapError>,
+) -> Result<Vec<T>> {
     let points = disc.quadrature_points();
-    let table = match c {
-        Coefficient::Constant(value) => return Ok(vec![*value; points.len()]),
-        Coefficient::Table(table) => table,
-    };
     let comm = disc.dm().comm();
-    let map = maps.get(&table.map);
+    let map = maps.get(id);
     // A map one process lacks: the processes read the same maps, so all lack it.
     let missing = comm.max_int(map.is_err().into())? > 0;
     let map = match map {
         Ok(map) if !missing => map,
         Ok(_) => {
             return Err(PdeError::Map {
-                message: format!("map '{}' is missing on another process", table.map),
+                message: format!("map '{id}' is missing on another process"),
             });
         }
         Err(e) => {
@@ -52,10 +80,10 @@ pub fn coefficient_values(disc: &Discretization, c: &Coefficient, maps: &Maps) -
     let mut first: Option<(usize, MapError)> = None;
     let mut failing: usize = 0;
     for (i, &x) in points.iter().enumerate() {
-        match map.sample(x) {
-            Ok(value) => values.push(c.eval(value)),
+        match f(map, x) {
+            Ok(value) => values.push(value),
             Err(e) => {
-                values.push(f64::NAN);
+                values.push(failed);
                 failing += 1;
                 first.get_or_insert((i, e));
             }
@@ -67,7 +95,7 @@ pub fn coefficient_values(disc: &Discretization, c: &Coefficient, maps: &Maps) -
     });
     match PointFailure::reduce(failure, failing, &comm)? {
         None => Ok(values),
-        Some((failure, count)) => Err(failure.into_error(&table.map, disc, count)),
+        Some((failure, count)) => Err(failure.into_error(id, disc, count)),
     }
 }
 

@@ -9,17 +9,15 @@
 //! The linear solvers run to tolerances far below the errors measured, which are those of the
 //! discretization ([`ACCURATE`]), or the conservation of mass ([`CONSERVATIVE`]).
 
+mod common;
+
 use std::f64::consts::PI;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use ceed::{Ceed, DEFAULT_RESOURCE};
-use contracts::{
-    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MapSpec, MeshFormat, MeshRef,
-    SCENE_VERSION, Scene, TimeSpec, Units,
-};
+use common::{PIXELS, Scratch, ceed, unit_square};
+use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
-use mesh::{Mesh, MeshError};
+use mesh::MeshError;
 use pde::{Inputs, PdeError, PointData, Problem, Terms, Transport};
 use petsc::{Petsc, Vector};
 
@@ -35,36 +33,10 @@ const CONSERVATIVE: &str = "-ksp_rtol 1e-12";
 /// The four sides of `unit_square.msh`, each of length 1.
 const SIDES: [&str; 4] = ["left", "right", "top", "bottom"];
 
-fn fixture(file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/meshes")
-        .join(file)
-}
-
-fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
-    let scene = Scene {
-        version: SCENE_VERSION.to_string(),
-        dimension: 2,
-        units: Units {
-            length: LengthUnit::Um,
-        },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
-            path: fixture("unit_square.msh"),
-        },
-        maps: Vec::new(),
-    };
-    Mesh::load(p, &scene, refinements).unwrap()
-}
-
 /// The inputs of a [`Problem`] of constant coefficients: no maps.
 fn no_maps() -> Inputs<'static> {
     static NONE: std::sync::LazyLock<Maps> = std::sync::LazyLock::new(Maps::default);
     Inputs { maps: &NONE }
-}
-
-fn ceed() -> Ceed {
-    Ceed::new(DEFAULT_RESOURCE).unwrap()
 }
 
 fn phi([x, y]: [f64; 2]) -> f64 {
@@ -725,39 +697,6 @@ fn table(map: &str, [v0, c0]: [f64; 2], [v1, c1]: [f64; 2]) -> Coefficient {
     })
 }
 
-/// A directory of this process for the maps of a test, removed when dropped.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(test: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("slidesim-pde-{test}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-
-    /// The map `id` of `f` over the unit square and a margin: pixels of 0.01 um with centres
-    /// from -0.05 to 1.05 in x and y.
-    fn map(&self, id: &str, f: impl Fn([f64; 2]) -> f64) -> MapSpec {
-        const PIXELS: usize = 111;
-        let centre = |i: usize| -0.05 + i as f64 * 0.01;
-        let values: Vec<f64> = (0..PIXELS)
-            .flat_map(|r| (0..PIXELS).map(move |c| (r, c)))
-            .map(|(r, c)| f([centre(c), centre(r)]))
-            .collect();
-        let path = self.0.join(format!("{id}.zarr"));
-        let mut spec = maps::write_test_map(&path, &values, PIXELS, PIXELS, 0.01, [-0.05, -0.05]);
-        spec.id = id.to_string();
-        spec
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// The diffusion coefficient of [`spatial_order_variable_coefficients`]: `0.01 (1 + x)`.
 fn variable_d([x, _]: [f64; 2]) -> f64 {
     0.01 * (1.0 + x)
@@ -795,8 +734,8 @@ const DT: f64 = 1.0 / 64.0;
 fn variable_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
     let scratch = Scratch::new("spatial_order_variable_coefficients");
     let specs = [
-        scratch.map("position_x", |[x, _]| x),
-        scratch.map("position_y", |[_, y]| y),
+        scratch.map("position_x", PIXELS, |[x, _]| x),
+        scratch.map("position_y", PIXELS, |[_, y]| y),
     ];
     let field = FieldSpec {
         diffusion: table("position_x", [0.0, 0.01], [1.0, 0.02]),

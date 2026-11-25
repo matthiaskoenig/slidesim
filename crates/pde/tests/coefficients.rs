@@ -3,107 +3,15 @@
 //! test in its own process, so every test initializes PETSc once. `parallel_on_2_processes` and
 //! `parallel_on_3_processes` run some of them again under `mpiexec`.
 //!
-//! The maps are test Zarr arrays over `unit_square.msh` with pixels of 0.01 um, the centre of
-//! pixel (row 0, col 0) at (-0.05, -0.05): 111 pixels cover [-0.05, 1.05] in each direction.
-//! Every process writes its own copy into a directory of its own.
+//! The maps are test Zarr arrays over `unit_square.msh` (see `common`).
 
-use std::path::{Path, PathBuf};
+mod common;
 
-use ceed::{Ceed, DEFAULT_RESOURCE};
-use contracts::{
-    Coefficient, LengthUnit, MapSpec, MeshFormat, MeshRef, SCENE_VERSION, Scene, Table, Units,
-};
+use common::{ORIGIN, PIXEL, PIXELS, Scratch, ceed, read_maps, unit_square};
+use contracts::{Coefficient, Table};
 use maps::Maps;
-use mesh::Mesh;
 use pde::{Discretization, PdeError, coefficient_values};
 use petsc::{Comm, Petsc};
-
-/// The pixel size of the maps, in um.
-const PIXEL: f64 = 0.01;
-/// The centre of pixel (row 0, col 0), in x and in y.
-const ORIGIN: f64 = -0.05;
-/// The pixels which cover [-0.05, 1.05].
-const PIXELS: usize = 111;
-
-fn fixture(file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata/meshes")
-        .join(file)
-}
-
-fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
-    let scene = Scene {
-        version: SCENE_VERSION.to_string(),
-        dimension: 2,
-        units: Units {
-            length: LengthUnit::Um,
-        },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
-            path: fixture("unit_square.msh"),
-        },
-        maps: Vec::new(),
-    };
-    Mesh::load(p, &scene, refinements).unwrap()
-}
-
-fn ceed() -> Ceed {
-    Ceed::new(DEFAULT_RESOURCE).unwrap()
-}
-
-/// A directory of this process for the maps of a test, removed when dropped.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(test: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("slidesim-pde-{test}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-
-    /// The map `id` of `f` at the pixel centres, `PIXELS` rows (y) and `cols` columns (x) from
-    /// the origin.
-    fn map(&self, id: &str, cols: usize, f: impl Fn([f64; 2]) -> f64) -> MapSpec {
-        self.map_of_shape(id, PIXELS, cols, f)
-    }
-
-    /// The map `id` of `f` at the pixel centres, `rows` rows (y) and `cols` columns (x) from
-    /// the origin.
-    fn map_of_shape(
-        &self,
-        id: &str,
-        rows: usize,
-        cols: usize,
-        f: impl Fn([f64; 2]) -> f64,
-    ) -> MapSpec {
-        let values: Vec<f64> = (0..rows)
-            .flat_map(|r| (0..cols).map(move |c| (r, c)))
-            .map(|(r, c)| f([ORIGIN + c as f64 * PIXEL, ORIGIN + r as f64 * PIXEL]))
-            .collect();
-        let path = self.0.join(format!("{id}.zarr"));
-        let mut spec = maps::write_test_map(&path, &values, rows, cols, PIXEL, [ORIGIN, ORIGIN]);
-        spec.id = id.to_string();
-        spec
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// The maps `specs`, read for the cells of this process.
-fn read(specs: &[MapSpec], mesh: &Mesh) -> Maps {
-    let ids: Vec<&str> = specs.iter().map(|s| s.id.as_str()).collect();
-    Maps::read(
-        specs,
-        &ids,
-        mesh.local_bounds().expect("cells on every process"),
-    )
-    .unwrap()
-}
 
 fn table(map: &str, points: &[[f64; 2]]) -> Coefficient {
     Coefficient::Table(Table {
@@ -118,7 +26,7 @@ fn table_over_map_at_points() {
     let mesh = unit_square(&p, 1);
     let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
     let scratch = Scratch::new("table_over_map_at_points");
-    let maps = read(
+    let maps = read_maps(
         &[scratch.map("position", PIXELS, |[x, y]| x + 2.0 * y)],
         &mesh,
     );
@@ -148,7 +56,7 @@ fn values_beyond_table_hold_end_values() {
     let mesh = unit_square(&p, 1);
     let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
     let scratch = Scratch::new("values_beyond_table_hold_end_values");
-    let maps = read(
+    let maps = read_maps(
         &[scratch.map("position", PIXELS, |[x, y]| x + 2.0 * y)],
         &mesh,
     );
@@ -196,7 +104,7 @@ fn map_error_names_map_point_and_tag() {
     let mesh = unit_square(&p, 0);
     let disc = Discretization::new(&mesh, 0, &ceed(), 1).unwrap();
     let scratch = Scratch::new("map_error_names_map_point_and_tag");
-    let maps = read(&[scratch.map("position", LEFT_HALF, |[x, _]| x)], &mesh);
+    let maps = read_maps(&[scratch.map("position", LEFT_HALF, |[x, _]| x)], &mesh);
     let e = coefficient_values(&disc, &table("position", &[[0.0, 1.0], [1.0, 2.0]]), &maps)
         .unwrap_err();
     let PdeError::Map { message } = &e else {
@@ -229,7 +137,7 @@ fn no_value_pixel_is_error() {
         PIXELS,
         |[x, _]| if x > 0.5 { f64::NAN } else { x },
     );
-    let maps = read(&[spec], &mesh);
+    let maps = read_maps(&[spec], &mesh);
     let e = coefficient_values(&disc, &table("position", &[[0.0, 1.0], [1.0, 2.0]]), &maps)
         .unwrap_err();
     let PdeError::Map { message } = &e else {
@@ -295,7 +203,7 @@ fn map_error_on_one_process_is_error_on_all() {
     let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
     let scratch = Scratch::new("map_error_on_one_process_is_error_on_all");
     let [rows, cols] = shape_of_process_0(&comm, &disc);
-    let maps = read(
+    let maps = read_maps(
         &[scratch.map_of_shape("position", rows, cols, |[x, _]| x)],
         &mesh,
     );

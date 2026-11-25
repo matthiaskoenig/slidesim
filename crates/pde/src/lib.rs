@@ -21,6 +21,10 @@
 //! finest level, preconditioned by that multigrid, with the coefficients of the field (and its
 //! porosity) at the quadrature points of every level.
 //!
+//! A [`Flow`] solves the steady Darcy perfusion of a study once: the pressure with an
+//! anisotropic permeability along the gradient of a map, the velocity at the quadrature points
+//! of every level, and the flows through the pressure boundaries.
+//!
 //! The QFunctions are C headers in `qfunctions/` ([`QFUNCTION_DIR`]), compiled by `build.rs`
 //! for the CPU backends; backends which compile them at run time read them from there.
 //!
@@ -29,12 +33,14 @@
 
 mod coefficients;
 mod discretization;
+mod flow;
 mod multigrid;
 mod operators;
 mod problem;
 
 pub use coefficients::{PointData, coefficient_values};
 pub use discretization::Discretization;
+pub use flow::Flow;
 pub use multigrid::{Multigrid, configure_multigrid};
 pub use operators::{SharedOperator, SourceField, Terms, Transport};
 pub use problem::{Inputs, Problem};
@@ -129,7 +135,8 @@ mod qfunctions {
         slidesim_pde_QuadraturePoints2D,
         slidesim_pde_Mass,
         slidesim_pde_Values,
-        slidesim_pde_Transport2D
+        slidesim_pde_Transport2D,
+        slidesim_pde_Velocity2D
     );
 
     /// The source of a QFunction, `/abs/dir/file.h:name`.
@@ -144,6 +151,7 @@ mod qfunctions {
     pub const MASS: &str = source!("mass.h:Mass");
     pub const VALUES: &str = source!("mass.h:Values");
     pub const TRANSPORT_2D: &str = source!("transport.h:Transport2D");
+    pub const VELOCITY_2D: &str = source!("velocity.h:Velocity2D");
 
     /// The number of components of the quadrature data (`GEOMETRY_2D_SIZE` of `geometry.h`).
     pub const GEOMETRY_2D_SIZE: usize = 5;

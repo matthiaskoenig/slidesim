@@ -36,7 +36,8 @@ pub struct Multigrid {
 /// discretizations of [`Discretization::hierarchy`] (each linked to the one before), each with
 /// the coefficients of its level (the same coefficient functions at its quadrature points) and
 /// the same terms and shift. The finest level is the operator of `ksp`, which should be the
-/// operator `levels` ends with (as a shell matrix). Collective.
+/// operator `levels` ends with (as a shell matrix). For a solve on a coarser level `l`,
+/// `levels` holds the operators of the levels `0..=l` only. Collective.
 ///
 /// - Interpolation: `DMCreateInterpolation` from each level to the next, between the DMs of
 ///   the discretizations (nested P1 spaces; essential dofs are left out on both levels).
@@ -61,15 +62,15 @@ pub struct Multigrid {
 /// of `ksp` must be marked changed ([`Matrix::mark_changed`]; a `TS` does
 /// when [`petsc::Implicit::jacobian`] returns true) for the preconditioner to be rebuilt.
 ///
-/// Errors: [`PdeError::NotHierarchy`] unless `levels` has one operator per level of `mesh`,
-/// each on the discretization linked to the one before.
+/// Errors: [`PdeError::NotHierarchy`] unless `levels` has one operator per level of `mesh` from
+/// level 0 up to a level of the mesh, each on the discretization linked to the one before.
 pub fn configure_multigrid(
     ksp: &mut Ksp,
     mesh: &Mesh,
     levels: &[SharedOperator],
 ) -> Result<Multigrid> {
     let n = levels.len();
-    if n == 0 || n != mesh.levels().len() {
+    if n == 0 || n > mesh.levels().len() {
         return Err(PdeError::NotHierarchy(format!(
             "{n} operators for the {} levels of the mesh",
             mesh.levels().len()
@@ -79,6 +80,14 @@ pub fn configure_multigrid(
         .iter()
         .map(|op| op.0.borrow().discretization())
         .collect();
+    // The coarsest operator on level 0: its DM a clone of the level, with the same cells.
+    let cells = |dm: &petsc::Dm| dm.height_stratum(0).map(|cells| cells.end - cells.start);
+    let other = cells(discs[0].dm())? != cells(&mesh.levels()[0])?;
+    if discs[0].dm().comm().max_int(other.into())? > 0 {
+        return Err(PdeError::NotHierarchy(format!(
+            "the first of {n} operators is not on level 0 of the mesh"
+        )));
+    }
     for (level, pair) in discs.windows(2).enumerate() {
         let coarse = pair[1].dm().coarse_dm()?;
         if coarse.is_none_or(|dm| dm.as_raw() != pair[0].dm().as_raw()) {

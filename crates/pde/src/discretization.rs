@@ -486,13 +486,7 @@ impl Discretization {
     /// Dirichlet value; the dofs of the closure of a point shared by several essential tags take
     /// the value of the tag set last). An error if `tag` is not one of the essential tags.
     pub fn set_essential_values(&self, local: &mut Vector, tag: &str, value: f64) -> Result<()> {
-        let essential = &self.shared.essential;
-        let Some((_, dofs)) = essential.iter().find(|(name, _)| name == tag) else {
-            return Err(PdeError::NotEssential {
-                tag: tag.to_string(),
-                essential: essential.iter().map(|(name, _)| name.clone()).collect(),
-            });
-        };
+        let dofs = self.essential_dofs(tag)?;
         let length = local.local_size()?;
         if length != self.shared.local_size {
             return Err(PdeError::Petsc(petsc::Error {
@@ -509,6 +503,19 @@ impl Discretization {
             }
         })?;
         Ok(())
+    }
+
+    /// The entries of local vectors which the essential tag `tag` constrains (its dofs, and
+    /// those of its closure), sorted. An error if `tag` is not one of the essential tags.
+    pub(crate) fn essential_dofs(&self, tag: &str) -> Result<&[usize]> {
+        let essential = &self.shared.essential;
+        match essential.iter().find(|(name, _)| name == tag) {
+            Some((_, dofs)) => Ok(dofs),
+            None => Err(PdeError::NotEssential {
+                tag: tag.to_string(),
+                essential: essential.iter().map(|(name, _)| name.clone()).collect(),
+            }),
+        }
     }
 }
 

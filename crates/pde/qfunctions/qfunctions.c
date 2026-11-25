@@ -3,6 +3,7 @@
 #include "geometry.h"
 #include "mass.h"
 #include "transport.h"
+#include "velocity.h"
 
 #define EXPORT(name)                                                                                      \
   int slidesim_pde_##name(void *ctx, CeedInt Q, const CeedScalar *const *in, CeedScalar *const *out) { \
@@ -15,3 +16,4 @@ EXPORT(QuadraturePoints2D)
 EXPORT(Mass)
 EXPORT(Values)
 EXPORT(Transport2D)
+EXPORT(Velocity2D)
