@@ -1,0 +1,8 @@
+# The analysis scripts import each other from this folder (Python puts a script's folder first on its path).
+line-length = 120
+
+[lint]
+extend-select = ["I", "RUF", "FURB", "UP", "B"]
+
+[lint.isort]
+known-first-party = ["render", "slidesim_io"]

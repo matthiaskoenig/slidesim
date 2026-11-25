@@ -8,6 +8,12 @@
 #    baseline also at every level of BASELINE_REFINEMENTS.
 # 3. Checks of each run's summary.json: every portal_wall flow > 0, every central_wall flow < 0,
 #    their sum within 1e-8 of the largest flow.
+# 4. Analysis (scripts/e2e/m2_real_slide/, in the uv environment of the slideviz checkout): the numbers
+#    of every run in OUT/runs as OUT/analysis/<run>.json and the tables of the results document as
+#    OUT/analysis/report.md (flows per wall piece, mass balance with the outflow through walls
+#    without flow, velocities, tracer front), the window search OUT/analysis/windows.json, and the
+#    figures into FIGURES. The figures take the H&E slide of SLIDEVIZ_DATA and the runs of the
+#    studies at their refinements; the velocity distribution and the cases figure all four studies.
 #
 # Nothing is written into SLIDEVIZ_DATA. Settings (environment variables, defaults in brackets):
 #   SLIDEVIZ_DATA        slides with their sidecars and predictions/ (required)
@@ -18,13 +24,16 @@
 #   CENTRE_ROW, CENTRE_COL  field centre, H&E level 0 pixels [10114 16388]
 #   FIELD_UM             field edge in um [1500]
 #   MESH_SIZE_UM         element sizes SMALL:LARGE of build_mesh.py [5:20]
-#   OUT                  output folder [.superpowers/sdd/2026-11-25-slidesim-m2-perfusion/task-9-real]
+#   OUT                  output folder [target/e2e/m2_real_slide]
 #   STUDIES              studies to run, may be empty [baseline calibrated whole_blood radial10]
 #   BASELINE_REFINEMENTS extra refinement levels of the baseline, may be empty [0 1]
 #   NP                   MPI processes [4]
 #   MPIEXEC_FLAGS        extra mpiexec flags, e.g. --oversubscribe []
 #   PETSC_ENV            env.sh of the PETSc/libCEED install [deps/install/native-opt/env.sh]
-#   STEPS                "scene runs" or one of them [scene runs]
+#   STEPS                steps to run, of: scene runs analysis [scene runs analysis]
+#   FIGURES              folder of the figures [OUT/figures]; docs/results/2026-11-m2-real-slide
+#                        for the results document
+#   WINDOW_CENTRES       further window centres (row col ...) for the window search [14000 12000]
 #   PIXI                 pixi for the mesh environment of slideviz [~/.pixi/bin/pixi]
 set -euo pipefail
 shopt -s nullglob
@@ -40,13 +49,15 @@ CENTRE_ROW=${CENTRE_ROW:-10114}
 CENTRE_COL=${CENTRE_COL:-16388}
 FIELD_UM=${FIELD_UM:-1500}
 MESH_SIZE_UM=${MESH_SIZE_UM:-5:20}
-OUT=${OUT:-$ROOT/.superpowers/sdd/2026-11-25-slidesim-m2-perfusion/task-9-real}
+OUT=$(realpath -m "${OUT:-$ROOT/target/e2e/m2_real_slide}")
 STUDIES=${STUDIES-baseline calibrated whole_blood radial10}
 BASELINE_REFINEMENTS=${BASELINE_REFINEMENTS-0 1}
 NP=${NP:-4}
 MPIEXEC_FLAGS=${MPIEXEC_FLAGS:-}
 PETSC_ENV=${PETSC_ENV:-$ROOT/deps/install/native-opt/env.sh}
-STEPS=${STEPS:-scene runs}
+STEPS=${STEPS:-scene runs analysis}
+FIGURES=$(realpath -m "${FIGURES:-$OUT/figures}")
+WINDOW_CENTRES=${WINDOW_CENTRES-14000 12000}
 PIXI=${PIXI:-$HOME/.pixi/bin/pixi}
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -153,11 +164,75 @@ runs() {
     done
 }
 
+# A script of scripts/e2e/m2_real_slide in the uv environment of the slideviz checkout.
+analysis_py() {
+    local script=$1
+    shift
+    uv run --quiet --project "$SLIDEVIZ_REPO" python "$ROOT/scripts/e2e/m2_real_slide/$script" "$@"
+}
+
+# The output folder of a study at the refinements of its study file, and its study copy, as
+# LABEL=RUN_DIR:STUDY.
+study_run() {
+    local level
+    level=$(jq .mesh.refinements "$ROOT/testdata/studies/m2_real_slide/$1.study.json")
+    printf '%s=%s:%s\n' "$1" "$OUT/runs/$1_r$level" "$OUT/$1_r$level.study.json"
+}
+
+analysis() {
+    local mesh he dir name spec label rest centres=() index
+    mesh=$(one "$OUT"/mesh/*.json)
+    mkdir -p "$OUT/analysis" "$FIGURES"
+    for dir in "$OUT"/runs/*/; do
+        name=$(basename "$dir")
+        log "analysis of $name"
+        analysis_py analyze.py --run "$dir" --study "$OUT/$name.study.json" --mesh "$mesh" \
+            --scene "$OUT/scene/scene.json" --out "$OUT/analysis/$name.json"
+    done
+    analysis_py report.py "$OUT"/analysis/*_r*.json >"$OUT/analysis/report.md"
+    log "window search"
+    # shellcheck disable=SC2206 # WINDOW_CENTRES is a list of numbers
+    local extra=($WINDOW_CENTRES)
+    for ((index = 0; index + 1 < ${#extra[@]}; index += 2)); do
+        centres+=(--centre "${extra[index]}" "${extra[index + 1]}")
+    done
+    analysis_py windows.py --slides "$SLIDEVIZ_DATA" --slide "${SLIDE}_he" \
+        --lobules "$(one "$OUT/zonation/${SLIDE}"_cyp2e1_lobules.npz)" --lumen "$LUMEN" \
+        --centre "$CENTRE_ROW" "$CENTRE_COL" "${centres[@]}" --out "$OUT/analysis/windows.json"
+    log "figures into $FIGURES"
+    he="$OUT/analysis/he.npz"
+    analysis_py he_crop.py --slides "$SLIDEVIZ_DATA" --slide "${SLIDE}_he" --mesh "$mesh" --out "$he"
+    local runs=()
+    for name in baseline calibrated whole_blood radial10; do
+        spec=$(study_run "$name")
+        rest=${spec#*=}
+        [[ -f ${rest%%:*}/summary.json ]] && runs+=("$spec")
+    done
+    [[ ${#runs[@]} -gt 0 ]] || { echo "no runs of the studies for the figures" >&2; exit 1; }
+    for spec in "${runs[@]}"; do
+        label=${spec%%=*}
+        rest=${spec#*=}
+        case $label in
+            baseline) analysis_py render.py --run "${rest%%:*}" --study "${rest#*:}" --mesh "$mesh" \
+                --he "$he" --label baseline --out "$FIGURES" ;;
+            radial10) analysis_py render.py --run "${rest%%:*}" --study "${rest#*:}" --mesh "$mesh" \
+                --he "$he" --label radial10 --only-velocity --suffix _radial10 --out "$FIGURES" ;;
+        esac
+    done
+    # the output index of t = 3 s
+    index=$(jq '.time.outputs | index(3)' "$ROOT/testdata/studies/m2_real_slide/baseline.study.json")
+    analysis_py cases.py --mesh "$mesh" --index "$index" --out "$FIGURES/sucrose_cases_3s.png" \
+        "${runs[@]}"
+    analysis_py velocity_distribution.py --mesh "$mesh" --out "$FIGURES/velocity_distribution.png" \
+        "${runs[@]}"
+}
+
 for step in $STEPS; do
     case $step in
         scene) scene ;;
         runs) runs ;;
-        *) echo "unknown step $step (scene, runs)" >&2; exit 1 ;;
+        analysis) analysis ;;
+        *) echo "unknown step $step (scene, runs, analysis)" >&2; exit 1 ;;
     esac
 done
 log "done: $OUT"
