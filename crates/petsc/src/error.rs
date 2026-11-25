@@ -48,17 +48,42 @@ impl std::error::Error for Error {}
 /// Calls a PETSc function and turns a nonzero return code into an [`Error`] (with the message
 /// and traceback PETSc reported), which the enclosing function returns with `?`.
 ///
-/// `chk!(sys::VecAXPY(y, alpha, x))` runs the call in an `unsafe` block: `chk!` is for calls of
-/// the PETSc C API only, and the caller upholds their safety requirements (valid handles and
-/// pointers).
+/// The caller writes the `unsafe` block: `chk!(unsafe { sys::VecAXPY(y, alpha, x) })`. The call
+/// is not made unless PETSc is initialized and not yet finalized (else `PETSC_ERR_ORDER`).
 #[macro_export]
 macro_rules! chk {
     ($call:expr) => {{
-        // The unsafe block around the call is the point of the macro.
-        #[allow(unused_unsafe, clippy::macro_metavars_in_unsafe)]
-        let ierr = unsafe { $call };
+        $crate::__ensure_alive(stringify!($call))?;
+        let ierr: $crate::sys::PetscErrorCode = $call;
         $crate::__check(ierr, stringify!($call))?
     }};
+}
+
+/// The call of `chk!(unsafe { call })`, for messages (`stringify!` of the block spaces paths
+/// as `sys :: VecAXPY`).
+fn call_text(call: &str) -> String {
+    let call = call.trim();
+    call.strip_prefix("unsafe")
+        .and_then(|c| c.trim_start().strip_prefix('{'))
+        .and_then(|c| c.strip_suffix('}'))
+        .map_or(call, str::trim)
+        .replace(" :: ", "::")
+}
+
+/// An error unless PETSc is initialized and not yet finalized: PETSc calls are allowed.
+#[doc(hidden)]
+pub fn ensure_alive(call: &str) -> Result<()> {
+    if crate::alive() {
+        Ok(())
+    } else {
+        Err(Error::new(
+            sys::PETSC_ERR_ORDER,
+            format!(
+                "PETSc is not initialized or already finalized\n  called as {}",
+                call_text(call)
+            ),
+        ))
+    }
 }
 
 /// The error of a nonzero return code `ierr` of the PETSc call `call` (the text of the call).
@@ -87,7 +112,7 @@ pub fn check(ierr: sys::PetscErrorCode, call: &str) -> Result<()> {
         message.push_str(frame);
     }
     message.push_str("\n  called as ");
-    message.push_str(call);
+    message.push_str(&call_text(call));
     Err(Error {
         code: ierr,
         message,

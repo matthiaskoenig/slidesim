@@ -14,7 +14,7 @@ impl Ts {
     /// `TSCreate`.
     pub fn create(comm: &Comm) -> Result<Ts> {
         let mut raw = null_mut();
-        chk!(sys::TSCreate(comm.as_raw(), &mut raw));
+        chk!(unsafe { sys::TSCreate(comm.as_raw(), &mut raw) });
         Ok(Ts { raw })
     }
 
@@ -24,7 +24,7 @@ impl Ts {
 
     /// `TSSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
-        chk!(sys::TSSetFromOptions(self.raw));
+        chk!(unsafe { sys::TSSetFromOptions(self.raw) });
         Ok(())
     }
 }

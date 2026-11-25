@@ -1,16 +1,78 @@
-//! `Vec`: PETSc vectors.
+//! `Vec`: PETSc vectors, owned ([`Vector`]) or lent by PETSc to a callback ([`VecRef`],
+//! [`VecMut`]).
 
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
 
 use crate::{Comm, Dm, Petsc, Result, alive, chk, sys, to_int};
 
-/// A PETSc vector (`Vec`): owned, or lent by PETSc to a callback.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A PETSc vector of any kind: [`Vector`], [`VecRef`] or [`VecMut`]. Sealed: its handle is
+/// always a valid `Vec`.
+pub trait AsVec: sealed::Sealed {
+    fn as_raw(&self) -> sys::Vec;
+}
+
+/// A PETSc vector which may be written: [`Vector`] or [`VecMut`].
+pub trait AsVecMut: AsVec {}
+
+/// An owned PETSc vector (`Vec`).
 #[derive(Debug)]
 pub struct Vector {
     raw: sys::Vec,
-    /// Whether dropping it destroys `raw` (false for a vector PETSc lends to a callback).
-    owned: bool,
+}
+
+/// A vector PETSc lends to a callback for reading, valid for the call only: the lifetime ties it
+/// to the callback, so it cannot be kept.
+#[derive(Debug)]
+pub struct VecRef<'a> {
+    raw: sys::Vec,
+    _call: PhantomData<&'a ()>,
+}
+
+/// A vector PETSc lends to a callback for reading and writing, valid for the call only.
+///
+/// It cannot be kept beyond the call, not even by swapping it into the state of a (`'static`)
+/// operator:
+///
+/// ```compile_fail
+/// use std::cell::RefCell;
+/// use petsc::VecMut;
+///
+/// fn keep(y: &mut VecMut<'_>, state: &RefCell<VecMut<'static>>) {
+///     std::mem::swap(y, &mut *state.borrow_mut());
+/// }
+/// ```
+#[derive(Debug)]
+pub struct VecMut<'a> {
+    raw: sys::Vec,
+    _call: PhantomData<&'a mut ()>,
+}
+
+impl<'a> VecRef<'a> {
+    /// # Safety
+    /// `raw` is a valid `Vec` for `'a`.
+    pub(crate) unsafe fn lent(raw: sys::Vec) -> VecRef<'a> {
+        VecRef {
+            raw,
+            _call: PhantomData,
+        }
+    }
+}
+
+impl<'a> VecMut<'a> {
+    /// # Safety
+    /// `raw` is a valid `Vec` for `'a`, which nothing else uses meanwhile.
+    pub(crate) unsafe fn lent(raw: sys::Vec) -> VecMut<'a> {
+        VecMut {
+            raw,
+            _call: PhantomData,
+        }
+    }
 }
 
 impl Vector {
@@ -18,109 +80,148 @@ impl Vector {
     pub fn create_seq(_petsc: &Petsc, n: usize) -> Result<Vector> {
         let n = to_int(n, "vector length")?;
         let mut raw = null_mut();
-        chk!(sys::VecCreateSeq(Comm::self_().as_raw(), n, &mut raw));
-        Ok(Vector::owned(raw))
+        chk!(unsafe { sys::VecCreateSeq(Comm::self_().as_raw(), n, &mut raw) });
+        Ok(Vector { raw })
     }
 
     /// A global vector of `dm` (`DMCreateGlobalVector`).
     pub fn create_global(dm: &Dm) -> Result<Vector> {
         let mut raw = null_mut();
-        chk!(sys::DMCreateGlobalVector(dm.as_raw(), &mut raw));
-        Ok(Vector::owned(raw))
+        chk!(unsafe { sys::DMCreateGlobalVector(dm.as_raw(), &mut raw) });
+        Ok(Vector { raw })
     }
 
     /// A local vector of `dm`, with ghost points (`DMCreateLocalVector`).
     pub fn create_local(dm: &Dm) -> Result<Vector> {
         let mut raw = null_mut();
-        chk!(sys::DMCreateLocalVector(dm.as_raw(), &mut raw));
-        Ok(Vector::owned(raw))
-    }
-
-    /// Takes ownership of `raw`.
-    fn owned(raw: sys::Vec) -> Vector {
-        Vector { raw, owned: true }
-    }
-
-    /// A vector PETSc owns, lent to Rust for the duration of a callback: never destroyed, even
-    /// if the callback swaps it out.
-    pub(crate) fn borrowed(raw: sys::Vec) -> Vector {
-        Vector { raw, owned: false }
-    }
-
-    pub fn as_raw(&self) -> sys::Vec {
-        self.raw
-    }
-
-    /// The global length.
-    pub fn size(&self) -> Result<usize> {
-        let mut n = 0;
-        chk!(sys::VecGetSize(self.raw, &mut n));
-        Ok(n as usize)
-    }
-
-    /// The length of the part on this process.
-    pub fn local_size(&self) -> Result<usize> {
-        let mut n = 0;
-        chk!(sys::VecGetLocalSize(self.raw, &mut n));
-        Ok(n as usize)
-    }
-
-    /// The 2-norm.
-    pub fn norm2(&self) -> Result<f64> {
-        let mut norm = 0.0;
-        chk!(sys::VecNorm(self.raw, sys::NORM_2, &mut norm));
-        Ok(norm)
-    }
-
-    /// The dot product with `y`.
-    pub fn dot(&self, y: &Vector) -> Result<f64> {
-        let mut dot = 0.0;
-        chk!(sys::VecDot(self.raw, y.raw, &mut dot));
-        Ok(dot)
-    }
-
-    /// `self += alpha * x`.
-    pub fn axpy(&mut self, alpha: f64, x: &Vector) -> Result<()> {
-        chk!(sys::VecAXPY(self.raw, alpha, x.raw));
-        Ok(())
-    }
-
-    /// Sets every entry to `alpha`.
-    pub fn set(&mut self, alpha: f64) -> Result<()> {
-        chk!(sys::VecSet(self.raw, alpha));
-        Ok(())
-    }
-
-    /// Calls `f` with the entries on this process.
-    pub fn with_array<R>(&self, f: impl FnOnce(&[f64]) -> R) -> Result<R> {
-        let n = self.local_size()?;
-        let mut ptr = std::ptr::null();
-        chk!(sys::VecGetArrayRead(self.raw, &mut ptr));
-        let array = Array {
-            vec: self.raw,
-            ptr: ptr.cast_mut(),
-            write: false,
-        };
-        let r = f(unsafe { array.slice(n) });
-        array.restore()?;
-        Ok(r)
-    }
-
-    /// Calls `f` with the entries on this process, for reading and writing.
-    pub fn with_array_mut<R>(&mut self, f: impl FnOnce(&mut [f64]) -> R) -> Result<R> {
-        let n = self.local_size()?;
-        let mut ptr = null_mut();
-        chk!(sys::VecGetArray(self.raw, &mut ptr));
-        let array = Array {
-            vec: self.raw,
-            ptr,
-            write: true,
-        };
-        let r = f(unsafe { array.slice_mut(n) });
-        array.restore()?;
-        Ok(r)
+        chk!(unsafe { sys::DMCreateLocalVector(dm.as_raw(), &mut raw) });
+        Ok(Vector { raw })
     }
 }
+
+impl Drop for Vector {
+    fn drop(&mut self) {
+        if alive() {
+            unsafe { sys::VecDestroy(&mut self.raw) };
+        }
+    }
+}
+
+/// The operations which read a vector.
+macro_rules! read_ops {
+    () => {
+        pub fn as_raw(&self) -> sys::Vec {
+            self.raw
+        }
+
+        /// The global length.
+        pub fn size(&self) -> Result<usize> {
+            let mut n = 0;
+            chk!(unsafe { sys::VecGetSize(self.raw, &mut n) });
+            Ok(n as usize)
+        }
+
+        /// The length of the part on this process.
+        pub fn local_size(&self) -> Result<usize> {
+            let mut n = 0;
+            chk!(unsafe { sys::VecGetLocalSize(self.raw, &mut n) });
+            Ok(n as usize)
+        }
+
+        /// The 2-norm.
+        pub fn norm2(&self) -> Result<f64> {
+            let mut norm = 0.0;
+            chk!(unsafe { sys::VecNorm(self.raw, sys::NORM_2, &mut norm) });
+            Ok(norm)
+        }
+
+        /// The dot product with `y`.
+        pub fn dot(&self, y: &impl AsVec) -> Result<f64> {
+            let mut dot = 0.0;
+            chk!(unsafe { sys::VecDot(self.raw, y.as_raw(), &mut dot) });
+            Ok(dot)
+        }
+
+        /// Calls `f` with the entries on this process.
+        pub fn with_array<R>(&self, f: impl FnOnce(&[f64]) -> R) -> Result<R> {
+            let n = self.local_size()?;
+            let mut ptr = std::ptr::null();
+            chk!(unsafe { sys::VecGetArrayRead(self.raw, &mut ptr) });
+            let array = Array {
+                vec: self.raw,
+                ptr: ptr.cast_mut(),
+                write: false,
+            };
+            // SAFETY: the array holds the `n` local entries until it is restored, after `f`.
+            let r = f(unsafe { array.slice(n) });
+            array.restore()?;
+            Ok(r)
+        }
+    };
+}
+
+/// The operations which write a vector.
+macro_rules! write_ops {
+    () => {
+        /// `self += alpha * x`.
+        pub fn axpy(&mut self, alpha: f64, x: &impl AsVec) -> Result<()> {
+            chk!(unsafe { sys::VecAXPY(self.raw, alpha, x.as_raw()) });
+            Ok(())
+        }
+
+        /// Sets every entry to `alpha`.
+        pub fn set(&mut self, alpha: f64) -> Result<()> {
+            chk!(unsafe { sys::VecSet(self.raw, alpha) });
+            Ok(())
+        }
+
+        /// Calls `f` with the entries on this process, for reading and writing.
+        pub fn with_array_mut<R>(&mut self, f: impl FnOnce(&mut [f64]) -> R) -> Result<R> {
+            let n = self.local_size()?;
+            let mut ptr = null_mut();
+            chk!(unsafe { sys::VecGetArray(self.raw, &mut ptr) });
+            let array = Array {
+                vec: self.raw,
+                ptr,
+                write: true,
+            };
+            // SAFETY: the array holds the `n` local entries for writing until it is restored,
+            // after `f`; `&mut self` excludes other uses of the vector meanwhile.
+            let r = f(unsafe { array.slice_mut(n) });
+            array.restore()?;
+            Ok(r)
+        }
+    };
+}
+
+impl Vector {
+    read_ops!();
+    write_ops!();
+}
+
+impl VecRef<'_> {
+    read_ops!();
+}
+
+impl VecMut<'_> {
+    read_ops!();
+    write_ops!();
+}
+
+macro_rules! as_vec {
+    ($($t:ty),*) => {$(
+        impl sealed::Sealed for $t {}
+        impl AsVec for $t {
+            fn as_raw(&self) -> sys::Vec {
+                self.raw
+            }
+        }
+    )*};
+}
+
+as_vec!(Vector, VecRef<'_>, VecMut<'_>);
+impl AsVecMut for Vector {}
+impl AsVecMut for VecMut<'_> {}
 
 /// An array taken from a vector: restored by `restore`, or on drop if `f` panics.
 struct Array {
@@ -131,7 +232,7 @@ struct Array {
 
 impl Array {
     /// # Safety
-    /// `n` is the local size of the vector.
+    /// `n` is the local size of the vector, and the slice is not used after `restore`.
     unsafe fn slice<'a>(&self, n: usize) -> &'a [f64] {
         if n == 0 {
             &[]
@@ -141,7 +242,7 @@ impl Array {
     }
 
     /// # Safety
-    /// `n` is the local size of the vector, and the array was taken for writing.
+    /// As [`Array::slice`], and the array was taken for writing.
     unsafe fn slice_mut<'a>(&self, n: usize) -> &'a mut [f64] {
         if n == 0 {
             &mut []
@@ -151,6 +252,7 @@ impl Array {
     }
 
     fn restore_raw(&mut self) -> sys::PetscErrorCode {
+        // SAFETY: `ptr` was taken from `vec` with the matching Get call.
         unsafe {
             if self.write {
                 sys::VecRestoreArray(self.vec, &mut self.ptr)
@@ -172,13 +274,5 @@ impl Drop for Array {
     fn drop(&mut self) {
         // Only reached when unwinding: the panic is the error to report.
         self.restore_raw();
-    }
-}
-
-impl Drop for Vector {
-    fn drop(&mut self) {
-        if self.owned && alive() {
-            unsafe { sys::VecDestroy(&mut self.raw) };
-        }
     }
 }

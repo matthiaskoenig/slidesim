@@ -24,15 +24,18 @@ impl Dm {
 
     /// `DMSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
-        chk!(sys::DMSetFromOptions(self.raw));
+        chk!(unsafe { sys::DMSetFromOptions(self.raw) });
         Ok(())
     }
 }
 
 impl Clone for Dm {
     fn clone(&self) -> Dm {
-        // Cannot fail on a valid object.
-        unsafe { sys::PetscObjectReference(self.raw as sys::PetscObject) };
+        // Cannot fail on a valid object. After PetscFinalize nothing is destroyed any more, so
+        // the reference count does not matter.
+        if alive() {
+            unsafe { sys::PetscObjectReference(self.raw as sys::PetscObject) };
+        }
         Dm { raw: self.raw }
     }
 }

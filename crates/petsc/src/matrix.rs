@@ -4,14 +4,17 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 
 use crate::error::callback;
-use crate::{Comm, Error, Result, Vector, alive, chk, sys, to_int};
+use crate::error::{check, ensure_alive};
+use crate::{AsVec, AsVecMut, Comm, Error, Result, VecMut, VecRef, alive, chk, sys, to_int};
 
 /// A linear operator applied by Rust code: the context of a shell matrix.
+///
+/// PETSc lends the vectors for the duration of the call ([`VecRef`], [`VecMut`]).
 pub trait ShellOperator {
     /// `y = A x`.
-    fn mult(&self, x: &Vector, y: &mut Vector) -> Result<()>;
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()>;
     /// `d = diag(A)`.
-    fn diagonal(&self, d: &mut Vector) -> Result<()>;
+    fn diagonal(&self, d: &mut VecMut<'_>) -> Result<()>;
 }
 
 /// An owned PETSc matrix (`Mat`).
@@ -36,15 +39,19 @@ impl Matrix {
     ) -> Result<Matrix> {
         let m = to_int(local_rows, "local rows")?;
         let n = to_int(global_rows, "global rows")?;
+        ensure_alive("MatCreateShell")?;
         // A thin pointer to the trait object, the shell context.
         let ctx: *mut Context = Box::into_raw(Box::new(op));
         let mut raw = null_mut();
-        let created = crate::__check(
+        // SAFETY: `ctx` stays valid until `destroy_context` (or the cleanup below) frees it.
+        // The destroy function can only be set once the context is (MatShellSetContextDestroy
+        // does nothing without one).
+        let created = check(
             unsafe { sys::MatCreateShell(comm.as_raw(), m, m, n, n, ctx.cast(), &mut raw) },
             "MatCreateShell",
         )
         .and_then(|()| {
-            crate::__check(
+            check(
                 unsafe { sys::MatShellSetContextDestroy(raw, Some(destroy_context)) },
                 "MatShellSetContextDestroy",
             )
@@ -58,16 +65,11 @@ impl Matrix {
         // From here PETSc owns the context.
         let mult = shell_mult as unsafe extern "C" fn(_, _, _) -> _;
         let diagonal = shell_diagonal as unsafe extern "C" fn(_, _) -> _;
-        chk!(sys::MatShellSetOperation(
-            raw,
-            sys::MATOP_MULT,
-            erase(mult as *const ())
-        ));
-        chk!(sys::MatShellSetOperation(
-            raw,
-            sys::MATOP_GET_DIAGONAL,
-            erase(diagonal as *const ())
-        ));
+        // SAFETY: the functions have the signatures PETSc casts them back to.
+        chk!(unsafe { sys::MatShellSetOperation(raw, sys::MATOP_MULT, erase(mult as *const ())) });
+        chk!(unsafe {
+            sys::MatShellSetOperation(raw, sys::MATOP_GET_DIAGONAL, erase(diagonal as *const ()))
+        });
         Ok(matrix)
     }
 
@@ -106,19 +108,22 @@ impl Matrix {
         let mut i = coo_i.iter().map(index).collect::<Result<Vec<_>>>()?;
         let mut j = coo_j.iter().map(index).collect::<Result<Vec<_>>>()?;
         let mut raw = null_mut();
-        chk!(sys::MatCreate(comm.as_raw(), &mut raw));
+        chk!(unsafe { sys::MatCreate(comm.as_raw(), &mut raw) });
         let matrix = Matrix {
             raw,
             coo_len: Some(i.len()),
         };
-        chk!(sys::MatSetSizes(raw, m, m, n, n));
-        chk!(sys::MatSetType(raw, sys::MATAIJ.as_ptr().cast()));
-        chk!(sys::MatSetPreallocationCOO(
-            raw,
-            i.len() as sys::PetscCount,
-            i.as_mut_ptr(),
-            j.as_mut_ptr()
-        ));
+        chk!(unsafe { sys::MatSetSizes(raw, m, m, n, n) });
+        chk!(unsafe { sys::MatSetType(raw, sys::MATAIJ.as_ptr().cast()) });
+        // SAFETY: `i` and `j` hold `i.len()` indices each; PETSc copies them.
+        chk!(unsafe {
+            sys::MatSetPreallocationCOO(
+                raw,
+                i.len() as sys::PetscCount,
+                i.as_mut_ptr(),
+                j.as_mut_ptr(),
+            )
+        });
         Ok(matrix)
     }
 
@@ -135,11 +140,10 @@ impl Matrix {
                 format!("COO values: {} given, {n} expected", values.len()),
             )),
             Some(_) => {
-                chk!(sys::MatSetValuesCOO(
-                    self.raw,
-                    values.as_ptr(),
-                    sys::INSERT_VALUES
-                ));
+                // SAFETY: `values` holds one value per COO entry (checked above).
+                chk!(unsafe {
+                    sys::MatSetValuesCOO(self.raw, values.as_ptr(), sys::INSERT_VALUES)
+                });
                 Ok(())
             }
         }
@@ -150,14 +154,14 @@ impl Matrix {
     }
 
     /// `y = A x`.
-    pub fn mult(&self, x: &Vector, y: &mut Vector) -> Result<()> {
-        chk!(sys::MatMult(self.raw, x.as_raw(), y.as_raw()));
+    pub fn mult(&self, x: &impl AsVec, y: &mut impl AsVecMut) -> Result<()> {
+        chk!(unsafe { sys::MatMult(self.raw, x.as_raw(), y.as_raw()) });
         Ok(())
     }
 
     /// `d = diag(A)`.
-    pub fn diagonal(&self, d: &mut Vector) -> Result<()> {
-        chk!(sys::MatGetDiagonal(self.raw, d.as_raw()));
+    pub fn diagonal(&self, d: &mut impl AsVecMut) -> Result<()> {
+        chk!(unsafe { sys::MatGetDiagonal(self.raw, d.as_raw()) });
         Ok(())
     }
 }
@@ -182,24 +186,24 @@ fn erase(f: *const ()) -> sys::PetscErrorCodeFn {
 /// `a` is a shell matrix from [`Matrix::shell`].
 unsafe fn operator<'a>(a: sys::Mat) -> Result<&'a dyn ShellOperator> {
     let mut ctx: *mut c_void = null_mut();
-    chk!(sys::MatShellGetContext(
-        a,
-        (&mut ctx as *mut *mut c_void).cast()
-    ));
+    chk!(unsafe { sys::MatShellGetContext(a, (&mut ctx as *mut *mut c_void).cast()) });
     Ok(unsafe { &**ctx.cast::<Context>() })
 }
 
 unsafe extern "C" fn shell_mult(a: sys::Mat, x: sys::Vec, y: sys::Vec) -> sys::PetscErrorCode {
     callback(c"ShellOperator::mult", || {
+        // SAFETY: PETSc calls this for shells from `Matrix::shell` only, with valid vectors
+        // for the duration of the call (x != y, MatMult checks).
         let op = unsafe { operator(a) }?;
-        op.mult(&Vector::borrowed(x), &mut Vector::borrowed(y))
+        op.mult(&unsafe { VecRef::lent(x) }, &mut unsafe { VecMut::lent(y) })
     })
 }
 
 unsafe extern "C" fn shell_diagonal(a: sys::Mat, d: sys::Vec) -> sys::PetscErrorCode {
     callback(c"ShellOperator::diagonal", || {
+        // SAFETY: as in `shell_mult`.
         let op = unsafe { operator(a) }?;
-        op.diagonal(&mut Vector::borrowed(d))
+        op.diagonal(&mut unsafe { VecMut::lent(d) })
     })
 }
 

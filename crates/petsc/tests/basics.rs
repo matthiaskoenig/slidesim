@@ -1,12 +1,13 @@
 //! Tests of the safe PETSc wrappers. nextest runs each test in its own process, so every test
 //! initializes PETSc once.
 
-use std::cell::RefCell;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use petsc::sys;
-use petsc::{Comm, Dm, Error, Ksp, Matrix, Petsc, Result, ShellOperator, Ts, Vector};
+use petsc::{
+    Comm, Dm, Error, Ksp, Matrix, Petsc, Result, ShellOperator, Ts, VecMut, VecRef, Vector,
+};
 
 fn values(v: &Vector) -> Vec<f64> {
     v.with_array(|a| a.to_vec()).unwrap()
@@ -109,11 +110,11 @@ fn panic_in_with_array_mut_restores_array() {
 struct Double;
 
 impl ShellOperator for Double {
-    fn mult(&self, x: &Vector, y: &mut Vector) -> Result<()> {
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()> {
         y.set(0.0)?;
         y.axpy(2.0, x)
     }
-    fn diagonal(&self, d: &mut Vector) -> Result<()> {
+    fn diagonal(&self, d: &mut VecMut<'_>) -> Result<()> {
         d.set(2.0)
     }
 }
@@ -126,35 +127,6 @@ fn shell_matrix_applies() {
     let mut y = Vector::create_seq(&p, 3).unwrap();
     a.mult(&x, &mut y).unwrap();
     assert_eq!(values(&y), [2.0, -4.0, 6.0]);
-}
-
-/// Swaps the output vector it is given with a vector of its own.
-struct Swapping(RefCell<Vector>);
-
-impl ShellOperator for Swapping {
-    fn mult(&self, _x: &Vector, y: &mut Vector) -> Result<()> {
-        std::mem::swap(y, &mut *self.0.borrow_mut());
-        Ok(())
-    }
-    fn diagonal(&self, _d: &mut Vector) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// A callback cannot destroy the vectors PETSc lends it, even by swapping them out.
-#[test]
-fn shell_cannot_destroy_lent_vectors() {
-    let p = Petsc::init(&[]).unwrap();
-    let mine = Vector::create_seq(&p, 3).unwrap();
-    let a = Matrix::shell(&p.comm(), 3, 3, Box::new(Swapping(RefCell::new(mine)))).unwrap();
-    let x = Vector::create_seq(&p, 3).unwrap();
-    let mut y = seq(&p, &[1.0, 2.0, 3.0]);
-    a.mult(&x, &mut y).unwrap();
-    // y is alive and untouched; the operator now holds (and drops) the lent handle.
-    assert_eq!(values(&y), [1.0, 2.0, 3.0]);
-    drop(a);
-    y.set(1.0).unwrap();
-    assert_eq!(values(&y), [1.0, 1.0, 1.0]);
 }
 
 #[test]
@@ -170,13 +142,13 @@ fn shell_matrix_diagonal() {
 struct Failing;
 
 impl ShellOperator for Failing {
-    fn mult(&self, _x: &Vector, _y: &mut Vector) -> Result<()> {
+    fn mult(&self, _x: &VecRef<'_>, _y: &mut VecMut<'_>) -> Result<()> {
         Err(Error {
             code: sys::PETSC_ERR_USER_INPUT,
             message: "negative diffusion coefficient".into(),
         })
     }
-    fn diagonal(&self, _d: &mut Vector) -> Result<()> {
+    fn diagonal(&self, _d: &mut VecMut<'_>) -> Result<()> {
         panic!("diagonal exploded")
     }
 }
@@ -208,10 +180,10 @@ fn shell_panic_surfaces_as_error() {
 struct Counted(&'static AtomicUsize);
 
 impl ShellOperator for Counted {
-    fn mult(&self, x: &Vector, y: &mut Vector) -> Result<()> {
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()> {
         Double.mult(x, y)
     }
-    fn diagonal(&self, d: &mut Vector) -> Result<()> {
+    fn diagonal(&self, d: &mut VecMut<'_>) -> Result<()> {
         Double.diagonal(d)
     }
 }
@@ -397,4 +369,24 @@ fn objects_outliving_petsc_are_safe() {
     drop(p);
     drop(v);
     drop(a);
+}
+
+/// After PetscFinalize every wrapper call is an error, not a call into a finalized PETSc.
+#[test]
+fn use_after_finalize_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mut v = Vector::create_seq(&p, 3).unwrap();
+    drop(p);
+    let e = v.set(1.0).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ORDER);
+    assert!(e.message.contains("finalized"), "{e}");
+    assert!(e.message.contains("VecSet"), "{e}");
+    let e = v.norm2().unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ORDER);
+    let e = Ksp::create(&comm).err().unwrap();
+    assert_eq!(e.code, sys::PETSC_ERR_ORDER);
+    assert!(e.message.contains("KSPCreate"), "{e}");
+    let e = Matrix::shell(&comm, 3, 3, Box::new(Double)).err().unwrap();
+    assert_eq!(e.code, sys::PETSC_ERR_ORDER);
 }

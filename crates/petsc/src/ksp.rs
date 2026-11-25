@@ -14,7 +14,7 @@ impl Ksp {
     /// `KSPCreate`.
     pub fn create(comm: &Comm) -> Result<Ksp> {
         let mut raw = null_mut();
-        chk!(sys::KSPCreate(comm.as_raw(), &mut raw));
+        chk!(unsafe { sys::KSPCreate(comm.as_raw(), &mut raw) });
         Ok(Ksp { raw })
     }
 
@@ -24,7 +24,7 @@ impl Ksp {
 
     /// `KSPSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
-        chk!(sys::KSPSetFromOptions(self.raw));
+        chk!(unsafe { sys::KSPSetFromOptions(self.raw) });
         Ok(())
     }
 }

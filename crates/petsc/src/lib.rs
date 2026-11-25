@@ -2,8 +2,21 @@
 //!
 //! [`Petsc::init`] initializes PETSc (once per process) and installs an error handler which
 //! neither prints nor aborts: every failing PETSc call returns an [`Error`] carrying the PETSc
-//! message and traceback (see [`chk!`]). Dropping [`Petsc`] finalizes PETSc; objects dropped
-//! after that are leaked instead of destroyed.
+//! message and traceback (see [`chk!`]). Dropping [`Petsc`] finalizes PETSc; after that, every
+//! wrapper call returns an error (`PETSC_ERR_ORDER`) and dropped objects are leaked instead of
+//! destroyed.
+//!
+//! PETSc is not thread safe: no type here is `Send` or `Sync`.
+//!
+//! ```compile_fail
+//! fn send<T: Send>() {}
+//! send::<petsc::Comm>();
+//! ```
+//!
+//! ```compile_fail
+//! fn sync<T: Sync>() {}
+//! sync::<petsc::Comm>();
+//! ```
 //!
 //! The raw bindings are re-exported as [`sys`], and every wrapper gives its raw handle with
 //! `as_raw()`, for the PETSc API not wrapped here.
@@ -16,19 +29,21 @@ mod ts;
 mod vector;
 
 use std::ffi::{CString, c_char, c_int};
+use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use petsc_sys as sys;
 
 pub use dm::Dm;
-#[doc(hidden)]
-pub use error::check as __check;
+use error::check;
 pub use error::{Error, Result};
+#[doc(hidden)]
+pub use error::{check as __check, ensure_alive as __ensure_alive};
 pub use ksp::Ksp;
 pub use matrix::{Matrix, ShellOperator};
 pub use ts::Ts;
-pub use vector::Vector;
+pub use vector::{AsVec, AsVecMut, VecMut, VecRef, Vector};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -80,23 +95,23 @@ impl Petsc {
         argv.push(null_mut());
         let mut argc = args.len() as c_int;
         let mut argv_ptr = argv.as_mut_ptr();
-        chk!(sys::PetscInitialize(
-            &mut argc,
-            &mut argv_ptr,
-            null(),
-            null()
-        ));
+        // Not `chk!`: PETSc is not initialized yet. SAFETY: `argv` is NULL terminated, and it
+        // and the strings live in `Petsc` until PetscFinalize (PETSc keeps pointers to them).
+        check(
+            unsafe { sys::PetscInitialize(&mut argc, &mut argv_ptr, null(), null()) },
+            "PetscInitialize",
+        )?;
         let petsc = Petsc {
             _args: args,
             _argv: argv,
         };
-        chk!(sys::PetscPushErrorHandler(Some(error::record), null_mut()));
+        chk!(unsafe { sys::PetscPushErrorHandler(Some(error::record), null_mut()) });
         Ok(petsc)
     }
 
     /// `PETSC_COMM_WORLD`.
     pub fn comm(&self) -> Comm {
-        Comm(unsafe { sys::PETSC_COMM_WORLD })
+        Comm::new(unsafe { sys::PETSC_COMM_WORLD })
     }
 }
 
@@ -110,14 +125,19 @@ impl Drop for Petsc {
     }
 }
 
-/// An MPI communicator. Valid while PETSc is initialized.
+/// An MPI communicator. Valid while PETSc is initialized. Not `Send` or `Sync` (on every MPI:
+/// MPICH's handle is an integer).
 #[derive(Clone, Copy, Debug)]
-pub struct Comm(sys::MPI_Comm);
+pub struct Comm(sys::MPI_Comm, PhantomData<*const ()>);
 
 impl Comm {
+    fn new(raw: sys::MPI_Comm) -> Comm {
+        Comm(raw, PhantomData)
+    }
+
     /// `PETSC_COMM_SELF`.
     pub(crate) fn self_() -> Comm {
-        Comm(unsafe { sys::petsc_sys_comm_self() })
+        Comm::new(unsafe { sys::petsc_sys_comm_self() })
     }
 
     /// The rank of this process.
