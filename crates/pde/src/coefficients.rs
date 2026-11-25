@@ -23,39 +23,62 @@ use crate::{Discretization, PdeError, Result};
 /// cell ([`Discretization::cell_area_tag`]); and the number of points which fail, on all
 /// processes.
 pub fn coefficient_values(disc: &Discretization, c: &Coefficient, maps: &Maps) -> Result<Vec<f64>> {
+    let q = disc.points_per_cell();
+    coefficient_values_at(disc, disc.quadrature_points(), &|i| i / q, c, maps)
+}
+
+/// As [`coefficient_values`], at the points `points` of local cells of `disc`, point `i` in the
+/// local cell `cell(i)` (for the area tag of an error). Collective.
+pub(crate) fn coefficient_values_at(
+    disc: &Discretization,
+    points: &[[f64; 2]],
+    cell: &dyn Fn(usize) -> usize,
+    c: &Coefficient,
+    maps: &Maps,
+) -> Result<Vec<f64>> {
     match c {
-        Coefficient::Constant(value) => Ok(vec![*value; disc.num_quadrature_points()]),
-        Coefficient::Table(table) => map_values(disc, &table.map, maps, f64::NAN, |map, x| {
-            map.sample(x).map(|value| c.eval(value))
-        }),
+        Coefficient::Constant(value) => Ok(vec![*value; points.len()]),
+        Coefficient::Table(table) => {
+            map_values_at(disc, points, cell, &table.map, maps, f64::NAN, |map, x| {
+                map.sample(x).map(|value| c.eval(value))
+            })
+        }
     }
 }
 
-/// The gradient (per um, [`maps::Map::gradient`]) of the map `id` at the quadrature points of
-/// the local cells of `disc`, in the layout of [`Discretization::quadrature_points`]. `maps`
-/// holds the map, read for the cells of this process. Collective.
+/// The gradient (per um, [`maps::Map::gradient`]) of the map `id` at the points `points` of
+/// local cells of `disc`, point `i` in the local cell `cell(i)`. `maps` holds the map, read for
+/// the cells of this process. Collective.
 ///
 /// Errors (on every process): [`PdeError::Map`] as for [`coefficient_values`].
-pub(crate) fn map_gradients(disc: &Discretization, id: &str, maps: &Maps) -> Result<Vec<[f64; 2]>> {
-    map_values(disc, id, maps, [f64::NAN; 2], |map, x| map.gradient(x))
+pub(crate) fn map_gradients_at(
+    disc: &Discretization,
+    points: &[[f64; 2]],
+    cell: &dyn Fn(usize) -> usize,
+    id: &str,
+    maps: &Maps,
+) -> Result<Vec<[f64; 2]>> {
+    map_values_at(disc, points, cell, id, maps, [f64::NAN; 2], |map, x| {
+        map.gradient(x)
+    })
 }
 
-/// `f(map, x)` of the map `id` at the quadrature points `x` of the local cells of `disc`, in the
-/// layout of [`Discretization::quadrature_points`], with `failed` at the points where `f` fails.
-/// Collective.
+/// `f(map, x)` of the map `id` at the points `x` of `points`, point `i` in the local cell
+/// `cell(i)` of `disc`, with `failed` at the points where `f` fails. Collective.
 ///
 /// Errors (on every process): [`PdeError::Map`] if the map is not in `maps` (on any process), or
 /// `f` fails at a point of any process: the error of the first such point of the lowest process
 /// which has one, with the area tag of its cell, and the number of points which fail on all
 /// processes.
-fn map_values<T: Copy>(
+fn map_values_at<T: Copy>(
     disc: &Discretization,
+    points: &[[f64; 2]],
+    cell: &dyn Fn(usize) -> usize,
     id: &str,
     maps: &Maps,
     failed: T,
     f: impl Fn(&Map, [f64; 2]) -> Result<T, MapError>,
 ) -> Result<Vec<T>> {
-    let points = disc.quadrature_points();
     let comm = disc.dm().comm();
     let map = maps.get(id);
     // A map one process lacks: the processes read the same maps, so all lack it.
@@ -74,7 +97,6 @@ fn map_values<T: Copy>(
         }
     };
 
-    let q = disc.points_per_cell();
     let mut values = Vec::with_capacity(points.len());
     // The first point which fails, and the number of them.
     let mut first: Option<(usize, MapError)> = None;
@@ -90,7 +112,7 @@ fn map_values<T: Copy>(
         }
     }
     let failure = first.map(|(i, e)| {
-        let tag = disc.cell_area_tag_index(i / q);
+        let tag = disc.cell_area_tag_index(cell(i));
         PointFailure::new(e, tag)
     });
     match PointFailure::reduce(failure, failing, &comm)? {
@@ -212,6 +234,8 @@ pub struct PointData {
     diffusion: Vec<[f64; 3]>,
     velocity: Vec<[f64; 2]>,
     tau: Vec<f64>,
+    /// The backflow term on the boundary, as entries `(i, j, value)` of local vectors.
+    backflow: Vec<(usize, usize, f64)>,
     /// The values as libCEED reads them, and its context: made by the first operator.
     packed: OnceCell<(Ceed, CVector)>,
 }
@@ -235,6 +259,7 @@ impl PointData {
             diffusion,
             velocity: vec![[0.0; 2]; n],
             tau: vec![0.0; n],
+            backflow: Vec::new(),
             packed: OnceCell::new(),
         }
     }
@@ -324,6 +349,73 @@ impl PointData {
             .collect();
         self.packed = OnceCell::new();
         self
+    }
+
+    /// The data with the backflow term on the boundary of `disc`: on every edge of the boundary
+    /// of the domain which no tag of `dirichlet` marks, `int (u . n)^- c v` with
+    /// `(u . n)^- = max(0, -u . n)`, by the two Gauss points of the edge, so that no advective
+    /// flux enters where the flow comes back in through a boundary without a condition (the
+    /// advective form has no boundary term otherwise: free outflow where `u . n > 0`).
+    /// `edge_velocity` holds the velocity at the Gauss points of each edge of the boundary,
+    /// sorted by edge ([`crate::Flow::edge_velocity`] of the level of `disc`). The term is part of
+    /// the steady terms of a [`crate::Transport`] operator of the data (and of its Jacobian), as
+    /// a sparse matrix of local entries added to the libCEED operator. Collective.
+    ///
+    /// Errors (on every process): [`PdeError::Unsupported`] if an edge of the boundary has no
+    /// velocity in `edge_velocity` (the flow of another mesh).
+    pub fn with_backflow(
+        mut self,
+        disc: &Discretization,
+        edge_velocity: &[(petsc::Point, [[f64; 2]; 2])],
+        dirichlet: &[&str],
+    ) -> Result<PointData> {
+        let dm = disc.dm();
+        let mut fixed = std::collections::BTreeSet::new();
+        for tag in dirichlet {
+            for value in dm.label_values(tag)? {
+                fixed.extend(dm.stratum_points(tag, value)?);
+            }
+        }
+        let mut entries = Vec::new();
+        let mut missing = false;
+        for edge in disc.boundary_edges()? {
+            if fixed.contains(&edge.point) {
+                continue;
+            }
+            let Ok(k) = edge_velocity.binary_search_by_key(&edge.point, |(p, _)| *p) else {
+                missing = true;
+                continue;
+            };
+            let velocity = edge_velocity[k].1;
+            for (s, u) in crate::discretization::EDGE_GAUSS.iter().zip(velocity) {
+                // `normal` has the length of the edge, the Gauss weight is 1/2.
+                let back = (-(u[0] * edge.normal[0] + u[1] * edge.normal[1])).max(0.0) * 0.5;
+                if back == 0.0 {
+                    continue;
+                }
+                let shape = [1.0 - s, *s];
+                for (i, a) in edge.ends.iter().zip(shape) {
+                    for (j, b) in edge.ends.iter().zip(shape) {
+                        entries.push((*i, *j, back * a * b));
+                    }
+                }
+            }
+        }
+        if dm.comm().max_int(missing.into())? > 0 {
+            return Err(PdeError::Unsupported(
+                "an edge of the boundary without the velocity of the flow (a flow of another \
+                 mesh)"
+                    .to_string(),
+            ));
+        }
+        self.backflow = entries;
+        Ok(self)
+    }
+
+    /// The entries `(i, j, value)` of local vectors of the backflow term (see
+    /// [`PointData::with_backflow`]); none without it.
+    pub fn backflow(&self) -> &[(usize, usize, f64)] {
+        &self.backflow
     }
 
     /// The number of points.

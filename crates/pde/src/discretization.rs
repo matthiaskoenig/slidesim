@@ -39,7 +39,16 @@ pub(crate) struct BoundaryEdge {
     pub(crate) ends: [usize; 2],
     /// The outward normal, of the length of the edge.
     pub(crate) normal: [f64; 2],
+    /// The two Gauss points of the edge ([`EDGE_GAUSS`], from the first end to the second).
+    pub(crate) points: [[f64; 2]; 2],
 }
+
+/// The Gauss points of an edge from its first end (0) to its second (1), exact for cubic
+/// integrands; each of weight 1/2 (times the length of the edge).
+pub(crate) const EDGE_GAUSS: [f64; 2] = [
+    0.5 - 0.288_675_134_594_812_9, // 1 / (2 sqrt 3)
+    0.5 + 0.288_675_134_594_812_9,
+];
 
 /// What the operators of a discretization share.
 #[derive(Debug)]
@@ -554,11 +563,13 @@ impl Discretization {
             if normal[0] * (middle[0] - inside[0]) + normal[1] * (middle[1] - inside[1]) < 0.0 {
                 normal = [-normal[0], -normal[1]];
             }
+            let at = |s: f64| [xa + s * (xb - xa), ya + s * (yb - ya)];
             edges.push(BoundaryEdge {
                 point: edge,
                 cell,
                 ends: [a, b],
                 normal,
+                points: EDGE_GAUSS.map(at),
             });
         }
         if dm.comm().max_int(failure.is_some().into())? > 0 {

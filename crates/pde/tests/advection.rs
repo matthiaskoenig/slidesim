@@ -15,6 +15,7 @@
 mod common;
 
 use std::f64::consts::PI;
+use std::rc::Rc;
 
 use common::{PIXELS, Scratch, ceed, read_maps, unit_square};
 use contracts::{
@@ -23,7 +24,7 @@ use contracts::{
 };
 use maps::Maps;
 use mesh::Mesh;
-use pde::{Discretization, Flow, Inputs, PdeError, PointData, Problem};
+use pde::{Discretization, Flow, Inputs, PdeError, PointData, Problem, Terms, Transport};
 use petsc::Petsc;
 
 /// The four sides of `unit_square.msh`, each of length 1.
@@ -529,6 +530,151 @@ fn mass_balance_of_a_uniform_flow() {
     }
 }
 
+/// `beta` of [`backflow_flow`].
+const BETA: f64 = 2.0;
+
+/// The divergence free flow of the harmonic pressure
+/// `p = -x - beta sinh(pi x) cos(pi y) / (pi cosh pi)` with `k = mu = 1`:
+/// `u = (1 + beta cosh(pi x) cos(pi y) / cosh pi, beta sinh(pi x) sin(pi y) / cosh pi)`, the
+/// pressure fixed on `left` and `right` (no flow through `top` and `bottom`, as `u_y` is zero
+/// there). It enters through `left`, and leaves through `right` (net flow 1) except where
+/// `cos(pi y) < -1 / beta` (`y > 2/3`), where it comes back in.
+fn backflow_flow(mesh: &Mesh, maps: &Maps) -> Flow {
+    let pressure =
+        |[x, y]: [f64; 2]| -x - BETA * (PI * x).sinh() * (PI * y).cos() / (PI * PI.cosh());
+    Flow::solve_manufactured(
+        mesh,
+        &perfusion([1.0, 1.0], &[("left", 0.0), ("right", 0.0)]),
+        maps,
+        &ceed(),
+        "",
+        &pressure,
+        &|_| 0.0,
+    )
+    .unwrap()
+}
+
+/// Backflow through a side without condition: at the Gauss points of `right` with
+/// `u . n < 0` the boundary term lets no advective flux in, so the fluid which comes back in
+/// carries no substance. With the concentration 1 at the start and at the inflow, only the
+/// backflow changes it: the discrete energy `int c^2` falls step by step (by the flux of the
+/// backflow, `int (u . n)^- c^2`; without the term it would not fall), the concentration stays
+/// bounded, and the mass balance closes.
+#[test]
+fn backflow_without_condition() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let scratch = Scratch::new("backflow_without_condition");
+    let maps = direction_maps(&scratch, &mesh);
+    let flow = backflow_flow(&mesh, &maps);
+    let finest = mesh.levels().len() - 1;
+    // The flow comes back in through part of `right`.
+    let back = flow
+        .edge_velocity(finest)
+        .iter()
+        .flat_map(|(_, u)| u.iter())
+        .filter(|u| u[0] < -0.1)
+        .count();
+    let back = p.comm().sum_int(back as petsc::sys::PetscInt).unwrap();
+    assert!(back > 0, "no backflow");
+    let flows = flow.tag_flows();
+    assert!(flows[0].1 > 0.0 && flows[1].1 < 0.0, "{flows:?}");
+    let inputs = Inputs {
+        maps: &maps,
+        flow: Some(&flow),
+    };
+    let field = FieldSpec {
+        initial: 1.0,
+        ..field(D, 0.0, 1.0, vec![dirichlet("left", 1.0)])
+    };
+    let dt = 1.0 / 32.0;
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, dt),
+        &ceed(),
+        CONSERVATIVE,
+        &inputs,
+    )
+    .unwrap();
+    let initial = problem.l2_norm().unwrap();
+    let mut energy = initial;
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for n in 1..=32 {
+        problem.step_to(f64::from(n) * dt).unwrap();
+        let next = problem.l2_norm().unwrap();
+        assert!(next <= energy, "step {n}: energy {next} after {energy}");
+        energy = next;
+        let balance = problem.mass_balance().unwrap();
+        let imbalance = imbalance(&balance);
+        assert!(imbalance < 1e-8, "step {n}: {imbalance:e}: {balance:?}");
+        let values = problem
+            .local_solution()
+            .unwrap()
+            .with_array(<[f64]>::to_vec)
+            .unwrap();
+        for v in values {
+            min = min.min(v);
+            max = max.max(v);
+        }
+    }
+    println!("L2 norm at t = 1: {energy}, at t = 0: {initial}; min {min}, max {max}");
+    assert!(energy < 0.99 * initial, "{energy}");
+    // Bounded: the backflow makes a layer at `right` (the substance-free fluid coming in), where
+    // SUPG oscillates as at the front (measured min -0.104, max 1.043).
+    assert!(min >= -0.15 && max <= 1.1, "min {min}, max {max}");
+}
+
+/// The backflow term is in the operator as PETSc sees it: its products, its diagonal and its
+/// assembled matrix (the coarse level of the multigrid) agree.
+#[test]
+fn backflow_term_in_mult_diagonal_and_assembly() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let scratch = Scratch::new("backflow_term_in_mult_diagonal_and_assembly");
+    let maps = direction_maps(&scratch, &mesh);
+    let flow = backflow_flow(&mesh, &maps);
+    let level = mesh.levels().len() - 1;
+    let disc = Discretization::with_essential(&mesh, level, &ceed(), 1, &["left"]).unwrap();
+    let n = disc.num_quadrature_points();
+    let data = PointData::isotropic(&disc, &vec![1.0; n], &vec![0.1; n], &vec![D; n])
+        .with_velocity(flow.velocity(level).to_vec())
+        .stabilized(&disc)
+        .with_backflow(&disc, flow.edge_velocity(level), &["left"])
+        .unwrap();
+    let entries = p
+        .comm()
+        .sum_int(data.backflow().len() as petsc::sys::PetscInt)
+        .unwrap();
+    assert!(entries > 0);
+    let mut op = Transport::new(&disc, Rc::new(data), Terms::Jacobian).unwrap();
+    op.shift = 3.0;
+    let assembled = op.assemble().unwrap();
+    let shell = disc.shell_matrix(op).unwrap();
+    let mut x = disc.global_vector().unwrap();
+    let rank = p.comm().rank();
+    x.with_array_mut(|a| {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = (i as f64 + 1000.0 * rank as f64).sin();
+        }
+    })
+    .unwrap();
+    let mut expected = disc.global_vector().unwrap();
+    assembled.mult(&x, &mut expected).unwrap();
+    let mut y = disc.global_vector().unwrap();
+    shell.mult(&x, &mut y).unwrap();
+    y.axpy(-1.0, &expected).unwrap();
+    let error = y.norm2().unwrap() / expected.norm2().unwrap();
+    assert!(error < 1e-13, "relative |A x - A_coo x| = {error}");
+    let mut diagonal = disc.global_vector().unwrap();
+    shell.diagonal(&mut diagonal).unwrap();
+    let mut expected = disc.global_vector().unwrap();
+    assembled.diagonal(&mut expected).unwrap();
+    diagonal.axpy(-1.0, &expected).unwrap();
+    let error = diagonal.norm2().unwrap() / expected.norm2().unwrap();
+    assert!(error < 1e-13, "relative |diag - diag(A)| = {error}");
+}
+
 /// The total mass is the amount of substance, `int phi c`: the porosity weighs it.
 #[test]
 fn total_mass_weighs_the_porosity() {
@@ -577,6 +723,8 @@ fn parity(ranks: usize, test: &str) {
                     "inflow_without_dirichlet_is_error",
                     "mass_balance_closes",
                     "mass_balance_of_a_uniform_flow",
+                    "backflow_without_condition",
+                    "backflow_term_in_mult_diagonal_and_assembly",
                     "supg_tau_of_pure_advection",
                 ],
             );

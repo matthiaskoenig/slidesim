@@ -9,7 +9,9 @@ use ceed::Ceed;
 use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
 use mesh::Mesh;
-use petsc::{ExactFinalTime, Implicit, OptionsScope, ProblemType, Ts, VecMut, VecRef, Vector, sys};
+use petsc::{
+    ExactFinalTime, Implicit, OptionsScope, Point, ProblemType, Ts, VecMut, VecRef, Vector, sys,
+};
 
 use crate::balance::{self, Parts};
 use crate::operators::PointValues;
@@ -76,7 +78,12 @@ pub struct Inputs<'a> {
 /// advection, every tag through which the flow enters the domain (positive [`Flow::tag_flows`])
 /// needs a Dirichlet condition ([`PdeError::Inflow`] otherwise); where the flow leaves, without
 /// a condition, the outflow is free: the advective form needs no boundary term, and the
-/// diffusive flux is zero.
+/// diffusive flux is zero. The P1 Darcy velocity has a normal component on walls without flow
+/// and may come back in locally through a tag of net outflow; at each Gauss point of an edge of
+/// the boundary without Dirichlet condition where `w . n < 0`, the term `int (w . n)^- u v`
+/// (`(w . n)^- = max(0, -w . n)`) keeps the advective flux from entering
+/// ([`PointData::with_backflow`], with the velocity at the edge, [`Flow::edge_velocity`]), in
+/// the residual, the Jacobian and the operators of every multigrid level.
 ///
 /// Conservation: [`Problem::total_mass`] is the amount of substance `int phi u`, and
 /// [`Problem::mass_balance`] its balance at the end of a step from the discrete equations (the
@@ -140,6 +147,9 @@ pub struct Problem {
     conditions: Vec<String>,
     /// The tags of edges of the mesh, in its order.
     edge_tags: Vec<String>,
+    /// The velocity at the Gauss points of the edges of the boundary of the finest level (none
+    /// without advection).
+    edge_velocity: Vec<(Point, [[f64; 2]; 2])>,
     values: PointValues,
     /// Dropped after the `TS`, which may read options until it is destroyed.
     _options: OptionsScope,
@@ -247,7 +257,7 @@ impl Problem {
             Some(disc.boundary_load(&fluxes)?)
         };
         // The velocity of the flow on each level, with advection.
-        let velocity = |level: usize, disc: &Discretization| -> Result<Option<&[[f64; 2]]>> {
+        let velocity = |level: usize, disc: &Discretization| -> Result<Option<Advection<'_>>> {
             let Some(flow) = flow else {
                 return Ok(None);
             };
@@ -260,12 +270,16 @@ impl Problem {
                     field.id
                 )));
             }
-            Ok(Some(flow.velocity(level)))
+            Ok(Some(Advection {
+                velocity: flow.velocity(level),
+                edges: flow.edge_velocity(level),
+                dirichlet: &essential,
+            }))
         };
         // The coefficients of the finest level first: a map error names a point of the level
         // of the solution, where there is one.
         let fine = Coefficients::new(&disc, field, inputs.maps, true)?;
-        let data = Rc::new(fine.point_data(&disc, velocity(finest, &disc)?));
+        let data = Rc::new(fine.point_data(&disc, velocity(finest, &disc)?)?);
         let jacobian = Rc::new(RefCell::new(Transport::new(
             &disc,
             Rc::clone(&data),
@@ -282,7 +296,7 @@ impl Problem {
             .enumerate()
             .map(|(l, level)| {
                 let coefficients = Coefficients::new(level, field, inputs.maps, false)?;
-                let data = Rc::new(coefficients.point_data(level, velocity(l, level)?));
+                let data = Rc::new(coefficients.point_data(level, velocity(l, level)?)?);
                 let op = Transport::new(level, data, Terms::Jacobian)?;
                 Ok(SharedOperator(Rc::new(RefCell::new(op))))
             })
@@ -341,6 +355,7 @@ impl Problem {
             fluxes,
             conditions,
             edge_tags,
+            edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
             _options: options,
         })
     }
@@ -563,6 +578,7 @@ impl Problem {
             dirichlet: &dirichlet,
             fluxes: &fluxes,
             edge_tags: &self.edge_tags,
+            edge_velocity: &self.edge_velocity,
         })
     }
 
@@ -634,9 +650,13 @@ impl Coefficients {
         })
     }
 
-    /// The data of the operator: mass `phi`, reaction `phi k` and diffusion `phi d I`; and the
-    /// velocity `velocity` with SUPG, if given.
-    fn point_data(&self, disc: &Discretization, velocity: Option<&[[f64; 2]]>) -> PointData {
+    /// The data of the operator: mass `phi`, reaction `phi k` and diffusion `phi d I`; and,
+    /// with `advection`, its velocity with SUPG and the backflow term on the boundary. Collective.
+    fn point_data(
+        &self,
+        disc: &Discretization,
+        advection: Option<Advection<'_>>,
+    ) -> Result<PointData> {
         let scaled = |c: &[f64]| -> Vec<f64> {
             c.iter()
                 .zip(&self.porosity)
@@ -649,11 +669,29 @@ impl Coefficients {
             &scaled(&self.decay),
             &scaled(&self.diffusion),
         );
-        match velocity {
-            Some(velocity) => data.with_velocity(velocity.to_vec()).stabilized(disc),
+        Ok(match advection {
+            Some(Advection {
+                velocity,
+                edges,
+                dirichlet,
+            }) => data
+                .with_velocity(velocity.to_vec())
+                .stabilized(disc)
+                .with_backflow(disc, edges, dirichlet)?,
             None => data,
-        }
+        })
     }
+}
+
+/// The flow of a level, for the advection of a field.
+#[derive(Clone, Copy)]
+struct Advection<'a> {
+    /// At the quadrature points.
+    velocity: &'a [[f64; 2]],
+    /// At the Gauss points of the edges of the boundary ([`Flow::edge_velocity`]).
+    edges: &'a [(Point, [[f64; 2]; 2])],
+    /// The Dirichlet tags of the field.
+    dirichlet: &'a [&'a str],
 }
 
 /// The equation of a [`Problem`] for its `TS`:

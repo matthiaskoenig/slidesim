@@ -156,6 +156,15 @@ impl Transport {
         &self.data
     }
 
+    /// The entries of the backflow term of the data ([`PointData::with_backflow`]), which the
+    /// steady terms and the Jacobian apply (the mass term does not).
+    fn backflow(&self) -> &[(usize, usize, f64)] {
+        match self.terms {
+            Terms::Mass => &[],
+            Terms::Steady | Terms::Jacobian => self.data.backflow(),
+        }
+    }
+
     /// Passes the current shift to the QFunction, if it changed.
     fn update_context(&self) -> Result<()> {
         let context = [self.shift, self.terms.context()];
@@ -184,8 +193,15 @@ impl Transport {
     ) -> Result<()> {
         self.update_context()?;
         // libCEED views the arrays of the local vectors in place.
-        let applied =
-            x_local.with_array(|x| y_local.with_array_mut(|y| self.op.apply_slices(x, y)));
+        let applied = x_local.with_array(|x| {
+            y_local.with_array_mut(|y| {
+                self.op.apply_slices(x, y)?;
+                for &(i, j, value) in self.backflow() {
+                    y[i] += value * x[j];
+                }
+                Ok::<_, ceed::Error>(())
+            })
+        });
         applied???;
         y.zero()?;
         self.shared
@@ -212,7 +228,16 @@ impl Transport {
         let mut diagonal = CVector::new(&self.shared.ceed, self.shared.local_size)?;
         self.op.assemble_diagonal(&mut diagonal)?;
         let mut work = self.work.borrow_mut();
-        diagonal.with_array(|values| work.y.with_array_mut(|y| y.copy_from_slice(values)))??;
+        diagonal.with_array(|values| {
+            work.y.with_array_mut(|y| {
+                y.copy_from_slice(values);
+                for &(i, j, value) in self.backflow() {
+                    if i == j {
+                        y[i] += value;
+                    }
+                }
+            })
+        })??;
         d.zero()?;
         self.shared
             .dm
@@ -225,7 +250,12 @@ impl Transport {
     /// out, like the dofs themselves; entries of rows owned by another process are sent to it.
     /// Collective.
     pub fn assemble(&self) -> Result<Matrix> {
-        let (rows, cols) = self.op.assemble_coo_symbolic()?;
+        let (mut rows, mut cols) = self.op.assemble_coo_symbolic()?;
+        // The backflow term after the entries of libCEED, in the order of `reassemble`.
+        for &(i, j, _) in self.backflow() {
+            rows.push(i as i64);
+            cols.push(j as i64);
+        }
         let shared = &self.shared;
         let global = |local: Vec<i64>| -> Result<Vec<i64>> {
             local
@@ -259,7 +289,14 @@ impl Transport {
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
         self.update_context()?;
         let values = self.op.assemble_coo_values()?;
-        values.with_array(|values| matrix.set_values_coo(values))??;
+        let backflow = self.backflow();
+        if backflow.is_empty() {
+            values.with_array(|values| matrix.set_values_coo(values))??;
+        } else {
+            let mut all = values.with_array(<[f64]>::to_vec)?;
+            all.extend(backflow.iter().map(|&(_, _, value)| value));
+            matrix.set_values_coo(&all)?;
+        }
         Ok(())
     }
 

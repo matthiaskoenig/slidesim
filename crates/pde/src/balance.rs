@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use petsc::{Point, Vector};
 
+use crate::discretization::EDGE_GAUSS;
 use crate::operators::PointValues;
 use crate::{Discretization, PointData, Result, SourceField, Terms, Transport};
 
@@ -25,17 +26,22 @@ pub const UNTAGGED: &str = "(untagged)";
 /// constrained (Dirichlet) ones included, is the equation tested with `v = 1`, where
 /// `grad v = 0` takes the stabilization and diffusion out:
 ///
-/// `int phi c_t + int phi k c + int u . grad c - int phi f - int_Gamma_q q = sum_D R_i`,
+/// `int phi c_t + int phi k c + int u . grad c + int_Gamma_N (u . n)^- c - int phi f
+///   - int_Gamma_q q = sum_D R_i`,
 ///
 /// with `R_i` the residual of the equation of dof `i`, zero at the free dofs and the consistent
-/// flux (the diffusive inflow, as tested with `v_i`) at the Dirichlet dofs `D`, and
-/// `int_Gamma_q q` the fluxes of the conditions. Advection is in the non-conservative form,
-/// so its boundary term is apart: with the advective outflow `int_Gamma (u . n) c` over the
+/// flux (the diffusive inflow, as tested with `v_i`) at the Dirichlet dofs `D`,
+/// `int_Gamma_q q` the fluxes of the conditions, and `int_Gamma_N (u . n)^- c` the backflow
+/// term over the edges of the boundary `Gamma_N` without Dirichlet condition
+/// ([`PointData::with_backflow`], `(u . n)^- = max(0, -u . n)`). Advection is in the
+/// non-conservative form, so its boundary term is apart: with `int_Gamma (u . n) c` over the
 /// boundary of the domain,
 ///
 /// `int u . grad c = int_Gamma (u . n) c + advection_defect`,
 ///
-/// which defines `advection_defect`. For a velocity which conserves mass (`div u = 0` with a
+/// which defines `advection_defect`. On `Gamma_N` the backflow term cancels the inflowing part
+/// of `int (u . n) c`, which leaves the outflow `int_Gamma_N (u . n)^+ c`; on the Dirichlet
+/// edges `Gamma_D` the advective flux `int (u . n) c` is whole, in and out. For a velocity which conserves mass (`div u = 0` with a
 /// continuous normal component) it is zero; the Darcy velocity of P1 pressures has jumps of
 /// `u . n` between the cells (and within a cell a divergence where the permeability varies),
 /// and `advection_defect` is their effect, `sum_edges int [u . n] c`: the non-conservation of
@@ -46,9 +52,11 @@ pub const UNTAGGED: &str = "(untagged)";
 /// - `source`: `int phi (f - k c)`, the sources less the decay;
 /// - `boundary`: the inflow through each tag (positive into the domain): at a Dirichlet tag
 ///   `sum R_i` over its dofs (a dof of several Dirichlet tags counts for the one listed last,
-///   as its value does) minus the advective outflow `int (u . n) c` over its edges; at a flux
-///   tag `int q` over its edges minus the advective outflow; at the other tags of edges of
-///   the boundary, the advective outflow alone (free outflow: no diffusive flux). An edge of
+///   as its value does) minus the advective flux; at a flux tag `int q` over its edges minus
+///   the advective flux; at the other tags of edges of the boundary, minus the advective flux
+///   alone (free outflow: no diffusive flux). The advective flux of an edge is
+///   `int (u . n) c` on an edge a Dirichlet tag marks, else the outflow `int (u . n)^+ c`
+///   (backflow brings nothing in); both by the Gauss points of the edge. An edge of
 ///   the boundary counts for one tag: of the tags of the conditions of the field the one listed
 ///   last which marks it, else the first tag of edges of the mesh which marks it, else
 ///   [`UNTAGGED`]. The entries: the tags of the conditions in the order listed, then the other
@@ -56,8 +64,9 @@ pub const UNTAGGED: &str = "(untagged)";
 ///   [`UNTAGGED`] if there are edges of the boundary without tag;
 /// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`.
 ///
-/// The velocity on an edge of the boundary is the mean of the velocity at the quadrature points
-/// of its cell (exact for a velocity constant in each cell, as with a constant permeability).
+/// The velocity on an edge of the boundary is that of the flow at its Gauss points
+/// ([`crate::Flow::edge_velocity`]): the pressure gradient of its cell with the permeability
+/// at the points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassBalance {
     pub storage_rate: f64,
@@ -89,6 +98,9 @@ pub(crate) struct Parts<'a> {
     pub(crate) fluxes: &'a [(&'a str, f64)],
     /// The tags of edges of the mesh, in its order.
     pub(crate) edge_tags: &'a [String],
+    /// The velocity at the Gauss points of the edges of the boundary of `disc`, sorted by edge;
+    /// none without advection.
+    pub(crate) edge_velocity: &'a [(Point, [[f64; 2]; 2])],
 }
 
 /// The mass balance of `parts` (see [`MassBalance`]). Collective.
@@ -105,6 +117,7 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
         dirichlet,
         fluxes,
         edge_tags,
+        edge_velocity,
     } = *parts;
     let comm = disc.dm().comm();
     let weights = disc.quadrature_weights();
@@ -174,6 +187,10 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
         .iter()
         .map(|tag| marked(tag))
         .collect::<Result<Vec<_>>>()?;
+    let mut fixed = BTreeSet::new();
+    for tag in dirichlet {
+        fixed.extend(marked(tag)?);
+    }
     let others: Vec<&String> = edge_tags.iter().filter(|t| !names.contains(t)).collect();
     let other_points = others
         .iter()
@@ -183,8 +200,8 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
     let (num_conditions, num_others) = (names.len(), others.len());
     let mut outflow = vec![0.0; num_conditions + num_others + 1];
     let mut marks = vec![0; num_others + 1];
-    let velocity = data.velocity();
-    let q = disc.points_per_cell();
+    // int_Gamma (u . n) c, in and out.
+    let mut through = 0.0;
     c.with_array(|c| {
         for edge in &edges {
             let entry = match conditions
@@ -203,17 +220,19 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
                     num_conditions + other
                 }
             };
-            let cell = edge.cell * q..(edge.cell + 1) * q;
-            let w = &weights[cell.clone()];
-            let area: f64 = w.iter().sum();
-            let mean = velocity[cell]
-                .iter()
-                .zip(w)
-                .fold([0.0; 2], |s, (u, w)| [s[0] + w * u[0], s[1] + w * u[1]])
-                .map(|s| s / area);
+            let Ok(k) = edge_velocity.binary_search_by_key(&edge.point, |(p, _)| *p) else {
+                // Without advection.
+                continue;
+            };
+            let dirichlet = fixed.contains(&edge.point);
             let [a, b] = edge.ends;
-            let u_n = mean[0] * edge.normal[0] + mean[1] * edge.normal[1];
-            outflow[entry] += u_n * 0.5 * (c[a] + c[b]);
+            for (s, u) in EDGE_GAUSS.iter().zip(edge_velocity[k].1) {
+                // `normal` has the length of the edge, the Gauss weight is 1/2.
+                let u_n = u[0] * edge.normal[0] + u[1] * edge.normal[1];
+                let flux = 0.5 * u_n * ((1.0 - s) * c[a] + s * c[b]);
+                through += flux;
+                outflow[entry] += if dirichlet || u_n > 0.0 { flux } else { 0.0 };
+            }
         }
     })?;
 
@@ -250,11 +269,10 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
             boundary.push((tag.to_string(), -outflow[num_conditions + i]));
         }
     }
-    let total_outflow: f64 = outflow.iter().sum();
     Ok(MassBalance {
         storage_rate,
         source,
         boundary,
-        advection_defect: advection - total_outflow,
+        advection_defect: advection - comm.sum_real(through)?,
     })
 }

@@ -8,14 +8,14 @@ use ceed::{Ceed, ElemRestriction, EvalMode, FieldVector, Operator, QFunction};
 use contracts::Perfusion;
 use maps::Maps;
 use mesh::Mesh;
-use petsc::{Fe, Ksp, OptionsScope, Vector, sys};
+use petsc::{Fe, Ksp, OptionsScope, Point, Vector, sys};
 
-use crate::coefficients::map_gradients;
+use crate::coefficients::{coefficient_values_at, map_gradients_at};
 use crate::operators::PointValues;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{
     Discretization, PdeError, PointData, Result, SharedOperator, SourceField, Terms, Transport,
-    coefficient_values, configure_multigrid,
+    configure_multigrid,
 };
 
 /// The options prefix of the pressure solves.
@@ -53,7 +53,7 @@ const VELOCITY_UNIT: &str = "um/s";
 ///
 /// with `g` the gradient (1/um) of the direction map ([`maps::Map::gradient`]) and `g0`
 /// (1/um) of `Perfusion::direction`, and `k_along`, `k_across` coefficients (numbers or tables
-/// over maps, [`coefficient_values`]). Where the gradient vanishes `K` blends smoothly to
+/// over maps, [`crate::coefficient_values`]). Where the gradient vanishes `K` blends smoothly to
 /// `k_across I`. As computed, `w t t^T = g g^T / (|g|^2 + g0^2)`, which needs no direction where
 /// `g = 0`. `K` is symmetric positive definite for positive `k_along`, `k_across` (checked by
 /// the contracts).
@@ -102,6 +102,9 @@ pub struct Flow {
     pressure_local: Vector,
     /// The velocity at the quadrature points of each level, coarse first.
     velocity: Vec<Vec<[f64; 2]>>,
+    /// The velocity at the Gauss points of the edges of the boundary of each level, coarse
+    /// first, sorted by edge.
+    edge_velocity: Vec<Vec<(Point, [[f64; 2]; 2])>>,
     tag_flows: Vec<(String, f64)>,
     values: PointValues,
 }
@@ -214,11 +217,13 @@ impl Flow {
             .collect::<Result<Vec<_>>>()?;
 
         let mut velocity = Vec::with_capacity(levels.len());
+        let mut edges = Vec::with_capacity(levels.len());
         let mut solution = None;
         for (l, disc) in levels.iter().enumerate() {
             let (pressure, local) =
                 solve_level(mesh, disc, &operators[..=l], &boundaries, manufactured)?;
             velocity.push(point_velocity(disc, &data[l], &local)?);
+            edges.push(edge_velocity(disc, perfusion, maps, &local)?);
             solution = Some((pressure, local));
         }
         let (pressure, pressure_local) = solution.expect("a mesh has a level");
@@ -245,6 +250,7 @@ impl Flow {
             pressure,
             pressure_local,
             velocity,
+            edge_velocity: edges,
             tag_flows,
         })
     }
@@ -264,6 +270,19 @@ impl Flow {
     /// equation at the dofs the tag constrains (see [`Flow`]). The same on every process.
     pub fn tag_flows(&self) -> &[(String, f64)] {
         &self.tag_flows
+    }
+
+    /// The velocity `u = -K grad p / mu` (um/s) at the two Gauss points of each edge of the
+    /// boundary of the domain on this process, on level `level` of the mesh (coarse first), by
+    /// edge (a point of the DM of the level, the same in every discretization of it), sorted:
+    /// `grad p` of the cell of the edge (constant for P1, as for [`Flow::velocity`]) and `K` at
+    /// the points. The Gauss points go from the first vertex of the edge to the second, in the
+    /// order of its closure, at `1/2 -+ 1/(2 sqrt 3)` of its length. For the advective boundary
+    /// term of a transport problem ([`PointData::with_backflow`]).
+    ///
+    /// Panics if the mesh has no level `level`.
+    pub fn edge_velocity(&self, level: usize) -> &[(Point, [[f64; 2]; 2])] {
+        &self.edge_velocity[level]
     }
 
     /// The number of levels of the mesh of the flow: [`Flow::velocity`] has one per level.
@@ -364,20 +383,37 @@ impl Flow {
 ///
 /// Errors (on every process): [`PdeError::Map`], naming the coefficient.
 fn permeability(disc: &Discretization, perfusion: &Perfusion, maps: &Maps) -> Result<PointData> {
+    let q = disc.points_per_cell();
+    let diffusion = tensors(disc, disc.quadrature_points(), &|i| i / q, perfusion, maps)?;
+    let n = diffusion.len();
+    Ok(PointData::new(vec![0.0; n], vec![0.0; n], diffusion))
+}
+
+/// `D = K / mu` (see [`Flow`]) as `[D00, D01, D11]` at the points `points` of local cells of
+/// `disc`, point `i` in the local cell `cell(i)`. Collective.
+///
+/// Errors (on every process): [`PdeError::Map`], naming the coefficient.
+fn tensors(
+    disc: &Discretization,
+    points: &[[f64; 2]],
+    cell: &dyn Fn(usize) -> usize,
+    perfusion: &Perfusion,
+    maps: &Maps,
+) -> Result<Vec<[f64; 3]>> {
     let named = |what: &str, e: PdeError| match e {
         PdeError::Map { message } => PdeError::Map {
             message: format!("perfusion, {what}: {message}"),
         },
         e => e,
     };
-    let k_along =
-        coefficient_values(disc, &perfusion.k_along, maps).map_err(|e| named("k_along", e))?;
-    let k_across =
-        coefficient_values(disc, &perfusion.k_across, maps).map_err(|e| named("k_across", e))?;
-    let gradients =
-        map_gradients(disc, &perfusion.direction.map, maps).map_err(|e| named("direction", e))?;
+    let k_along = coefficient_values_at(disc, points, cell, &perfusion.k_along, maps)
+        .map_err(|e| named("k_along", e))?;
+    let k_across = coefficient_values_at(disc, points, cell, &perfusion.k_across, maps)
+        .map_err(|e| named("k_across", e))?;
+    let gradients = map_gradients_at(disc, points, cell, &perfusion.direction.map, maps)
+        .map_err(|e| named("direction", e))?;
     let (g0, mu) = (perfusion.direction.g0, perfusion.viscosity);
-    let diffusion = gradients
+    Ok(gradients
         .iter()
         .zip(k_along.iter().zip(&k_across))
         .map(|(&[gx, gy], (&along, &across))| {
@@ -389,9 +425,67 @@ fn permeability(disc: &Discretization, perfusion: &Perfusion, maps: &Maps) -> Re
                 (across + s * gy * gy) / mu,
             ]
         })
+        .collect())
+}
+
+/// The velocity `-D grad p` at the Gauss points of each edge of the boundary of the domain on
+/// `disc` (see [`Flow::edge_velocity`]), for the pressure of the local vector `pressure` (with
+/// its Dirichlet values): `grad p` of the cell of the edge (constant for P1), `D` at the points.
+/// Collective.
+fn edge_velocity(
+    disc: &Discretization,
+    perfusion: &Perfusion,
+    maps: &Maps,
+    pressure: &Vector,
+) -> Result<Vec<(Point, [[f64; 2]; 2])>> {
+    let edges = disc.boundary_edges()?;
+    let dm = disc.dm();
+    let cells = dm.height_stratum(0)?;
+    let vertices = dm.depth_stratum(0)?;
+    let nodes = disc.node_coordinates();
+    let p = pressure.with_array(<[f64]>::to_vec)?;
+    let mut gradients = Vec::with_capacity(edges.len());
+    for edge in &edges {
+        let mut corners = Vec::with_capacity(3);
+        for point in dm.closure(cells.start + edge.cell as Point)? {
+            if vertices.contains(&point) {
+                corners.push(dm.local_dofs(point)?.start);
+            }
+        }
+        let &[a, b, c] = corners.as_slice() else {
+            return Err(PdeError::Unsupported(format!(
+                "a cell of {} vertices",
+                corners.len()
+            )));
+        };
+        // grad p . (x_b - x_a) = p_b - p_a, and for c.
+        let (xa, xb, xc) = (nodes[a], nodes[b], nodes[c]);
+        let [e0, e1] = [
+            [xb[0] - xa[0], xb[1] - xa[1]],
+            [xc[0] - xa[0], xc[1] - xa[1]],
+        ];
+        let [d0, d1] = [p[b] - p[a], p[c] - p[a]];
+        let det = e0[0] * e1[1] - e0[1] * e1[0];
+        gradients.push([
+            (d0 * e1[1] - d1 * e0[1]) / det,
+            (e0[0] * d1 - e1[0] * d0) / det,
+        ]);
+    }
+    let points: Vec<[f64; 2]> = edges.iter().flat_map(|e| e.points).collect();
+    let d = tensors(disc, &points, &|i| edges[i / 2].cell, perfusion, maps)?;
+    let mut velocity: Vec<(Point, [[f64; 2]; 2])> = edges
+        .iter()
+        .zip(&gradients)
+        .zip(d.as_chunks::<2>().0)
+        .map(|((edge, g), d)| {
+            let at = |[d00, d01, d11]: [f64; 3]| {
+                [-(d00 * g[0] + d01 * g[1]), -(d01 * g[0] + d11 * g[1])]
+            };
+            (edge.point, [at(d[0]), at(d[1])])
+        })
         .collect();
-    let n = gradients.len();
-    Ok(PointData::new(vec![0.0; n], vec![0.0; n], diffusion))
+    velocity.sort_unstable_by_key(|(point, _)| *point);
+    Ok(velocity)
 }
 
 /// The pressure on the level of `disc`, the last of the levels of `operators` (the operators
