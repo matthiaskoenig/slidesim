@@ -30,11 +30,12 @@ mod fe;
 mod ksp;
 mod matrix;
 mod options;
+mod pc;
 mod snes;
 mod ts;
 mod vector;
 
-use std::ffi::{CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int};
 use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +51,7 @@ pub use fe::{Fe, Quadrature, Tabulation};
 pub use ksp::{ConvergedReason, Ksp};
 pub use matrix::{Matrix, ShellOperator};
 pub use options::OptionsScope;
+pub use pc::Pc;
 pub use snes::Snes;
 pub use ts::{ExactFinalTime, Implicit, ProblemType, Ts};
 pub use vector::{AsVec, AsVecMut, VecMut, VecRef, Vector};
@@ -79,6 +81,18 @@ pub(crate) fn c_string(s: &str, what: &str) -> Result<CString> {
             format!("{what} {s:?} contains a NUL character"),
         )
     })
+}
+
+/// A copy of the C string `s`, or `None` if `s` is null.
+///
+/// # Safety
+/// `s` is null or a NUL terminated string, valid for the call.
+pub(crate) unsafe fn string_from(s: *const c_char) -> Option<String> {
+    if s.is_null() {
+        return None;
+    }
+    // SAFETY: not null, so a valid string (the caller's promise).
+    Some(unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned())
 }
 
 /// An initialized PETSc (and MPI, if PETSc initialized it). Dropping it finalizes PETSc.

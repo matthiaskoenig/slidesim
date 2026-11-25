@@ -149,8 +149,38 @@ impl Matrix {
         }
     }
 
+    /// Takes ownership of one reference to `raw` (for which [`Matrix::set_values_coo`] is an
+    /// error).
+    ///
+    /// # Safety
+    /// `raw` is a valid `Mat`, and the caller gives up its reference.
+    pub unsafe fn from_raw(raw: sys::Mat) -> Matrix {
+        Matrix { raw, coo_len: None }
+    }
+
     pub fn as_raw(&self) -> sys::Mat {
         self.raw
+    }
+
+    /// Marks the matrix symmetric positive definite for good, also after its values change
+    /// (`MatSetOption` `MAT_SPD` and `MAT_SPD_ETERNAL`): solvers and preconditioners may rely
+    /// on it, for example CG to estimate eigenvalues.
+    pub fn set_spd(&mut self) -> Result<()> {
+        for option in [sys::MAT_SPD, sys::MAT_SPD_ETERNAL] {
+            // SAFETY: a valid matrix and option.
+            chk!(unsafe { sys::MatSetOption(self.raw, option, true) });
+        }
+        Ok(())
+    }
+
+    /// Marks the matrix changed (`MatAssemblyBegin` and `MatAssemblyEnd`), for a change PETSc
+    /// cannot see, as of the coefficients of a shell operator: preconditioners built from it
+    /// are rebuilt at their next use. Collective.
+    pub fn mark_changed(&mut self) -> Result<()> {
+        // SAFETY: a valid matrix; the final assembly of an assembled matrix keeps its values.
+        chk!(unsafe { sys::MatAssemblyBegin(self.raw, sys::MAT_FINAL_ASSEMBLY) });
+        chk!(unsafe { sys::MatAssemblyEnd(self.raw, sys::MAT_FINAL_ASSEMBLY) });
+        Ok(())
     }
 
     /// `y = A x`.

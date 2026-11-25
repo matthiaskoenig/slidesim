@@ -152,7 +152,12 @@ fn bdf2_converges_with_order_two() {
             assert!(!reason.diverged());
             let snes = ts.snes().unwrap();
             assert!(snes.converged_reason().unwrap().code > 0);
-            assert!(snes.ksp().unwrap().converged_reason().unwrap().code > 0);
+            let ksp = snes.ksp().unwrap();
+            assert!(ksp.converged_reason().unwrap().code > 0);
+            // Every step solved one system, in at least one iteration.
+            let steps = ts.step_number().unwrap();
+            let iterations = ts.linear_iterations().unwrap();
+            assert!(iterations >= steps && iterations >= ksp.iterations().unwrap());
             error(&u, 1.0)
         })
         .collect();

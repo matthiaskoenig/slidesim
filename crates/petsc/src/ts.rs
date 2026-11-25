@@ -218,6 +218,15 @@ impl<C> Ts<C> {
         Ok(steps as usize)
     }
 
+    /// The number of linear iterations of all steps so far, failed ones included
+    /// (`TSGetKSPIterations`).
+    pub fn linear_iterations(&self) -> Result<usize> {
+        let mut n = 0;
+        // SAFETY: a valid TS; PETSc writes one integer.
+        chk!(unsafe { sys::TSGetKSPIterations(self.raw, &mut n) });
+        Ok(n as usize)
+    }
+
     /// Starts the next step afresh, without the history of the steps before, as after a change
     /// of the solution (`TSRestartStep`): a multistep method starts with one step again.
     pub fn restart_step(&mut self) -> Result<()> {

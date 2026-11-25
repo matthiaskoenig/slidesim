@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use petsc::sys;
-use petsc::{Dm, Fe, InsertMode, Petsc, Vector};
+use petsc::{Dm, Fe, InsertMode, Ksp, Petsc, Vector};
 
 /// The gmsh square [0, 1] x [0, 1] of `testdata/meshes`: 31 vertices (16 on the boundary), 44
 /// triangles, boundary edges in the label `Face Sets` with the values 11 to 14 (one per side).
@@ -22,7 +22,13 @@ const CELLS: usize = 44;
 /// `unit_square` with the P1 field and affine coordinates, and essential boundaries on the label
 /// values `essential` of `Face Sets`.
 fn p1(p: &Petsc, essential: &[sys::PetscInt]) -> Dm {
-    let mut dm = unit_square(p).clone_mesh().unwrap();
+    p1_on(&unit_square(p), essential)
+}
+
+/// A clone of `mesh` with the P1 field and affine coordinates, and essential boundaries on the
+/// label values `essential` of `Face Sets`.
+fn p1_on(mesh: &Dm, essential: &[sys::PetscInt]) -> Dm {
+    let mut dm = mesh.clone_mesh().unwrap();
     dm.set_coordinate_disc(None, false).unwrap();
     dm.add_field(&Fe::lagrange(2, 1, true, 1, 2).unwrap())
         .unwrap();
@@ -205,4 +211,80 @@ fn local_offsets_without_a_field_is_error() {
     let p = Petsc::init(&[]).unwrap();
     let dm = unit_square(&p);
     assert!(dm.local_offsets(0).is_err());
+}
+
+/// The global vector of the P1 field of `dm` (one process) with the values of `f` at the nodes.
+fn nodal(dm: &Dm, f: impl Fn(f64, f64) -> f64) -> Vector {
+    let coordinates = dm.local_coordinates().unwrap();
+    let mut global = Vector::create_global(dm).unwrap();
+    global
+        .with_array_mut(|values| {
+            for (i, g) in dm
+                .local_to_global_indices()
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                if g >= 0 {
+                    values[g as usize] = f(coordinates[2 * i], coordinates[2 * i + 1]);
+                }
+            }
+        })
+        .unwrap();
+    global
+}
+
+#[test]
+fn interpolation_to_a_refinement() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p);
+    let refined = mesh.refine().unwrap();
+    // Natural boundaries: P1 interpolation reproduces linear functions.
+    let coarse = p1_on(&mesh, &[]);
+    let mut fine = p1_on(&refined, &[]);
+    fine.set_coarse_dm(&coarse).unwrap();
+    let interpolation = coarse.create_interpolation(&fine).unwrap();
+    let linear = |x: f64, y: f64| 1.0 + 2.0 * x - 3.0 * y;
+    let mut u = Vector::create_global(&fine).unwrap();
+    interpolation.mult(&nodal(&coarse, linear), &mut u).unwrap();
+    u.axpy(-1.0, &nodal(&fine, linear)).unwrap();
+    assert!(u.norm2().unwrap() < 1e-13, "{}", u.norm2().unwrap());
+    // Essential boundaries on all sides: the constrained dofs are left out on both levels. A hat
+    // function of the coarse level is 1 at its vertex, 1/2 at the midpoints of its edges.
+    let coarse = p1_on(&mesh, &[11, 12, 13, 14]);
+    let mut fine = p1_on(&refined, &[11, 12, 13, 14]);
+    fine.set_coarse_dm(&coarse).unwrap();
+    let interpolation = coarse.create_interpolation(&fine).unwrap();
+    let mut hat = Vector::create_global(&coarse).unwrap();
+    hat.set(0.0).unwrap();
+    hat.with_array_mut(|h| h[0] = 1.0).unwrap();
+    let mut u = Vector::create_global(&fine).unwrap();
+    interpolation.mult(&hat, &mut u).unwrap();
+    let u = u.with_array(<[f64]>::to_vec).unwrap();
+    assert_eq!(u.len(), 105 - 32);
+    assert_eq!(u.iter().filter(|&&v| v == 1.0).count(), 1);
+    let halves = u.iter().filter(|&&v| v == 0.5).count();
+    assert!((3..=8).contains(&halves), "{halves}");
+    assert!(u.iter().all(|&v| v == 0.0 || v == 0.5 || v == 1.0));
+}
+
+#[test]
+fn ksp_takes_an_active_or_inactive_dm() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = p1(&p, &[]);
+    let b = Vector::create_global(&dm).unwrap();
+    let mut x = Vector::create_global(&dm).unwrap();
+    let mut message = |active: bool| {
+        let mut ksp = Ksp::create(&p.comm()).unwrap();
+        ksp.set_dm(&dm, active).unwrap();
+        let mut raw = std::ptr::null_mut();
+        assert_eq!(unsafe { sys::KSPGetDM(ksp.as_raw(), &mut raw) }, 0);
+        assert_eq!(raw, dm.as_raw());
+        // Without operators either way: the error tells which.
+        ksp.solve(&b, &mut x).unwrap_err().message
+    };
+    // Active, the DM should compute the operators.
+    assert!(message(true).contains("DMKSPSetComputeOperators"));
+    // Inactive, the operators are the caller's to set.
+    assert!(!message(false).contains("DMKSPSetComputeOperators"));
 }

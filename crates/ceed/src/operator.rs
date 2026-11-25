@@ -182,26 +182,41 @@ impl Operator {
     /// (`CeedOperatorLinearAssembleSymbolic`, `CeedOperatorLinearAssemble`). Pairs `(i, j)`
     /// repeat (one entry per element node pair): their values add up.
     pub fn assemble_coo(&self) -> Result<(Vec<i64>, Vec<i64>, CVector)> {
+        let (rows, cols) = self.assemble_coo_symbolic()?;
+        Ok((rows, cols, self.assemble_coo_values()?))
+    }
+
+    /// The rows and columns of the entries of [`Operator::assemble_coo`]
+    /// (`CeedOperatorLinearAssembleSymbolic`): they depend on the restrictions of the active
+    /// fields only, not on the values.
+    pub fn assemble_coo_symbolic(&self) -> Result<(Vec<i64>, Vec<i64>)> {
         let mut n: sys::CeedSize = 0;
         let mut rows = Allocated(null_mut());
         let mut cols = Allocated(null_mut());
         chk!(&self.ceed, unsafe {
             sys::CeedOperatorLinearAssembleSymbolic(self.raw, &mut n, &mut rows.0, &mut cols.0)
         });
-        let n = usize::try_from(n).map_err(|_| {
-            Error::new(
-                sys::CEED_ERROR_MAJOR,
-                format!("CeedOperatorLinearAssembleSymbolic gave {n} entries"),
-            )
-        })?;
+        let n = num_entries(n)?;
         // SAFETY: libCEED allocated `n` indices each.
         let rows = unsafe { rows.to_vec(n) };
         let cols = unsafe { cols.to_vec(n) };
-        let values = CVector::new(&self.ceed, n)?;
+        Ok((rows, cols))
+    }
+
+    /// The values of the entries of [`Operator::assemble_coo_symbolic`], in its order
+    /// (`CeedOperatorLinearAssemble`): for the current values of the passive fields and the
+    /// QFunction context.
+    pub fn assemble_coo_values(&self) -> Result<CVector> {
+        let mut n: sys::CeedSize = 0;
+        chk!(&self.ceed, unsafe {
+            sys::CeedOperatorLinearAssembleGetNumEntries(self.raw, &mut n)
+        });
+        // libCEED writes `n` values, without checking the length of the vector.
+        let values = CVector::new(&self.ceed, num_entries(n)?)?;
         chk!(&self.ceed, unsafe {
             sys::CeedOperatorLinearAssemble(self.raw, values.as_raw())
         });
-        Ok((rows, cols, values))
+        Ok(values)
     }
 
     /// The raw handle, for the libCEED API not wrapped here.
@@ -215,6 +230,16 @@ impl Drop for Operator {
         // Nothing to report an error to. Releases the references to the fields' objects.
         unsafe { sys::CeedOperatorDestroy(&mut self.raw) };
     }
+}
+
+/// The number of COO entries `n` libCEED reported, as a length.
+fn num_entries(n: sys::CeedSize) -> Result<usize> {
+    usize::try_from(n).map_err(|_| {
+        Error::new(
+            sys::CEED_ERROR_MAJOR,
+            format!("libCEED reported {n} assembled entries"),
+        )
+    })
 }
 
 /// A libCEED vector viewing an array of the caller (`CEED_USE_POINTER`). [`View::give_back`]

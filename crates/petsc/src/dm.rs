@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use crate::{AsVec, AsVecMut, Comm, Error, Fe, Result, alive, c_string, chk, sys, to_int};
+use crate::{AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, alive, c_string, chk, sys, to_int};
 
 /// A mesh point (cell, face, edge or vertex) of a DMPlex.
 pub type Point = sys::PetscInt;
@@ -164,6 +164,20 @@ impl Dm {
     pub fn set_coarse_dm(&mut self, coarse: &Dm) -> Result<()> {
         chk!(unsafe { sys::DMSetCoarseDM(self.raw, coarse.raw) });
         Ok(())
+    }
+
+    /// The interpolation from this DM, a coarse level, to the DM `fine` (`DMCreateInterpolation`):
+    /// the matrix from global vectors of this DM to global vectors of `fine`, for the fields and
+    /// sections of both (constrained dofs are not in global vectors, so they are left out). For
+    /// DMPlex, the nested algorithm needs `fine` refined regularly from this DM and linked to it
+    /// ([`Dm::set_coarse_dm`]); otherwise PETSc locates the nodes of `fine` in the cells of this
+    /// DM. Collective.
+    pub fn create_interpolation(&self, fine: &Dm) -> Result<Matrix> {
+        let mut raw = null_mut();
+        // SAFETY: valid DMs; `raw` receives a new matrix; no scaling vector.
+        chk!(unsafe { sys::DMCreateInterpolation(self.raw, fine.raw, &mut raw, null_mut()) });
+        // SAFETY: a new matrix, whose reference becomes ours.
+        Ok(unsafe { Matrix::from_raw(raw) })
     }
 
     /// The next coarser level set with [`Dm::set_coarse_dm`] (`DMGetCoarseDM`), shared.

@@ -337,6 +337,11 @@ fn diagonal_matches_coo() {
     }
     let total: f64 = values.iter().sum();
     assert!((total - 1.0).abs() < 1e-14, "{total}");
+
+    // The pattern alone, and the values alone, in the same order.
+    assert_eq!(op.assemble_coo_symbolic().unwrap(), (rows, cols));
+    let again = op.assemble_coo_values().unwrap();
+    assert_eq!(again.to_vec().unwrap(), values);
 }
 
 #[test]
