@@ -31,6 +31,11 @@ pub fn fixture(file: &str) -> PathBuf {
 /// `unit_square.msh` (the square [0, 1] x [0, 1] um, area `domain`, edges `left`, `right`,
 /// `top`, `bottom`), refined `refinements` times.
 pub fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
+    fixture_mesh(p, "unit_square.msh", refinements)
+}
+
+/// The mesh `file` of `testdata/meshes`, refined `refinements` times.
+pub fn fixture_mesh(p: &Petsc, file: &str, refinements: u32) -> Mesh {
     let scene = Scene {
         version: SCENE_VERSION.to_string(),
         dimension: 2,
@@ -39,7 +44,7 @@ pub fn unit_square(p: &Petsc, refinements: u32) -> Mesh {
         },
         mesh: MeshRef {
             format: MeshFormat::Gmsh,
-            path: fixture("unit_square.msh"),
+            path: fixture(file),
         },
         maps: Vec::new(),
     };
@@ -76,12 +81,25 @@ impl Scratch {
         cols: usize,
         f: impl Fn([f64; 2]) -> f64,
     ) -> MapSpec {
+        self.map_on_grid(id, [rows, cols], PIXEL, [ORIGIN, ORIGIN], f)
+    }
+
+    /// The map `id` of `f` at the pixel centres of `rows` rows (y) and `cols` columns (x) of
+    /// `pixel` um, the centre of pixel (row 0, col 0) at `origin` (`[x, y]`, um).
+    pub fn map_on_grid(
+        &self,
+        id: &str,
+        [rows, cols]: [usize; 2],
+        pixel: f64,
+        origin: [f64; 2],
+        f: impl Fn([f64; 2]) -> f64,
+    ) -> MapSpec {
         let values: Vec<f64> = (0..rows)
             .flat_map(|r| (0..cols).map(move |c| (r, c)))
-            .map(|(r, c)| f([ORIGIN + c as f64 * PIXEL, ORIGIN + r as f64 * PIXEL]))
+            .map(|(r, c)| f([origin[0] + c as f64 * pixel, origin[1] + r as f64 * pixel]))
             .collect();
         let path = self.0.join(format!("{id}.zarr"));
-        let mut spec = maps::write_test_map(&path, &values, rows, cols, PIXEL, [ORIGIN, ORIGIN]);
+        let mut spec = maps::write_test_map(&path, &values, rows, cols, pixel, origin);
         spec.id = id.to_string();
         spec
     }

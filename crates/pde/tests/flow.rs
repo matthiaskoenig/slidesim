@@ -1,11 +1,13 @@
 //! Tests of the steady Darcy perfusion [`Flow`] on the unit square: a uniform flow, which P1
 //! represents exactly; convergence orders of pressure and velocity against manufactured
-//! solutions, with isotropic and anisotropic permeability; the permeability where the direction
-//! map has no gradient; and errors. nextest runs each test in its own process, so every test
-//! initializes PETSc once. `parallel_on_2_processes` and `parallel_on_3_processes` run some of
-//! them again under `mpiexec`, and compare the results with those of one process.
+//! solutions, with isotropic and anisotropic permeability, and on the tagged mesh with holes
+//! `lobule_toy.msh` with a permeability which varies over the mesh; the permeability where the
+//! direction map has no gradient; and errors. nextest runs each test in its own process, so
+//! every test initializes PETSc once. `parallel_on_2_processes` and `parallel_on_3_processes`
+//! run some of them again under `mpiexec`, and compare the results with those of one process.
 //!
-//! The direction maps are test Zarr arrays over `unit_square.msh` (see `common`).
+//! The direction maps are test Zarr arrays over `unit_square.msh` (see `common`), and over
+//! `lobule_toy.msh` for its test.
 
 mod common;
 
@@ -337,6 +339,168 @@ fn pressure_order_isotropic() {
 fn pressure_order_anisotropic() {
     let p = Petsc::init(&[]).unwrap();
     let (errors, _) = Manufactured::anisotropic().errors(&p, "pressure_order_anisotropic");
+    assert_orders(&errors);
+}
+
+/// The edge of the square of `lobule_toy.msh` ([0, `LOBULE`] x [0, `LOBULE`] um, holes of radius
+/// 20 um at (90, 90) and (310, 310) tagged `portal_wall` and `central_wall`, the outer boundary
+/// `section_edge`).
+const LOBULE: f64 = 400.0;
+
+/// The tags of the boundary of `lobule_toy.msh`.
+const LOBULE_TAGS: [&str; 3] = ["portal_wall", "central_wall", "section_edge"];
+
+/// `k_along`, `k_across` (um^2) of the manufactured flow on `lobule_toy.msh`, with `mu = 1`.
+const LOBULE_K: [f64; 2] = [3.0, 1.0];
+
+/// `g0` (1/um) of the manufactured flow on `lobule_toy.msh`: as large as the gradient of its
+/// direction map, so that the blend `w = |g|^2 / (|g|^2 + g0^2)` varies over the mesh (from
+/// 1/2 at x = 0 to 5/6 at x = `LOBULE`).
+const LOBULE_G0: f64 = 1.0 / LOBULE;
+
+/// A manufactured flow on a tagged mesh with holes, `lobule_toy.msh`, with a permeability which
+/// varies in direction and in strength: the direction map `m = (x/L)^2 + y/L` (L = `LOBULE`)
+/// has the gradient `g = (2x/L^2, 1/L)`, which turns with x, and
+/// `K = k_across I + w (k_along - k_across) t t^T = k_across I + b g g^T` with
+/// `b = (k_along - k_across) / (|g|^2 + g0^2)`. The map's central differences on the raster
+/// are exact for a quadratic, and their bilinear interpolation is exact for the linear `g`, so
+/// slidesim's `K` is this one at every point.
+mod lobule {
+    use std::f64::consts::PI;
+
+    use super::{LOBULE as L, LOBULE_G0 as G0, LOBULE_K};
+
+    pub fn map([x, y]: [f64; 2]) -> f64 {
+        (x / L).powi(2) + y / L
+    }
+
+    fn map_gradient([x, _]: [f64; 2]) -> [f64; 2] {
+        [2.0 * x / (L * L), 1.0 / L]
+    }
+
+    /// The Jacobian of `map_gradient`, `[[g0_x, g0_y], [g1_x, g1_y]]`.
+    const MAP_HESSIAN: [[f64; 2]; 2] = [[2.0 / (L * L), 0.0], [0.0, 0.0]];
+
+    /// `p = 100 (sin(pi x/L) sin(pi y/L) + x/L)` (Pa).
+    pub fn pressure([x, y]: [f64; 2]) -> f64 {
+        let (s, t) = (x / L, y / L);
+        100.0 * ((PI * s).sin() * (PI * t).sin() + s)
+    }
+
+    fn pressure_gradient([x, y]: [f64; 2]) -> [f64; 2] {
+        let (a, b) = (PI * x / L, PI * y / L);
+        let c = 100.0 * PI / L;
+        [c * a.cos() * b.sin() + 100.0 / L, c * a.sin() * b.cos()]
+    }
+
+    fn pressure_hessian([x, y]: [f64; 2]) -> [[f64; 2]; 2] {
+        let (a, b) = (PI * x / L, PI * y / L);
+        let c = 100.0 * (PI / L).powi(2);
+        [
+            [-c * a.sin() * b.sin(), c * a.cos() * b.cos()],
+            [c * a.cos() * b.cos(), -c * a.sin() * b.sin()],
+        ]
+    }
+
+    fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+        a[0] * b[0] + a[1] * b[1]
+    }
+
+    fn times(m: [[f64; 2]; 2], v: [f64; 2]) -> [f64; 2] {
+        [dot(m[0], v), dot(m[1], v)]
+    }
+
+    /// `b` of `K = k_across I + b g g^T` and the gradient `g`.
+    fn blend(x: [f64; 2]) -> (f64, [f64; 2]) {
+        let g = map_gradient(x);
+        let [k_along, k_across] = LOBULE_K;
+        ((k_along - k_across) / (dot(g, g) + G0 * G0), g)
+    }
+
+    /// The velocity `-K grad p` (`mu = 1`).
+    pub fn velocity(x: [f64; 2]) -> [f64; 2] {
+        let (b, g) = blend(x);
+        let gp = pressure_gradient(x);
+        let k_across = LOBULE_K[1];
+        let along = b * dot(g, gp);
+        [
+            -(k_across * gp[0] + along * g[0]),
+            -(k_across * gp[1] + along * g[1]),
+        ]
+    }
+
+    /// The source `-div(K grad p)` (`mu = 1`): with `F = k_across grad p + b (g . grad p) g`,
+    /// `div F = k_across lap p + (grad b . g)(g . grad p)
+    ///   + b (g . H g + g . J grad p + (g . grad p) tr J)`, `H` the Hessian of `p`, `J` that of
+    /// the map, and `grad b = -2 (k_along - k_across) J g / (|g|^2 + g0^2)^2`.
+    pub fn source(x: [f64; 2]) -> f64 {
+        let (b, g) = blend(x);
+        let [k_along, k_across] = LOBULE_K;
+        let gp = pressure_gradient(x);
+        let h = pressure_hessian(x);
+        let j = MAP_HESSIAN;
+        let denominator = dot(g, g) + G0 * G0;
+        let grad_b = times(j, g).map(|v| -2.0 * (k_along - k_across) * v / denominator.powi(2));
+        let div = k_across * (h[0][0] + h[1][1])
+            + dot(grad_b, g) * dot(g, gp)
+            + b * (dot(g, times(h, g)) + dot(g, times(j, gp)) + dot(g, gp) * (j[0][0] + j[1][1]));
+        -div
+    }
+}
+
+/// Darcy on a slideviz-like tagged mesh with holes (spec, verification item 2): pressure
+/// Dirichlet values on both holes and the outer boundary, a permeability which turns and changes
+/// its anisotropy over the mesh (see [`lobule`]): pressure O(h^2) and velocity O(h) on 4
+/// levels (h about 20, 10, 5, 2.5 um), and the flows through the tags balance the source.
+#[test]
+fn pressure_order_on_tagged_mesh() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "pressure_order_on_tagged_mesh";
+    let boundaries: Vec<(&str, f64)> = LOBULE_TAGS.iter().map(|&tag| (tag, 0.0)).collect();
+    let perfusion = perfusion(1.0, LOBULE_K, LOBULE_G0, &boundaries);
+    let mut errors = Vec::new();
+    for refinements in 0..4 {
+        let mesh = common::fixture_mesh(&p, "lobule_toy.msh", refinements);
+        let scratch = Scratch::new(test);
+        // 2 um pixels over [-6, 410] um.
+        let direction =
+            scratch.map_on_grid("direction", [209, 209], 2.0, [-6.0, -6.0], lobule::map);
+        let maps = read_maps(&[direction], &mesh);
+        let flow = Flow::solve_manufactured(
+            &mesh,
+            &perfusion,
+            &maps,
+            &ceed(),
+            "",
+            &lobule::pressure,
+            &lobule::source,
+        )
+        .unwrap();
+        let finest = mesh.levels().len() - 1;
+        let velocity = flow.velocity(finest);
+        errors.push([
+            flow.pressure_l2_error(lobule::pressure).unwrap(),
+            velocity_l2_error(&mesh, finest, velocity, lobule::velocity),
+        ]);
+        // The flows through the three tags balance the source, `-int f`.
+        let flows = flow.tag_flows();
+        let tags: Vec<&str> = flows.iter().map(|(tag, _)| tag.as_str()).collect();
+        assert_eq!(tags, LOBULE_TAGS);
+        let disc = flow.discretization();
+        let local: f64 = disc
+            .quadrature_points()
+            .iter()
+            .zip(disc.quadrature_weights())
+            .map(|(&x, w)| w * lobule::source(x))
+            .sum();
+        let source = disc.dm().comm().sum_real(local).unwrap();
+        let inflow: f64 = flows.iter().map(|&(_, q)| q).sum();
+        let scale = flows.iter().fold(source.abs(), |m, (_, q)| m.max(q.abs()));
+        assert!(
+            (inflow + source).abs() <= 1e-8 * scale,
+            "inflow {inflow}, source {source}"
+        );
+    }
     assert_orders(&errors);
 }
 
