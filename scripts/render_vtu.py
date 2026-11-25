@@ -159,7 +159,7 @@ def render_ranks(mesh: dict, png: Path) -> None:
         vmax=count - 0.5,
     )
     fig.colorbar(shaded, ax=ax, label="process", ticks=range(count))
-    frame(ax, f"partition over {count} process(es)")
+    frame(ax, f"partition over {count} process{'' if count == 1 else 'es'}")
     fig.savefig(png, dpi=150)
     plt.close(fig)
 
