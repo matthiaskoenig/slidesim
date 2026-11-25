@@ -1,0 +1,80 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: check (${{ matrix.os }}, ${{ matrix.mpi }})
+    # Fixed images: the cached dependencies are built against their compilers and MPI.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both MPI implementations (their handles and their output to mpiexec differ). MPICH on
+        # 22.04: the MPICH 4.2.0 package of Ubuntu 24.04 is built against PMIx, which its own
+        # mpiexec (hydra) does not serve, so that every process runs alone (MPI_COMM_WORLD of
+        # size 1).
+        include:
+          - os: ubuntu-24.04
+            mpi: openmpi
+            mpi-packages: openmpi-bin libopenmpi-dev
+          - os: ubuntu-22.04
+            mpi: mpich
+            mpi-packages: mpich libmpich-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.mpi-packages }} pkg-config python3 cmake m4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Install wasi-sdk
+        # bindgen uses wasi-sdk's libclang for every target (petsc-sys/build.rs).
+        run: |
+          . deps/versions.env
+          WASI_SDK_PATH="$RUNNER_TEMP/wasi-sdk"
+          archive="$RUNNER_TEMP/wasi-sdk.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          echo "$WASI_SDK_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$WASI_SDK_PATH"
+          tar xzf "$archive" --strip-components=1 -C "$WASI_SDK_PATH"
+          rm "$archive"
+          echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
+      - name: Native dependencies cache key
+        # The runner's OS release and MPI, the pinned versions and the build scripts (PETSc's
+        # configure).
+        id: deps-key
+        run: |
+          . /etc/os-release
+          mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
+          echo "key=deps-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
+      - name: Cache native dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deps/install
+          key: ${{ steps.deps-key.outputs.key }}
+      - name: Build native dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: scripts/deps/build-native.sh debug
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        # .config/nextest.toml: tests which start mpiexec run alone, and a timeout.
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo nextest run --workspace --no-tests=pass
+      - name: Doctests
+        # nextest does not run doctests; among them the compile_fail tests of the bindings.
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo test --doc --workspace

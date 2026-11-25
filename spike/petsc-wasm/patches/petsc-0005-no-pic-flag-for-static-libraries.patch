@@ -1,0 +1,14 @@
+diff --git a/config/BuildSystem/config/setCompilers.py b/config/BuildSystem/config/setCompilers.py
+index 9f5fede..1c61642 100644
+--- a/config/BuildSystem/config/setCompilers.py
++++ b/config/BuildSystem/config/setCompilers.py
+@@ -2310,7 +2310,8 @@ class Configure(config.base.Configure):
+     for linker, flags, ext in self.generateSharedLinkerGuesses():
+       self.logPrint('Checking shared linker '+linker+' using flags '+str(flags))
+       if self.getExecutable(linker, resultName = 'LD_SHARED'):
+-        for picFlag in self.generatePICGuesses():
++        # the archiver fallback of generateSharedLinkerGuesses() builds static libraries, which need no PIC flag
++        for picFlag in ([''] if self.staticLibraries else self.generatePICGuesses()):
+           self.logPrint('Trying '+self.language[-1]+' compiler flag '+picFlag)
+           compilerFlagsArg = self.getCompilerFlagsArg(1) # compiler only
+           oldCompilerFlags = getattr(self, compilerFlagsArg)

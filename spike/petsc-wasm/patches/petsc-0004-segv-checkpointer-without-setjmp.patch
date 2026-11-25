@@ -1,0 +1,12 @@
+diff --git a/src/sys/error/checkptr.c b/src/sys/error/checkptr.c
+index c885448..c2728eb 100644
+--- a/src/sys/error/checkptr.c
++++ b/src/sys/error/checkptr.c
+@@ -133,4 +133,7 @@ PetscBool PetscCheckPointer(const void *ptr, PetscDataType dtype)
+   PetscSegvJumpBuf_set = PETSC_FALSE;
+   return PETSC_TRUE;
+ }
++#else
++/* Without setjmp() there is no jump back into PetscCheckPointer(), but PetscSignalHandlerDefault() still calls this */
++void PetscSignalSegvCheckPointerOrMpi(void) { }
+ #endif

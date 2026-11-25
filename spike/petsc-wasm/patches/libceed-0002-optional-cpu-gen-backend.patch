@@ -1,0 +1,52 @@
+diff --git a/Makefile b/Makefile
+index 1e7300e..f4137ee 100644
+--- a/Makefile
++++ b/Makefile
+@@ -360,7 +360,7 @@ $(libceed.so) : CEED_LDFLAGS += $(if $(DARWIN), -install_name @rpath/$(notdir $(
+ # ------------------------------------------------------------
+ 
+ # Interface and gallery
+-libceed.c := $(filter-out interface/ceed-cuda.c interface/ceed-hip.c interface/ceed-jit-tools-deprecated.c interface/ceed-jit-source-root-$(if $(for_install),default,install).c, $(wildcard interface/ceed*.c backends/weak/*.c gallery/*.c))
++libceed.c := $(filter-out interface/ceed-cuda.c interface/ceed-hip.c interface/ceed-jit-tools-deprecated.c interface/ceed-jit-source-root-$(if $(for_install),default,install).c, $(wildcard interface/ceed*.c $(filter-out backends/weak/ceed-cpu-gen-weak.c,$(wildcard backends/weak/*.c)) gallery/*.c))
+ gallery.c := $(wildcard gallery/*/ceed*.c)
+ libceed.c += $(gallery.c)
+ libceed.h := $(shell git ls-files 'include/**/*.h')
+@@ -595,7 +595,9 @@ libceed.c += $(blocked.c)
+ libceed.c += $(opt.c)
+ libceed.h += $(ref.h) $(blocked.h) $(opt.h)
+ 
+-# CPU Codegen Backends
++# CPU Codegen Backends (CPU_GEN=0 leaves them out, for targets without a runtime compiler and dlopen)
++CPU_GEN ?= 1
++ifneq ($(CPU_GEN),0)
+ LIBCEED_CONTAINS_CXX = 1
+ libceed.c           += $(cpu-gen.c)
+ libceed.cpp         += $(cpu-gen.cpp)
+@@ -603,6 +605,9 @@ libceed.h           += $(cpu-gen.h)
+ CEED_CPU_JIT_CXX    ?= $(CXX)
+ CEED_CPU_JIT_OPT    ?= $(OPT)
+ CPPFLAGS            += -DCEED_CPU_JIT_OPT='$(CEED_CPU_JIT_OPT)' -DCEED_CPU_JIT_CXX='$(CEED_CPU_JIT_CXX)'
++else
++libceed.c           += backends/weak/ceed-cpu-gen-weak.c
++endif
+ CEED_CPU_LINK_ARGS  ?=
+ 
+ # Memcheck Backends
+diff --git a/backends/weak/ceed-cpu-gen-weak.c b/backends/weak/ceed-cpu-gen-weak.c
+new file mode 100644
+index 0000000..36b0f8d
+--- /dev/null
++++ b/backends/weak/ceed-cpu-gen-weak.c
+@@ -0,0 +1,12 @@
++// Copyright (c) 2017-2026, Lawrence Livermore National Security, LLC and other CEED contributors.
++// All Rights Reserved. See the top-level LICENSE and NOTICE files for details.
++//
++// SPDX-License-Identifier: BSD-2-Clause
++//
++// This file is part of CEED:  http://github.com/ceed
++
++#include "ceed-backend-weak.h"
++// LCOV_EXCL_START
++#include "../ceed-backend-list-cpu-gen.h"
++// LCOV_EXCL_STOP
++#undef CEED_BACKEND

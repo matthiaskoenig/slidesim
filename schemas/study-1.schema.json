@@ -1,0 +1,199 @@
+{
+  "$defs": {
+    "BoundarySpec": {
+      "additionalProperties": false,
+      "description": "Boundary condition on one mesh tag, serialized as\n`{\"tag\": \"...\", \"dirichlet\": 0.1}` or `{\"tag\": \"...\", \"flux\": 1.0}`.",
+      "oneOf": [
+        {
+          "required": [
+            "dirichlet"
+          ]
+        },
+        {
+          "required": [
+            "flux"
+          ]
+        }
+      ],
+      "properties": {
+        "dirichlet": {
+          "description": "Fixed concentration in mM (exclusive with `flux`).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "flux": {
+          "description": "Inward flux in mM*um/s (exclusive with `dirichlet`).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tag": {
+          "description": "Name of the boundary tag in the mesh.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag"
+      ],
+      "type": "object"
+    },
+    "FieldSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "boundaries": {
+          "default": [],
+          "description": "Boundary conditions by mesh tag; tags not listed are zero flux.",
+          "items": {
+            "$ref": "#/$defs/BoundarySpec"
+          },
+          "type": "array"
+        },
+        "decay": {
+          "default": 0.0,
+          "description": "First-order decay rate in 1/s, must be >= 0.",
+          "format": "double",
+          "minimum": 0,
+          "type": "number"
+        },
+        "diffusion": {
+          "description": "Diffusion coefficient in um^2/s, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "id": {
+          "description": "Unique field id: an ASCII letter, then ASCII letters, digits and `_` (it names the\nPETSc options prefix of the field, `<id>_`).",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "initial": {
+          "default": 0.0,
+          "description": "Uniform initial concentration in mM.",
+          "format": "double",
+          "type": "number"
+        },
+        "source": {
+          "default": 0.0,
+          "description": "Uniform source term in mM/s.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "diffusion"
+      ],
+      "type": "object"
+    },
+    "MeshOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "refinements": {
+          "default": 0,
+          "description": "Number of uniform mesh refinements.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SolverOptions": {
+      "additionalProperties": false,
+      "properties": {
+        "petsc_options": {
+          "default": "",
+          "description": "PETSc options string, e.g. `-ksp_type cg -pc_type jacobi`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TimeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptive": {
+          "default": false,
+          "description": "Use adaptive time stepping.",
+          "type": "boolean"
+        },
+        "dt": {
+          "description": "Time step in s (initial step if adaptive), must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "end": {
+          "description": "End time in s, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "outputs": {
+          "default": [],
+          "description": "Output times in s, sorted and within [0, end].",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "end",
+        "dt"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`study/1`: the simulation description.",
+  "properties": {
+    "fields": {
+      "description": "Diffusing fields, at least one, with unique ids.",
+      "items": {
+        "$ref": "#/$defs/FieldSpec"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "mesh": {
+      "$ref": "#/$defs/MeshOptions",
+      "default": {
+        "refinements": 0
+      }
+    },
+    "scene": {
+      "description": "Path of the `scene/1` file; relative paths resolve against the\ndirectory of the study file (`Study::load` stores the absolute path).",
+      "type": "string"
+    },
+    "solver": {
+      "$ref": "#/$defs/SolverOptions",
+      "default": {
+        "petsc_options": ""
+      }
+    },
+    "time": {
+      "$ref": "#/$defs/TimeSpec"
+    },
+    "version": {
+      "const": "study/1",
+      "description": "Contract version, exactly `study/1`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "scene",
+    "fields",
+    "time"
+  ],
+  "title": "Study",
+  "type": "object"
+}

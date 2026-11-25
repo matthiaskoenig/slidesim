@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["spike"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+bindgen = "0.73.2"
+cc = "1.2.41"
+ceed-sys = { path = "crates/ceed-sys" }
+petsc-sys = { path = "crates/petsc-sys" }

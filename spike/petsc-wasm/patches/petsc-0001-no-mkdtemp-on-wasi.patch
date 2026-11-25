@@ -1,0 +1,13 @@
+diff --git a/src/sys/fileio/fdir.c b/src/sys/fileio/fdir.c
+index 501e795..819aafa 100644
+--- a/src/sys/fileio/fdir.c
++++ b/src/sys/fileio/fdir.c
+@@ -88,6 +88,8 @@ PetscErrorCode PetscMkdtemp(char dir[])
+     PetscCheck(!err, PETSC_COMM_SELF, PETSC_ERR_FILE_UNEXPECTED, "Exceeds maximum retry time when creating temporary dir using the template: %s", dir);
+     PetscCall(PetscStrncpy(dir, name, len + 1));
+   }
++#elif defined(__wasi__)
++  SETERRQ(PETSC_COMM_SELF, PETSC_ERR_SUP, "mkdtemp() is not available in WASI, cannot create %s", dir);
+ #else
+   dir = mkdtemp(dir);
+   PetscCheck(dir, PETSC_COMM_SELF, PETSC_ERR_FILE_UNEXPECTED, "Could not create temporary dir");

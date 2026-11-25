@@ -1,0 +1,22 @@
+diff --git a/src/dm/impls/network/networkview.c b/src/dm/impls/network/networkview.c
+index 1b51007..6d8ae6c 100644
+--- a/src/dm/impls/network/networkview.c
++++ b/src/dm/impls/network/networkview.c
+@@ -166,6 +166,8 @@ static PetscErrorCode DMView_Network_Matplotlib(DM dm, PetscViewer viewer)
+     // Perform the actual temporary file creation
+     PetscCall(PetscStrlcat(filename, "XXXXXX", sizeof(filename)));
+     PetscCheck(mkstemp(filename) != -1, comm, PETSC_ERR_SYS, "Could not acquire temporary file");
++#elif defined(__wasi__)
++    SETERRQ(comm, PETSC_ERR_SUP_SYS, "WASI has neither mkstemp() nor tmpnam(), cannot create a temporary file");
+ #else
+     // Same thing, but for older C versions which don't have the safe form
+     PetscCheck(tmpnam(filename) != NULL, comm, PETSC_ERR_SYS, "Could not acquire temporary file");
+@@ -253,6 +255,8 @@ static PetscErrorCode DMView_Network_Matplotlib(DM dm, PetscViewer viewer)
+     while (fgets(buffer, sizeof(buffer), processFile) != NULL) PetscCall(PetscPrintf(comm, "%s", buffer));
+   }
+   PetscCall(PetscPClose(comm, processFile));
++#elif defined(__wasi__)
++  SETERRQ(comm, PETSC_ERR_SUP_SYS, "WASI has neither popen() nor system(), cannot run the viewer script");
+ #else
+   // Same thing, but using the standard library for systems that don't have POpen/PClose (only run on rank 0)
+   if (rank == 0) PetscCheck(system(proccall) == 0, PETSC_COMM_SELF, PETSC_ERR_SYS, "Failed to call viewer script");

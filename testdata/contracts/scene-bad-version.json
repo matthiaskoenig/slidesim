@@ -1,0 +1,1 @@
+{"version":"scene/2","dimension":2,"units":{"length":"um"},"mesh":{"format":"gmsh","path":"mesh.msh"}}

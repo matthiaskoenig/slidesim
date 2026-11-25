@@ -1,0 +1,57 @@
+diff --git a/interface/ceed.c b/interface/ceed.c
+index 5ae7997..6a8edbd 100644
+--- a/interface/ceed.c
++++ b/interface/ceed.c
+@@ -19,7 +19,9 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifndef __wasi__
+ #include <wordexp.h>
++#endif
+ #include <sys/stat.h>
+ 
+ /// @cond DOXYGEN_SKIP
+@@ -1171,12 +1173,25 @@ static int CeedMkdirParents(Ceed ceed, char *path) {
+ int CeedGetCacheDir(Ceed ceed, const char **cache_dir) {
+   const char *ceed_cache_base_dir;
+   const char  suffix[] = "libCEED";
++#ifndef __wasi__
+   wordexp_t   word_expansion;
++#endif
+   char       *final_cache_dir;
+ 
+   CeedCall(CeedGetCacheBaseDir(ceed, &ceed_cache_base_dir));
+   CeedCheck(ceed_cache_base_dir != NULL, ceed, CEED_ERROR_INCOMPATIBLE, "Cache base directory must not be NULL");
+ 
++#ifdef __wasi__
++  // wasi-libc has no wordexp(); the base directory is used verbatim (no shell expansion).
++  {
++    const size_t base_length          = strlen(ceed_cache_base_dir);
++    const bool   needs_trailing_slash = ceed_cache_base_dir[base_length - 1] != '/';
++    const size_t length               = base_length + sizeof(suffix) + (needs_trailing_slash ? 1 : 0);
++
++    CeedCall(CeedCalloc(length, &final_cache_dir));
++    snprintf(final_cache_dir, length, "%s%s%s", ceed_cache_base_dir, needs_trailing_slash ? "/" : "", suffix);
++  }
++#else
+   {
+     char        *wrapped_str;
+     const size_t base_length          = strlen(ceed_cache_base_dir);
+@@ -1198,6 +1213,8 @@ int CeedGetCacheDir(Ceed ceed, const char **cache_dir) {
+     CeedCall(CeedFree(&wrapped_str));
+   }
+   CeedCall(CeedStringAllocCopy(word_expansion.we_wordv[0], &final_cache_dir));
++  wordfree(&word_expansion);
++#endif
+   // Create cache dir if needed
+   {
+     DIR *dir = opendir(final_cache_dir);
+@@ -1210,7 +1227,6 @@ int CeedGetCacheDir(Ceed ceed, const char **cache_dir) {
+       CeedCall(CeedMkdirParents(ceed, final_cache_dir));
+     }
+   }
+-  wordfree(&word_expansion);
+   *cache_dir = final_cache_dir;
+   return CEED_ERROR_SUCCESS;
+ }
