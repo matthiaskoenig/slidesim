@@ -220,7 +220,8 @@ Marks: **(user)** decided by the user in the brainstorming; **(spec)** decided i
 All in `~/git/slideviz`, own branch and pull request (call for the file layout).
 
 - Persist what `zonation.py` computes on the landscape grid:
-  - the zonation map: p from 0 (periportal) to 1 (pericentral), NaN outside solid tissue;
+  - the zonation map: p from 0 (periportal) to 1 (pericentral) (`Portality.points`), NaN outside
+    the section outline;
   - the lumen classes: a uint8 raster, 0 no lumen, 1 portal, 2 central, 3 unclassified.
 - `mesh/build_mesh.py` samples the lumen class beside each vessel edge, as `lumen_beside` samples
   the lumen mask today, and tags it `portal_wall`, `central_wall` or `vessel_wall` (unclassified,
@@ -232,12 +233,14 @@ All in `~/git/slideviz`, own branch and pull request (call for the file layout).
   cropped to the mesh window with a margin of at least two pixels. The writer converts slideviz's
   `origin_um` (row, col) to the scene's `[x, y]`. slideviz vendors a copy of slidesim's
   `schemas/scene-1.schema.json` and validates every written scene against it in its tests (call).
-- The zonation map has NaN outside solid tissue; the export fills every NaN pixel inside the
+- The zonation map has NaN outside the section outline; the export fills every NaN pixel inside the
   cropped window by nearest-neighbour extension (call), so that every quadrature point of the mesh
   on every level finds data. In the filled pixels the gradient is about zero, so K is isotropic
   there (near lumen walls); this is accepted (call).
-- The landscape is already smoothed (Gaussian, sigma 50 um, on a grid of about 7 um with one pixel
-  size for both axes), so its gradient is used without further smoothing (call).
+- The zonation map is `Portality.points` on the working grid of the readout (1.8 um, one pixel
+  size for both axes): a ratio of distance transforms to the portal and central seeds, continuous
+  and without the pixel noise of the stain, so its gradient is used without further smoothing
+  (call).
 
 ### Verification and acceptance
 
@@ -255,8 +258,8 @@ tests).
    tolerance in an advection-dominated front test.
 4. Conservation: the boundary fluxes are computed as consistent fluxes from the residual of the
    discrete equations (call), so the change of total mass equals inflow minus outflow plus sources
-   to 1e-8 relative. The local mass error of the primal velocity per element is reported, not
-   gated.
+   to 1e-8 relative. The non-conservation of the primal velocity (from the jumps of its normal
+   component between elements) is reported, not gated.
 5. Parallel: the same results on 1, 2 and 3 processes within 1e-10 relative (as milestone 1).
 6. End to end: a real slideviz mesh with `portal_wall` and `central_wall` and the zonation map,
    exported by the new slideviz writer, run by `slidesim run`: flow goes from portal to central walls
