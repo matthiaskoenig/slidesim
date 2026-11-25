@@ -1,0 +1,19 @@
+# cargo-nextest: one process per test (each initializes PETSc and MPI once).
+
+[profile.default]
+# A test which hangs fails: reported as slow after a minute, ended after ten. Longer than the
+# timeouts of the runs under mpiexec (test-support's PARALLEL_TIMEOUT, the TIMEOUT of the CLI
+# tests), which end a hanging mpiexec with all its processes first.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Tests which start mpiexec: its processes take one test thread each.
+[[profile.default.overrides]]
+filter = "test(=parallel_on_3_processes)"
+threads-required = 3
+
+[[profile.default.overrides]]
+filter = """
+test(=parallel_on_2_processes) | test(=two_processes_match_one) \
+| test(=abort_ends_every_process) | binary_id(slidesim::cli)\
+"""
+threads-required = 2

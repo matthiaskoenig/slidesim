@@ -6,7 +6,8 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # A fixed image: the cached dependencies are built against its compilers and MPI.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
@@ -22,17 +23,27 @@ jobs:
         run: |
           . deps/versions.env
           WASI_SDK_PATH="$RUNNER_TEMP/wasi-sdk"
+          archive="$RUNNER_TEMP/wasi-sdk.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          echo "$WASI_SDK_SHA256  $archive" | sha256sum --check --strict
           mkdir -p "$WASI_SDK_PATH"
-          curl -fsSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz" \
-            | tar xz --strip-components=1 -C "$WASI_SDK_PATH"
+          tar xzf "$archive" --strip-components=1 -C "$WASI_SDK_PATH"
+          rm "$archive"
           echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
+      - name: Native dependencies cache key
+        # The runner's OS release and MPI, the pinned versions and the build scripts (PETSc's
+        # configure).
+        id: deps-key
+        run: |
+          . /etc/os-release
+          mpi="$(dpkg-query --showformat='${Package}-${Version}' --show libmpich-dev)"
+          echo "key=deps-$ID-$VERSION_ID-$(uname -m)-$mpi-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
-        # The key changes with the pinned versions and the build scripts (PETSc's configure).
         id: deps-cache
         uses: actions/cache@v4
         with:
           path: deps/install
-          key: deps-${{ runner.os }}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}
+          key: ${{ steps.deps-key.outputs.key }}
       - name: Build native dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: scripts/deps/build-native.sh debug
@@ -43,6 +54,12 @@ jobs:
           . deps/install/native-debug/env.sh
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
+        # .config/nextest.toml: test threads for the processes of mpiexec, and a timeout.
         run: |
           . deps/install/native-debug/env.sh
           cargo nextest run --workspace --no-tests=pass
+      - name: Doctests
+        # nextest does not run doctests; among them the compile_fail tests of the bindings.
+        run: |
+          . deps/install/native-debug/env.sh
+          cargo test --doc --workspace

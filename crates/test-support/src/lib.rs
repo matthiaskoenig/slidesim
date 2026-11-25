@@ -16,6 +16,10 @@
 //!
 //! For other programs (a binary of the workspace, or a test expected to fail), [`Mpiexec`] makes
 //! the `mpiexec` command and [`run_with_timeout`] runs it, a hang killed after a timeout.
+//!
+//! A test which starts `mpiexec` needs an entry in `.config/nextest.toml` (`threads-required`,
+//! one test thread per process), and its timeouts stay below nextest's `slow-timeout` there, so
+//! that they end a hanging `mpiexec` with all its processes.
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Read};
