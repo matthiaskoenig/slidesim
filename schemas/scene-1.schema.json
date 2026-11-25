@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "LengthUnit": {
+      "enum": [
+        "um"
+      ],
+      "type": "string"
+    },
+    "MeshFormat": {
+      "enum": [
+        "gmsh"
+      ],
+      "type": "string"
+    },
+    "MeshRef": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/MeshFormat",
+          "description": "Mesh file format."
+        },
+        "path": {
+          "description": "Path of the mesh file; relative paths resolve against the directory of\nthe scene file (`Scene::load` stores the absolute path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Units": {
+      "additionalProperties": false,
+      "properties": {
+        "length": {
+          "$ref": "#/$defs/LengthUnit",
+          "description": "Length unit of the mesh coordinates; only `um` (micrometre) is supported."
+        }
+      },
+      "required": [
+        "length"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "`scene/1`: the geometry description written by slideviz.",
+  "properties": {
+    "dimension": {
+      "description": "Spatial dimension of the mesh (2 or 3).",
+      "format": "uint8",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mesh": {
+      "$ref": "#/$defs/MeshRef"
+    },
+    "units": {
+      "$ref": "#/$defs/Units"
+    },
+    "version": {
+      "description": "Contract version, exactly `scene/1`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "dimension",
+    "units",
+    "mesh"
+  ],
+  "title": "Scene",
+  "type": "object"
+}
