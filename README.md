@@ -11,8 +11,9 @@ which changes coefficients of the PDEs. The results are explored in a web viewer
 - Rust: the toolchain of `rust-toolchain.toml` (rustup installs it on the first `cargo` call in
   the repository), and [cargo-nextest](https://nexte.st) for the tests
   (`cargo install cargo-nextest --locked`).
-- An MPI with `mpicc` and `mpiexec`, for example MPICH (`apt install mpich libmpich-dev`, as CI
-  uses) or Open MPI, and a C compiler behind `mpicc`.
+- An MPI with `mpicc` and `mpiexec`, and a C compiler behind `mpicc`: Open MPI
+  (`apt install openmpi-bin libopenmpi-dev`) or MPICH (`apt install mpich libmpich-dev`); CI tests
+  both. Not the MPICH package of Ubuntu 24.04, whose `mpiexec` runs every process alone.
 - For the native dependencies: git, curl, make, cmake, m4, python3 and pkg-config. bison and
   flex are built from pinned tarballs.
 - [wasi-sdk](https://github.com/WebAssembly/wasi-sdk), the version `WASI_SDK_VERSION` of

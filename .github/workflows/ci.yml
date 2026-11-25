@@ -6,13 +6,28 @@ on:
 
 jobs:
   check:
-    # A fixed image: the cached dependencies are built against its compilers and MPI.
-    runs-on: ubuntu-24.04
+    name: check (${{ matrix.os }}, ${{ matrix.mpi }})
+    # Fixed images: the cached dependencies are built against their compilers and MPI.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both MPI implementations (their handles and their output to mpiexec differ). MPICH on
+        # 22.04: the MPICH 4.2.0 package of Ubuntu 24.04 is built against PMIx, which its own
+        # mpiexec (hydra) does not serve, so that every process runs alone (MPI_COMM_WORLD of
+        # size 1).
+        include:
+          - os: ubuntu-24.04
+            mpi: openmpi
+            mpi-packages: openmpi-bin libopenmpi-dev
+          - os: ubuntu-22.04
+            mpi: mpich
+            mpi-packages: mpich libmpich-dev
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
         # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
-        run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev pkg-config python3 cmake m4
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.mpi-packages }} pkg-config python3 cmake m4
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: taiki-e/install-action@v2
@@ -36,8 +51,8 @@ jobs:
         id: deps-key
         run: |
           . /etc/os-release
-          mpi="$(dpkg-query --showformat='${Package}-${Version}' --show libmpich-dev)"
-          echo "key=deps-$ID-$VERSION_ID-$(uname -m)-$mpi-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
+          mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
+          echo "key=deps-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
         id: deps-cache
         uses: actions/cache@v4
