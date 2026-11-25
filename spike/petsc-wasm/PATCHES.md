@@ -5,9 +5,9 @@ Result: **wasip1 works.** PETSc v3.26.1 (sequential, MPIUNI, f2cblaslapack) and 
 under wasmtime 50 and Node 24 (`smoke/run.sh`). The emscripten fallback was not needed.
 
 `build-wasi.sh` copies `deps/src/{libceed,petsc}` into `deps/build/{libceed,petsc}-wasi` and applies
-`patches/<name>-*.patch` there with `git apply`; `deps/src` is never modified. Five small source
-patches and one configure patch were needed; everything else is covered by wasi-libc emulation
-libraries or configure options.
+`patches/<name>-*.patch` there with `git apply`; `deps/src` is never modified. Seven patches were
+needed: six small source patches (two of libCEED, four of PETSc) and one configure patch of PETSc;
+everything else is covered by wasi-libc emulation libraries or configure options.
 
 ## Compiler and flags
 
