@@ -1,36 +1,53 @@
 //! `slidesim run`: a study end to end.
 //!
-//! Loads the study, its scene and the mesh (distributed over the processes, refined
-//! `mesh.refinements` times), removes the outputs `<out>/<field id>_<index>.vtu` of an earlier
-//! run (other files in `<out>` stay), builds one [`Problem`] per field, and steps the fields to
+//! Loads the study and its scene, checks that the maps the study names are in the scene (before
+//! anything is solved), loads the mesh (distributed over the processes, refined
+//! `mesh.refinements` times), reads the maps over the cells of each process, solves the Darcy
+//! [`Flow`] if the study has a `perfusion` section and writes it as `<out>/pressure.vtu` (point
+//! data `pressure.Pa`) and `<out>/velocity.vtu` (the point vector `velocity`, um/s). It removes the
+//! outputs `<out>/<field id>_<index>.vtu` of an earlier run (`pressure.vtu` and `velocity.vtu`
+//! included; other files in `<out>` stay), builds one [`Problem`] per field, and steps the fields to
 //! each output time of `time.outputs` in turn, then to `time.end`. At each output time (time 0
 //! before any step) it writes every field as `<out>/<field id>_<index>.vtu`, `<index>` the
 //! position of the time in `time.outputs`: point data `<field id>.mM` on the finest mesh level,
 //! Dirichlet values included, one file of the pieces of every process. When every field is done,
 //! process 0 writes `<out>/summary.json`:
 //!
-//! `{"fields": {"<field id>": {"times": [...], "l2_norm": [...], "total_mass": [...]}}}`
+//! `{"fields": {"<field id>": {"times": [...], "l2_norm": [...], "total_mass": [...]}},
+//! "perfusion": {"tag_flows": {"<tag>": <um^2/s>}}}`
 //!
 //! with, per output time, the time reached (s), the L2 norm of the field (mM*um) and its amount
 //! of substance in the domain, the integral of the field weighed by the porosity (mM*um^2,
-//! [`Problem::total_mass`]).
+//! [`Problem::total_mass`]). A field with advection has also `"advection_defect"`, per output
+//! time the defect of the advecting velocity ([`pde::MassBalance::advection_defect`], mM*um^2/s;
+//! `null` at a time before the first step). `perfusion` is there for a study with perfusion: the
+//! flow through each pressure tag ([`Flow::tag_flows`], positive into the domain).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use ceed::Ceed;
-use contracts::{Scene, Study};
+use contracts::{Scene, Study, check_maps};
 use maps::Maps;
 use mesh::Mesh;
-use pde::{Inputs, Problem};
-use petsc::{Petsc, Viewer};
+use pde::{Flow, Inputs, PdeError, Problem};
+use petsc::{Comm, Petsc, Vector, Viewer};
 use serde::Serialize;
 
 /// `summary.json`.
 #[derive(Debug, Serialize)]
 struct Summary {
     fields: BTreeMap<String, FieldSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    perfusion: Option<PerfusionSummary>,
+}
+
+/// The flow of the study.
+#[derive(Debug, Serialize)]
+struct PerfusionSummary {
+    /// The flow through each pressure tag, positive into the domain: um^2/s.
+    tag_flows: BTreeMap<String, f64>,
 }
 
 /// The values of one field at the output times.
@@ -42,15 +59,18 @@ struct FieldSummary {
     l2_norm: Vec<f64>,
     /// The amount of substance, `int phi c` (porosity `phi`): mM*um^2.
     total_mass: Vec<f64>,
+    /// The defect of the advecting velocity (mM*um^2/s), `null` before the first step; only for
+    /// a field with advection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advection_defect: Option<Vec<Option<f64>>>,
 }
 
 /// Runs the study of the file `study_path` and writes its results into the directory `out` (see
 /// the module documentation). Collective.
 pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     let study = Study::load(study_path).context("cannot load the study")?;
-    // Replaced by the perfusion of milestone 2 (Task 6).
-    anyhow::ensure!(study.perfusion.is_none(), "perfusion is not supported yet");
     let scene = Scene::load(&study.scene).context("cannot load the scene")?;
+    check_maps(&study, &scene)?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
     let comm = petsc.comm();
@@ -62,12 +82,21 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     }
     comm.barrier()?;
 
-    // The maps of the study are read in milestone 2, Task 6: until then a coefficient table is
-    // an error of the problem (its map is unknown).
-    let maps = Maps::default();
+    let maps = read_maps(&comm, &study, &scene, &mesh)?;
+    let flow = study
+        .perfusion
+        .as_ref()
+        .map(|perfusion| {
+            Flow::solve(&mesh, perfusion, &maps, &ceed, &study.solver.petsc_options)
+                .context("perfusion")
+        })
+        .transpose()?;
+    if let Some(flow) = &flow {
+        write_flow(flow, out)?;
+    }
     let inputs = Inputs {
         maps: &maps,
-        flow: None,
+        flow: flow.as_ref(),
     };
     let mut problems = study
         .fields
@@ -88,8 +117,17 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
         fields: study
             .fields
             .iter()
-            .map(|field| (field.id.clone(), FieldSummary::default()))
+            .map(|field| {
+                let values = FieldSummary {
+                    advection_defect: field.advection.then(Vec::new),
+                    ..FieldSummary::default()
+                };
+                (field.id.clone(), values)
+            })
             .collect(),
+        perfusion: flow.as_ref().map(|flow| PerfusionSummary {
+            tag_flows: flow.tag_flows().iter().cloned().collect(),
+        }),
     };
     for (index, &t) in study.time.outputs.iter().enumerate() {
         for (field, problem) in study.fields.iter().zip(&mut problems) {
@@ -104,6 +142,15 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
             values.times.push(problem.time());
             values.l2_norm.push(problem.l2_norm()?);
             values.total_mass.push(problem.total_mass()?);
+            if let Some(defects) = &mut values.advection_defect {
+                let defect = match problem.mass_balance() {
+                    Ok(balance) => Some(balance.advection_defect),
+                    // Before the first step there is no balance (the output of time 0).
+                    Err(PdeError::NotStepped { .. }) => None,
+                    Err(e) => return Err(e).with_context(|| format!("field '{id}'")),
+                };
+                defects.push(defect);
+            }
             let path = out.join(format!("{id}_{index}.vtu"));
             write_vtu(problem, &path)
                 .with_context(|| format!("cannot write {}", path.display()))?;
@@ -123,6 +170,60 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The maps the study names, read for the cells of this process (nothing for a process without
+/// cells). A process which cannot read a map fails every process (collective).
+fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<Maps> {
+    let mut ids: Vec<&str> = Vec::new();
+    for field in &study.fields {
+        for c in [
+            &field.diffusion,
+            &field.decay,
+            &field.source,
+            &field.porosity,
+        ] {
+            ids.extend(c.maps());
+        }
+    }
+    if let Some(p) = &study.perfusion {
+        ids.extend(p.k_along.maps());
+        ids.extend(p.k_across.maps());
+        ids.push(&p.direction.map);
+    }
+    let read = match mesh.local_bounds() {
+        Some(bounds) => Maps::read(&scene.maps, &ids, bounds).map_err(anyhow::Error::from),
+        None => Ok(Maps::default()),
+    };
+    let failed = comm.max_int(read.is_err().into())?;
+    match read {
+        Ok(maps) if failed == 0 => Ok(maps),
+        Ok(_) => Err(anyhow::anyhow!("another process cannot read a map")),
+        Err(e) => Err(e.context("cannot read the maps")),
+    }
+}
+
+/// Writes the pressure and the velocity of `flow` as `<out>/pressure.vtu` and
+/// `<out>/velocity.vtu`. Collective.
+fn write_flow(flow: &Flow, out: &Path) -> Result<()> {
+    let comm = flow.discretization().dm().comm();
+    for (name, vector) in [
+        ("pressure.vtu", flow.local_pressure()?),
+        ("velocity.vtu", flow.nodal_velocity()?),
+    ] {
+        let path = out.join(name);
+        write_vector(&comm, &vector, &path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Writes the local vector `vector` as the VTU file `path`. Collective.
+fn write_vector(comm: &Comm, vector: &Vector, path: &Path) -> Result<()> {
+    let mut viewer = Viewer::vtk(comm, path)?;
+    vector.view(&mut viewer)?;
+    viewer.flush()?;
+    Ok(())
+}
+
 /// Removes the files `<field id>_<index>.vtu` of the fields of `study` from the directory `out`:
 /// outputs of an earlier run, which a viewer would take for a part of the series of this run (for
 /// example the files of more output times). Other files stay.
@@ -135,7 +236,10 @@ fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if study.fields.iter().any(|field| is_output(name, &field.id)) {
+        if name == "pressure.vtu"
+            || name == "velocity.vtu"
+            || study.fields.iter().any(|field| is_output(name, &field.id))
+        {
             let path = entry.path();
             std::fs::remove_file(&path)
                 .with_context(|| format!("cannot remove {}", path.display()))?;
@@ -155,10 +259,7 @@ fn is_output(name: &str, id: &str) -> bool {
 /// Writes the solution of `problem` as the VTU file `path`. Collective.
 fn write_vtu(problem: &Problem, path: &Path) -> Result<()> {
     let solution = problem.local_solution()?;
-    let mut viewer = Viewer::vtk(&problem.discretization().dm().comm(), path)?;
-    solution.view(&mut viewer)?;
-    viewer.flush()?;
-    Ok(())
+    write_vector(&problem.discretization().dm().comm(), &solution, path)
 }
 
 #[cfg(test)]

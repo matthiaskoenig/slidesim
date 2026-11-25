@@ -10,6 +10,10 @@ Run from the repository root:
   `HOLE_RADIUS` um at `HOLE_CENTERS`, named as slideviz (`mesh/build_mesh.py`) names them: area
   `tissue` (3), edges `vessel_wall` (11, the hole boundaries) and `section_edge` (12, the outer
   boundary). Mesh size about `TISSUE_SIZE` um.
+- `lobule_toy.msh`: the square [0, 400] x [0, 400] um with a circular hole of radius
+  `LOBULE_HOLE_RADIUS` um at each of `LOBULE_PORTAL` and `LOBULE_CENTRAL` (near opposite corners):
+  area `tissue` (3), edges `portal_wall` (11), `central_wall` (12) and `section_edge` (13, the outer
+  boundary). Mesh size about `LOBULE_SIZE` um.
 
 Written by hand, not by this script:
 
@@ -31,6 +35,10 @@ HOLE_RADIUS = 20.0
 HOLE_CENTERS = ((60.0, 100.0), (140.0, 100.0))
 TISSUE_SIZE = 10.0
 UNIT_SIZE = 0.25
+LOBULE_HOLE_RADIUS = 20.0
+LOBULE_PORTAL = (90.0, 90.0)
+LOBULE_CENTRAL = (310.0, 310.0)
+LOBULE_SIZE = 20.0
 
 
 def start(name: str, size: float) -> None:
@@ -85,6 +93,30 @@ def tissue_small() -> None:
     finish("tissue_small")
 
 
+def lobule_toy() -> None:
+    start("lobule_toy", LOBULE_SIZE)
+    occ = gmsh.model.occ
+    square = occ.addRectangle(0.0, 0.0, 0.0, 400.0, 400.0)
+    centers = (LOBULE_PORTAL, LOBULE_CENTRAL)
+    holes = [occ.addDisk(x, y, 0.0, LOBULE_HOLE_RADIUS, LOBULE_HOLE_RADIUS) for x, y in centers]
+    (tissue, *_), _ = occ.cut([(2, square)], [(2, h) for h in holes])
+    occ.synchronize()
+    surface = tissue[1]
+    gmsh.model.addPhysicalGroup(2, [surface], 3, "tissue")
+    walls = {"portal_wall": [], "central_wall": [], "section_edge": []}
+    for _, curve in gmsh.model.getBoundary([(2, surface)], oriented=False):
+        x, y, _ = occ.getCenterOfMass(1, curve)
+        name = "section_edge"
+        for wall, (cx, cy) in zip(("portal_wall", "central_wall"), centers):
+            if abs(x - cx) < LOBULE_HOLE_RADIUS and abs(y - cy) < LOBULE_HOLE_RADIUS:
+                name = wall
+        walls[name].append(curve)
+    for tag, name in enumerate(("portal_wall", "central_wall", "section_edge"), start=11):
+        gmsh.model.addPhysicalGroup(1, walls[name], tag, name)
+    finish("lobule_toy")
+
+
 if __name__ == "__main__":
     unit_square()
     tissue_small()
+    lobule_toy()

@@ -67,6 +67,15 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 `out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
 an earlier run there are removed first. `slidesim run --help` describes them.
 
+A study with a `perfusion` section solves the Darcy flow first (maps named by the study are read
+from the scene) and also writes `pressure.vtu` and `velocity.vtu`; `summary.json` then has the flow
+through each pressure tag (`perfusion.tag_flows`) and, for a field with advection, its
+`advection_defect` per output time. `testdata/studies/lobule_toy` is an example:
+
+```bash
+target/debug/slidesim run testdata/studies/lobule_toy/study.json --out out
+```
+
 PETSc options follow `--`. The solvers of a field take the prefix `<field id>_`, for example
 `-oxygen_ts_monitor` (the time steps of the field `oxygen`), `-oxygen_ksp_monitor` (the
 residuals of its linear solves) or `-oxygen_ksp_rtol 1e-8`:

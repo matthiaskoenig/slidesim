@@ -357,10 +357,11 @@ fn unknown_map_lists_available() {
 #[test]
 fn milestone_1_studies_still_load() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
-    let mut files = vec![root.join("contracts/study-minimal.json")];
-    for d in std::fs::read_dir(root.join("studies")).unwrap() {
-        files.push(d.unwrap().path().join("study.json"));
-    }
+    // The studies of milestone 1: later studies (lobule_toy) use maps and perfusion.
+    let files = [
+        root.join("contracts/study-minimal.json"),
+        root.join("studies/tissue_oxygen/study.json"),
+    ];
     for f in files {
         let s = Study::load(&f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
         assert!(s.perfusion.is_none());

@@ -1,6 +1,7 @@
 //! End to end tests of `slidesim run`: the binary as a user runs it, on one process and under
 //! `mpiexec`, on `testdata/studies/tissue_oxygen` (oxygen from the vessel walls of
-//! `tissue_small.msh`). The binary runs without `LD_LIBRARY_PATH`: it finds PETSc and libCEED by
+//! `tissue_small.msh`) and `testdata/studies/lobule_toy` (a tracer carried by the Darcy flow
+//! between two holes, with a map). The binary runs without `LD_LIBRARY_PATH`: it finds PETSc and libCEED by
 //! its rpath.
 
 use std::path::{Path, PathBuf};
@@ -100,6 +101,47 @@ fn summary(out: &Path, field: &str) -> [Vec<f64>; 3] {
     })
 }
 
+fn lobule_study() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/lobule_toy/study.json")
+}
+
+/// The centre of the central hole of `lobule_toy.msh`, um.
+const CENTRAL: [f64; 2] = [310.0, 310.0];
+
+/// The data array `name` of the `.vtu` file `path` (raw appended data, 64 bit headers): the
+/// values, `components` per point.
+fn vtu_array(path: &Path, name: &str, components: usize) -> Vec<f64> {
+    let bytes = std::fs::read(path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let tag = text
+        .find(&format!("Name=\"{name}\""))
+        .unwrap_or_else(|| panic!("no array {name} in {}", path.display()));
+    let rest = &text[tag..];
+    let offset: usize = rest[rest.find("offset=\"").unwrap() + 8..]
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let marker = text.find("<AppendedData").unwrap();
+    // The data starts after the underscore which follows the tag.
+    let data = marker + text[marker..].find('_').unwrap() + 1 + offset;
+    let len = u64::from_le_bytes(bytes[data..data + 8].try_into().unwrap()) as usize;
+    let values: Vec<f64> = bytes[data + 8..data + 8 + len]
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|b| f64::from_le_bytes(*b))
+        .collect();
+    assert_eq!(values.len() % components, 0);
+    values
+}
+
+/// `<out>/summary.json` as JSON.
+fn summary_json(out: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(out.join("summary.json")).unwrap()).unwrap()
+}
+
 /// The names of the point data arrays of the `.vtu` file `path`.
 fn point_data(path: &Path) -> Vec<String> {
     let bytes = std::fs::read(path).unwrap();
@@ -123,6 +165,77 @@ fn max_relative_difference(a: &[f64], b: &[f64]) -> f64 {
         .zip(b)
         .map(|(x, y)| (x - y).abs() / x.abs().max(y.abs()))
         .fold(0.0, f64::max)
+}
+
+#[test]
+fn lobule_toy_flows_from_portal_to_central() {
+    let out = scratch("lobule_toy_flows_from_portal_to_central");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    let flows = &summary_json(&out)["perfusion"]["tag_flows"];
+    let portal = flows["portal_wall"].as_f64().unwrap();
+    let central = flows["central_wall"].as_f64().unwrap();
+    assert!(portal > 0.0, "{flows}");
+    assert!(central < 0.0, "{flows}");
+    assert!((portal + central).abs() < 1e-8 * portal, "{flows}");
+    assert_eq!(point_data(&out.join("pressure.vtu")), ["pressure.Pa"]);
+    assert_eq!(point_data(&out.join("velocity.vtu")), ["velocity"]);
+    // The defect of the advecting velocity at each output time of the tracer (none before the
+    // first step).
+    let defects = summary_json(&out)["fields"]["sucrose"]["advection_defect"].clone();
+    assert_eq!(defects.as_array().unwrap().len(), 3, "{defects}");
+}
+
+#[test]
+fn lobule_toy_tracer_reaches_central() {
+    let out = scratch("lobule_toy_tracer_reaches_central");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    let path = out.join("sucrose_2.vtu");
+    let points = vtu_array(&path, "Position", 3);
+    let sucrose = vtu_array(&path, "sucrose.mM", 1);
+    assert_eq!(points.len(), 3 * sucrose.len());
+    let near: Vec<f64> = points
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(&sucrose)
+        .filter(|(x, _)| ((x[0] - CENTRAL[0]).powi(2) + (x[1] - CENTRAL[1]).powi(2)).sqrt() < 30.0)
+        .map(|(_, &c)| c)
+        .collect();
+    // Nodes within 10 um of the wall of the hole (radius 20 um).
+    assert!(near.len() > 10, "{}", near.len());
+    let mean = near.iter().sum::<f64>() / near.len() as f64;
+    assert!(mean > 0.1, "{mean}");
+}
+
+#[test]
+fn unknown_map_fails_before_solving() {
+    let dir = scratch("unknown_map_fails_before_solving");
+    let mut doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(lobule_study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(
+        lobule_study()
+            .with_file_name("scene.json")
+            .display()
+            .to_string(),
+    );
+    doc["perfusion"]["direction"]["map"] = Value::from("zonation2");
+    let bad = dir.join("study.json");
+    std::fs::write(&bad, doc.to_string()).unwrap();
+    let out = dir.join("out");
+
+    let run = slidesim(&args(&bad, &out, &[]));
+    assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains("zonation2"), "{}", run.stderr);
+    assert!(run.stderr.contains("zonation"), "{}", run.stderr);
+    assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    let vtus = std::fs::read_dir(&out)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "vtu"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(vtus, 0);
 }
 
 #[test]
@@ -347,4 +460,35 @@ fn two_ranks_match_one() {
     );
     assert!(l2_norm < 1e-10, "{l2_norm_1:?}\n{l2_norm_2:?}");
     assert!(total_mass < 1e-10, "{total_mass_1:?}\n{total_mass_2:?}");
+}
+
+#[test]
+fn two_ranks_match_one_with_perfusion() {
+    let dir = scratch("two_ranks_match_one_with_perfusion");
+    let serial = dir.join("serial");
+    assert_success(&slidesim(&args(&lobule_study(), &serial, &[])));
+    let parallel = dir.join("parallel");
+    let Some(run) = slidesim_parallel(2, &args(&lobule_study(), &parallel, &[])) else {
+        return;
+    };
+    assert_success(&run);
+    for name in ["pressure.vtu", "velocity.vtu", "sucrose_2.vtu"] {
+        assert!(parallel.join(name).exists(), "{name}");
+    }
+    let [times_1, l2_norm_1, total_mass_1] = summary(&serial, "sucrose");
+    let [times_2, l2_norm_2, total_mass_2] = summary(&parallel, "sucrose");
+    assert_eq!(times_1, times_2);
+    let l2_norm = max_relative_difference(&l2_norm_1[1..], &l2_norm_2[1..]);
+    let total_mass = max_relative_difference(&total_mass_1[1..], &total_mass_2[1..]);
+    let flows = |out: &Path| {
+        let flows = summary_json(out)["perfusion"]["tag_flows"].clone();
+        ["portal_wall", "central_wall"].map(|tag| flows[tag].as_f64().unwrap())
+    };
+    let flow = max_relative_difference(&flows(&serial), &flows(&parallel));
+    eprintln!(
+        "relative differences, 2 processes against 1: l2_norm {l2_norm:e}, total_mass {total_mass:e}, flow {flow:e}"
+    );
+    assert!(l2_norm < 1e-10, "{l2_norm_1:?}\n{l2_norm_2:?}");
+    assert!(total_mass < 1e-10, "{total_mass_1:?}\n{total_mass_2:?}");
+    assert!(flow < 1e-10, "{flow}");
 }
