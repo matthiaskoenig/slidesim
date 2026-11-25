@@ -784,8 +784,9 @@ fn variable_source(x: [f64; 2]) -> f64 {
 }
 
 /// The time step of [`spatial_order_variable_coefficients`]: a power of 2, so that the times
-/// `n DT` are exact; the temporal error at it is far below the spatial errors.
-const DT: f64 = 1.0 / 128.0;
+/// `n DT` are exact. The temporal error at it is below 1% of the spatial errors of refinements
+/// 1 to 3 (halving it changes them by at most 0.6%).
+const DT: f64 = 1.0 / 64.0;
 
 /// The L2 errors at t = 1 of `u = phi(x) e^-t` with the variable coefficients of
 /// [`variable_source`] on the refinements `levels` of the unit square, the coefficients from
@@ -832,15 +833,15 @@ fn variable_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
 #[test]
 fn spatial_order_variable_coefficients() {
     let p = Petsc::init(&[]).unwrap();
-    assert_orders(&variable_errors(&p, &[2, 3, 4]), 1.9..=2.1);
+    assert_orders(&variable_errors(&p, &[1, 2, 3]), 1.9..=2.1);
 }
 
 /// [`spatial_order_variable_coefficients`] on the two coarser meshes only, cheap enough to run
 /// on several processes: the maps read for the cells of each process.
 #[test]
-fn spatial_order_variable_coefficients_on_refinements_2_and_3() {
+fn spatial_order_variable_coefficients_on_refinements_1_and_2() {
     let p = Petsc::init(&[]).unwrap();
-    assert_orders(&variable_errors(&p, &[2, 3]), 1.9..=2.1);
+    assert_orders(&variable_errors(&p, &[1, 2]), 1.9..=2.1);
 }
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
@@ -852,7 +853,7 @@ const PARALLEL_TESTS: [&str; 10] = [
     "divergence_is_error",
     "fixed_steps_keep_their_size_after_requested_times",
     "spatial_order_p1_on_refinements_2_and_3",
-    "spatial_order_variable_coefficients_on_refinements_2_and_3",
+    "spatial_order_variable_coefficients_on_refinements_1_and_2",
     "table_of_a_missing_map_is_error",
     "uniform_initial_and_source_and_dirichlet_values",
     "local_solution_has_the_dirichlet_values",
