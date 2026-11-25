@@ -12,7 +12,6 @@ use petsc::{Fe, InsertMode, Ksp, OptionsScope, Vector, sys};
 
 use crate::coefficients::map_gradients;
 use crate::operators::PointValues;
-use crate::problem::TOLERANCE;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{
     Discretization, PdeError, PointData, Result, SharedOperator, SourceField, Terms, Transport,
@@ -23,8 +22,17 @@ use crate::{
 const PREFIX: &str = "perfusion_";
 
 /// The options every pressure solve sets before those of the caller, who may override them: a
-/// solver which does not converge is an error ([`PdeError::Diverged`]), not a wrong pressure.
-const ERRORS_IF_NOT_CONVERGED: &str = "-ksp_error_if_not_converged";
+/// solver which does not converge is an error ([`PdeError::SolveFailed`]), not a wrong
+/// pressure; and the residual reduced by `1e-12`.
+///
+/// The tolerance is tighter than the `1e-10` of [`crate::Problem`]: the flows through the
+/// pressure tags come from the residual at the Dirichlet dofs, which is more sensitive to the
+/// error of the solve than the pressure itself. With `1e-10`, the flows of a manufactured
+/// anisotropic solution on 2 and 3 processes differed from those on one by up to `2.5e-10`
+/// relative (the L2 norms of pressure and velocity by `4e-12`), and the velocity of a uniform
+/// flow, which P1 represents exactly, was off by `1.1e-10`; with `1e-12`, by below `2e-12` and
+/// `1e-11`. The pressure is solved once per level, so the few more iterations cost little.
+const DEFAULTS: &str = "-ksp_error_if_not_converged -ksp_rtol 1e-12";
 
 /// The unit of pressures (of the contracts): the name of the component of the pressure, for
 /// viewers.
@@ -63,8 +71,9 @@ const VELOCITY_UNIT: &str = "um/s";
 /// Solver: CG on the shell operator of the level, preconditioned by geometric multigrid over
 /// the levels up to it ([`configure_multigrid`]; level 0 by its coarse solver, algebraic
 /// multigrid, alone). PETSc options: the solvers have the options prefix `perfusion_`, and
-/// read, lowest precedence first: the defaults `-ksp_error_if_not_converged -ksp_rtol 1e-10`;
-/// the options of the caller (`petsc_options` of [`Flow::solve`], written without the prefix);
+/// read, lowest precedence first: the defaults `-ksp_error_if_not_converged -ksp_rtol 1e-12`
+/// (a tighter tolerance than that of [`crate::Problem`], for the flows through the tags); the
+/// options of the caller (`petsc_options` of [`Flow::solve`], written without the prefix);
 /// options under the prefix already in the global options database (the command line, for
 /// example `-perfusion_ksp_monitor`). The solves of every level read them. The options are set
 /// while the solve runs only ([`OptionsScope`]).
@@ -78,7 +87,9 @@ const VELOCITY_UNIT: &str = "um/s";
 /// whole boundary, `-int f` (zero for [`Flow::solve`]), to the tolerance of the solve.
 ///
 /// Processes: as for [`crate::Problem`], the results depend on the number of processes up to
-/// the tolerance of the linear solves. Every error is the same on every process.
+/// the tolerance of the linear solves: with the defaults, L2 norms and flows through the tags
+/// on 1, 2 and 3 processes agree within about `2e-12` relative on the unit square. Every error
+/// is the same on every process.
 #[derive(Debug)]
 pub struct Flow {
     /// The finest level, with the pressure tags essential.
@@ -116,8 +127,8 @@ impl Flow {
     /// determined), or for a viscosity or `g0` which is not positive; [`PdeError::Mesh`] for a
     /// pressure tag the mesh does not have, listing its tags; [`PdeError::Map`] (on every
     /// process) if a map cannot be evaluated at a quadrature point of a level, naming the
-    /// coefficient (`k_along`, `k_across` or `direction`); [`PdeError::Diverged`] (at `t = 0`)
-    /// if a pressure solve does not converge, naming the level; [`PdeError::Petsc`] if a
+    /// coefficient (`k_along`, `k_across` or `direction`); [`PdeError::SolveFailed`] if a
+    /// pressure solve does not converge, naming the level; [`PdeError::Petsc`] if a
     /// pressure solve is running (it owns the options of the prefix) or PETSc rejects the
     /// options.
     pub fn solve(
@@ -180,8 +191,7 @@ impl Flow {
         for boundary in &perfusion.boundaries {
             boundaries.push((mesh.tag(&boundary.tag)?.name, boundary.pressure));
         }
-        let _options =
-            OptionsScope::new(PREFIX, &[ERRORS_IF_NOT_CONVERGED, TOLERANCE, petsc_options])?;
+        let _options = OptionsScope::new(PREFIX, &[DEFAULTS, petsc_options])?;
 
         let essential: Vec<&str> = boundaries.iter().map(|(tag, _)| tag.as_str()).collect();
         let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
@@ -430,9 +440,9 @@ fn solve_level(
     ksp.set_from_options()?;
     let mut pressure = disc.global_vector()?;
     pressure.set(0.0)?;
-    let diverged = |reason: String| PdeError::Diverged {
-        reason: format!("pressure solve (perfusion) on level {level}: {reason}"),
-        t: 0.0,
+    let diverged = |reason: String| PdeError::SolveFailed {
+        solve: "perfusion".to_string(),
+        reason: format!("{reason} (pressure on level {level})"),
     };
     match ksp.solve(&rhs, &mut pressure) {
         Err(e) if e.code == sys::PETSC_ERR_NOT_CONVERGED => {

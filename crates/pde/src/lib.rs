@@ -77,6 +77,11 @@ pub enum PdeError {
     /// `t` the time reached (in s), at the last step which succeeded.
     #[error("time integration failed at t = {t} s: {reason}")]
     Diverged { reason: String, t: f64 },
+    /// A steady solve which did not converge: `solve` names it (for example `perfusion`),
+    /// `reason` is the PETSc converged reason of its solver (for example `KSP DIVERGED_ITS`),
+    /// with where it failed. The same error on every process.
+    #[error("{solve} solve failed: {reason}")]
+    SolveFailed { solve: String, reason: String },
     /// A time to step to which is before the current time, or not finite.
     #[error("cannot step to t = {t} s from t = {time} s")]
     InvalidTime { t: f64, time: f64 },

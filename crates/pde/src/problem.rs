@@ -26,7 +26,7 @@ const ERRORS_IF_NOT_CONVERGED: &str =
 /// processes up to the tolerance (the multigrid preconditioner does, through the partition), so
 /// the tolerance keeps results of different process counts within about `1e-10` of each other,
 /// where PETSc's default (`1e-5`) would not.
-pub(crate) const TOLERANCE: &str = "-ksp_rtol 1e-10";
+const TOLERANCE: &str = "-ksp_rtol 1e-10";
 
 /// The unit of concentrations (of the contracts): the name of the component of the field, for
 /// viewers.

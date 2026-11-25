@@ -54,13 +54,8 @@ fn perfusion(
     }
 }
 
-/// The options of the tests of flows which P1 represents exactly: the solver errors far below
-/// their tolerance of `1e-10` (with the default `-ksp_rtol 1e-10`, the velocity of
-/// [`isotropic_where_gradient_vanishes`] is off by `1.1e-10` on level 0).
-const EXACT: &str = "-ksp_rtol 1e-12";
-
 /// The flow of `perfusion` on `mesh` with the direction map `direction`, solved with the
-/// options [`EXACT`].
+/// default options.
 fn solve(
     test: &str,
     mesh: &Mesh,
@@ -69,7 +64,7 @@ fn solve(
 ) -> Result<Flow, PdeError> {
     let scratch = Scratch::new(test);
     let maps = read_maps(&[scratch.map("direction", PIXELS, direction)], mesh);
-    Flow::solve(mesh, perfusion, &maps, &ceed(), EXACT)
+    Flow::solve(mesh, perfusion, &maps, &ceed(), "")
 }
 
 /// The L2 norm of `velocity - exact` at the quadrature points of level `level` of `mesh`, by
@@ -257,35 +252,27 @@ impl Manufactured {
         -(k00 * pxx + 2.0 * k01 * pxy + k11 * pyy) / self.viscosity
     }
 
-    /// The flow on `mesh`, with Dirichlet values from the pressure on all four sides, solved
-    /// with the PETSc options `options`.
-    fn solve(&self, test: &str, mesh: &Mesh, options: &str) -> Flow {
+    /// The flow on `mesh`, with Dirichlet values from the pressure on all four sides.
+    fn solve(&self, test: &str, mesh: &Mesh) -> Flow {
         let boundaries: Vec<(&str, f64)> = SIDES.iter().map(|&side| (side, 0.0)).collect();
         let perfusion = perfusion(self.viscosity, self.k, G0, &boundaries);
         let scratch = Scratch::new(test);
         let maps = read_maps(&[scratch.map("direction", PIXELS, self.direction)], mesh);
-        Flow::solve_manufactured(
-            mesh,
-            &perfusion,
-            &maps,
-            &ceed(),
-            options,
-            &self.pressure,
-            &|x| self.source(x),
-        )
+        Flow::solve_manufactured(mesh, &perfusion, &maps, &ceed(), "", &self.pressure, &|x| {
+            self.source(x)
+        })
         .unwrap()
     }
 
     /// The L2 errors of pressure and velocity on the finest level at each of `REFINEMENTS`, and
     /// the results which `parallel_on_*_processes` compares between process counts: the L2
-    /// norms of pressure and velocity, and the flows through the sides. Solved with the PETSc
-    /// options `options`.
-    fn errors(&self, p: &Petsc, test: &str, options: &str) -> (Vec<[f64; 2]>, Vec<f64>) {
+    /// norms of pressure and velocity, and the flows through the sides.
+    fn errors(&self, p: &Petsc, test: &str) -> (Vec<[f64; 2]>, Vec<f64>) {
         let mut errors = Vec::new();
         let mut results = Vec::new();
         for refinements in REFINEMENTS {
             let mesh = unit_square(p, refinements);
-            let flow = self.solve(test, &mesh, options);
+            let flow = self.solve(test, &mesh);
             let finest = mesh.levels().len() - 1;
             let velocity = flow.velocity(finest);
             errors.push([
@@ -342,14 +329,14 @@ fn assert_orders(errors: &[[f64; 2]]) {
 #[test]
 fn pressure_order_isotropic() {
     let p = Petsc::init(&[]).unwrap();
-    let (errors, _) = Manufactured::isotropic().errors(&p, "pressure_order_isotropic", "");
+    let (errors, _) = Manufactured::isotropic().errors(&p, "pressure_order_isotropic");
     assert_orders(&errors);
 }
 
 #[test]
 fn pressure_order_anisotropic() {
     let p = Petsc::init(&[]).unwrap();
-    let (errors, _) = Manufactured::anisotropic().errors(&p, "pressure_order_anisotropic", "");
+    let (errors, _) = Manufactured::anisotropic().errors(&p, "pressure_order_anisotropic");
     assert_orders(&errors);
 }
 
@@ -387,13 +374,17 @@ fn divergence_is_error() {
     );
     // One iteration does not reach the tolerance: the options are read under the prefix.
     let e = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "-ksp_max_it 1").unwrap_err();
-    let PdeError::Diverged { reason, .. } = &e else {
-        panic!("expected divergence, got {e}");
+    let PdeError::SolveFailed { solve, reason } = &e else {
+        panic!("expected a failed solve, got {e}");
     };
+    assert_eq!(solve, "perfusion");
+    assert!(reason.contains("DIVERGED_ITS"), "{e}");
+    let message = e.to_string();
     assert!(
-        reason.contains("pressure") && reason.contains("DIVERGED_ITS"),
-        "{e}"
+        message.starts_with("perfusion solve failed: KSP DIVERGED_ITS"),
+        "{message}"
     );
+    assert!(!message.contains("time integration"), "{message}");
     // The options lived as long as the solve.
     Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
 }
@@ -423,11 +414,6 @@ fn unknown_pressure_tag_lists_tags() {
 /// The results `parallel_on_*_processes` compares between process counts: of [`uniform`], the
 /// L2 norms of the pressure and of the velocity on every level, and the flows through the
 /// tags; and those of the anisotropic manufactured solution (see [`Manufactured::errors`]).
-///
-/// All solved with the options [`EXACT`]: the flows through the tags, from the residual at the
-/// Dirichlet dofs, are more sensitive to the error of the solve than the pressure. With the
-/// default `-ksp_rtol 1e-10`, the flows of the anisotropic solution on 2 and 3 processes
-/// differ from those on one by up to `2.5e-10` relative (the L2 norms by `4e-12`).
 fn parity_results(p: &Petsc) -> Vec<f64> {
     let (mesh, flow) = uniform(p);
     let mut results = vec![flow.pressure_l2_error(|_| 0.0).unwrap()];
@@ -440,7 +426,7 @@ fn parity_results(p: &Petsc) -> Vec<f64> {
         ));
     }
     results.extend(flow.tag_flows().iter().map(|(_, q)| q));
-    let (_, anisotropic) = Manufactured::anisotropic().errors(p, "parity_anisotropic", EXACT);
+    let (_, anisotropic) = Manufactured::anisotropic().errors(p, "parity_anisotropic");
     results.extend(anisotropic);
     results
 }
