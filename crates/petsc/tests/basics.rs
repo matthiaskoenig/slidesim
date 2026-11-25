@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use petsc::sys;
 use petsc::{
-    Comm, Dm, Error, Ksp, Matrix, Petsc, Result, ShellOperator, Ts, VecMut, VecRef, Vector,
+    AsVecMut, Comm, Dm, Error, Ksp, Matrix, Petsc, Result, ShellOperator, Ts, VecMut, VecRef,
+    Vector,
 };
 
 fn values(v: &Vector) -> Vec<f64> {
@@ -92,6 +93,8 @@ fn vector_operations() {
     x.axpy(2.0, &y).unwrap();
     assert_eq!(values(&x), [2.0, 3.0, 3.0]);
     assert_eq!(values(&y), [0.5, 0.5, 0.5]);
+    x.zero().unwrap();
+    assert_eq!(values(&x), [0.0; 3]);
 }
 
 #[test]

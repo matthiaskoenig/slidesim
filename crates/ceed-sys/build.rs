@@ -118,5 +118,12 @@ fn main() {
 
     link_native(&ceed_dir);
     let include_dirs = include_dirs_native(&ceed_dir);
+    // `DEP_CEED_INCLUDE` for the build scripts of dependents compiling C against libCEED (for
+    // example QFunction sources).
+    let joined = env::join_paths(&include_dirs).expect("include directories joinable");
+    println!(
+        "cargo:include={}",
+        joined.to_str().expect("utf-8 include directories")
+    );
     generate_bindings(&target, &sdk, &include_dirs);
 }

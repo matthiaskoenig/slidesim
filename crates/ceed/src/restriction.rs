@@ -107,6 +107,68 @@ impl ElemRestriction {
         })
     }
 
+    /// A strided restriction with the layout `strides` = `[node, component, element]`: component
+    /// `c` of node `i` of element `e` is entry `i * strides[0] + c * strides[1] + e * strides[2]`
+    /// of an L-vector of length `l_size` (`CeedElemRestrictionCreateStrided`). For data stored
+    /// per element in a layout the caller reads, such as values at quadrature points.
+    ///
+    /// The layout is checked to stay within the L-vector (libCEED does not check it).
+    pub fn strided_with(
+        ceed: &Ceed,
+        num_elem: usize,
+        elem_size: usize,
+        num_comp: usize,
+        l_size: usize,
+        strides: [usize; 3],
+    ) -> Result<ElemRestriction> {
+        let dimension = |message: String| Error::new(sys::CEED_ERROR_DIMENSION, message);
+        if num_comp == 0 || elem_size == 0 {
+            return Err(dimension(format!(
+                "element restriction with {num_comp} components and {elem_size} nodes per \
+                 element (need at least 1 each)"
+            )));
+        }
+        // The largest index, of the last component of the last node of the last element.
+        let last = [num_elem, elem_size, num_comp]
+            .iter()
+            .zip([strides[2], strides[0], strides[1]])
+            .try_fold(0usize, |sum, (&n, stride)| {
+                n.saturating_sub(1)
+                    .checked_mul(stride)
+                    .and_then(|i| sum.checked_add(i))
+            })
+            .ok_or_else(|| dimension(format!("restriction strides {strides:?} overflow")))?;
+        if num_elem > 0 && last >= l_size {
+            return Err(dimension(format!(
+                "strided restriction reaches entry {last} of an L-vector of length {l_size} \
+                 (strides {strides:?})"
+            )));
+        }
+        let raw_strides = [
+            to_int(strides[0], "node stride")?,
+            to_int(strides[1], "component stride")?,
+            to_int(strides[2], "element stride")?,
+        ];
+        let mut raw: sys::CeedElemRestriction = null_mut();
+        // SAFETY: libCEED copies the three strides.
+        chk!(ceed, unsafe {
+            sys::CeedElemRestrictionCreateStrided(
+                ceed.as_raw(),
+                to_int(num_elem, "number of elements")?,
+                to_int(elem_size, "element size")?,
+                to_int(num_comp, "number of components")?,
+                to_size(l_size, "L-vector size")?,
+                raw_strides.as_ptr(),
+                &mut raw,
+            )
+        });
+        Ok(ElemRestriction {
+            raw,
+            ceed: ceed.clone(),
+            l_size,
+        })
+    }
+
     /// The length of the L-vector.
     pub fn l_size(&self) -> usize {
         self.l_size

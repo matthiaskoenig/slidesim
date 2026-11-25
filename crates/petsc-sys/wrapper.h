@@ -9,3 +9,6 @@ MPI_Datatype petsc_sys_mpiu_int(void);
 MPI_Datatype petsc_sys_mpiu_real(void);
 MPI_Op petsc_sys_mpi_sum(void);
 MPI_Op petsc_sys_mpi_max(void);
+
+/* PetscFree of an array PETSc allocated for the caller. */
+PetscErrorCode petsc_sys_free(void *p);

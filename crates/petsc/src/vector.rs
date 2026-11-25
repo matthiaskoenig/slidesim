@@ -18,7 +18,13 @@ pub trait AsVec: sealed::Sealed {
 }
 
 /// A PETSc vector which may be written: [`Vector`] or [`VecMut`].
-pub trait AsVecMut: AsVec {}
+pub trait AsVecMut: AsVec {
+    /// Sets every entry to zero (`VecZeroEntries`), for code generic over the vector kind.
+    fn zero(&mut self) -> Result<()> {
+        chk!(unsafe { sys::VecZeroEntries(self.as_raw()) });
+        Ok(())
+    }
+}
 
 /// An owned PETSc vector (`Vec`).
 #[derive(Debug)]

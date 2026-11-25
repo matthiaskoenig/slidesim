@@ -54,6 +54,24 @@ unsafe extern "C" fn failing_qf(
     1
 }
 
+/// Copies its input to its output (one value per point): `u` (values at points) to `q`.
+unsafe extern "C" fn copy_qf(
+    _ctx: *mut c_void,
+    q: CeedInt,
+    input: *const *const CeedScalar,
+    output: *const *mut CeedScalar,
+) -> c_int {
+    let q = q as usize;
+    let (u, v) = unsafe {
+        (
+            slice::from_raw_parts(*input, q),
+            slice::from_raw_parts_mut(*output, q),
+        )
+    };
+    v.copy_from_slice(u);
+    0
+}
+
 /// A simplex mesh with coordinates of degree `x_degree`: node coordinates (interleaved) and
 /// cells (the nodes of the Lagrange basis of `x_degree` each).
 struct Mesh {
@@ -450,4 +468,75 @@ fn qfunction_is_validated() {
     // SAFETY (both): creation fails, so no function is ever called.
     assert!(unsafe { QFunction::interior(&ceed, 1, None, "qf.h:none") }.is_err());
     assert!(unsafe { QFunction::interior(&ceed, 0, Some(mass_qf), "qf.h:mass_qf") }.is_err());
+}
+
+#[test]
+fn apply_slices_matches_apply() {
+    let ceed = ceed();
+    let op = mass_1d(&ceed, 4, 2.0);
+    let u = [0.0, 1.0, 4.0, 9.0, 16.0];
+    let mut expected = CVector::new(&ceed, 5).unwrap();
+    op.apply(&CVector::from_slice(&ceed, &u).unwrap(), &mut expected)
+        .unwrap();
+    // The output is overwritten, and the arrays can be used again.
+    let mut v = [f64::NAN; 5];
+    for _ in 0..2 {
+        op.apply_slices(&u, &mut v).unwrap();
+        assert_eq!(v.as_slice(), expected.to_vec().unwrap());
+    }
+    assert_eq!(u, [0.0, 1.0, 4.0, 9.0, 16.0]);
+}
+
+#[test]
+fn apply_slices_length_mismatch_is_error() {
+    let ceed = ceed();
+    let op = mass_1d(&ceed, 4, 1.0);
+    let e = op.apply_slices(&[1.0; 4], &mut [0.0; 5]).unwrap_err();
+    assert!(e.message.contains("input array has length 4"), "{e}");
+    let e = op.apply_slices(&[1.0; 5], &mut [0.0; 6]).unwrap_err();
+    assert!(e.message.contains("output array has length 6"), "{e}");
+}
+
+#[test]
+fn strided_with_lays_out_values_as_given() {
+    let ceed = ceed();
+    // x at the quadrature points of 3 intervals on [0, 1], stored at e * q + i.
+    let n = 3;
+    let mesh = Mesh::interval(n);
+    let b = Basis::h1_lagrange_simplex(&ceed, 1, 1, 1, 4).unwrap();
+    let q = b.num_quadrature_points();
+    let r_x = ElemRestriction::new(&ceed, n, 2, 1, 1, n + 1, &mesh.cells).unwrap();
+    let r_q = ElemRestriction::strided_with(&ceed, n, q, 1, n * q, [1, q, q]).unwrap();
+    // SAFETY: one input and one output of one value per point, as copy_qf reads and writes.
+    let mut qf =
+        unsafe { QFunction::interior(&ceed, 1, Some(copy_qf), concat!(file!(), ":copy_qf")) }
+            .unwrap();
+    qf.add_input("u", 1, EvalMode::Interp).unwrap();
+    qf.add_output("q", 1, EvalMode::None).unwrap();
+    let mut op = Operator::new(&ceed, &qf).unwrap();
+    op.set_field("u", Some(&r_x), Some(&b), FieldVector::Active)
+        .unwrap();
+    op.set_field("q", Some(&r_q), None, FieldVector::Active)
+        .unwrap();
+    let mut xq = vec![0.0; n * q];
+    op.apply_slices(&mesh.coords, &mut xq).unwrap();
+    for (k, x) in xq.iter().enumerate() {
+        let (e, n) = ((k / q) as f64, n as f64);
+        assert!(e / n < *x && *x < (e + 1.0) / n, "{xq:?}");
+    }
+    assert!(xq.windows(2).all(|w| w[0] < w[1]), "{xq:?}");
+}
+
+#[test]
+fn strided_with_is_validated() {
+    let ceed = ceed();
+    // Element 1 reaches entry 2 * 3 + 2 * 1 = 8.
+    let e = ElemRestriction::strided_with(&ceed, 2, 3, 1, 8, [1, 3, 6]).unwrap_err();
+    assert!(e.message.contains("entry 8"), "{e}");
+    assert!(ElemRestriction::strided_with(&ceed, 2, 3, 1, 9, [1, 3, 6]).is_ok());
+    // Component 1 of node 2 of element 1: 2 + 3 + 6.
+    assert!(ElemRestriction::strided_with(&ceed, 2, 3, 2, 11, [1, 3, 6]).is_err());
+    assert!(ElemRestriction::strided_with(&ceed, 2, 3, 2, 12, [1, 3, 6]).is_ok());
+    assert!(ElemRestriction::strided_with(&ceed, 2, 0, 1, 12, [1, 3, 6]).is_err());
+    assert!(ElemRestriction::strided_with(&ceed, 2, 3, 1, 12, [usize::MAX, 3, 6]).is_err());
 }

@@ -5,10 +5,44 @@ use std::ops::Range;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use crate::{Comm, Error, Result, alive, c_string, chk, sys, to_int};
+use crate::{AsVec, AsVecMut, Comm, Error, Fe, Result, alive, c_string, chk, sys, to_int};
 
 /// A mesh point (cell, face, edge or vertex) of a DMPlex.
 pub type Point = sys::PetscInt;
+
+/// How values reach the target vector of a scatter between local and global vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertMode {
+    /// Replace the target values (`INSERT_VALUES`).
+    Insert,
+    /// Add to the target values (`ADD_VALUES`): the contributions of every process to a shared
+    /// entry add up.
+    Add,
+}
+
+impl InsertMode {
+    fn raw(self) -> sys::InsertMode {
+        match self {
+            InsertMode::Insert => sys::INSERT_VALUES,
+            InsertMode::Add => sys::ADD_VALUES,
+        }
+    }
+}
+
+/// The cell restriction of a field of a DMPlex: for every cell, the local vector indices of its
+/// nodes, in closure order (`DMPlexGetLocalOffsets`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalOffsets {
+    pub num_cells: usize,
+    /// The number of nodes per cell.
+    pub cell_size: usize,
+    /// The number of components per node: node `i` of cell `e` holds its components at
+    /// `offsets[e * cell_size + i] + c`.
+    pub num_comp: usize,
+    /// The length of the local vector.
+    pub local_size: usize,
+    pub offsets: Vec<sys::PetscInt>,
+}
 
 /// An owned reference to a PETSc `DM` (a DMPlex). Cloning shares the `DM` (PETSc reference
 /// counting); the `DM` is destroyed with its last reference.
@@ -257,6 +291,304 @@ impl Dm {
         // SAFETY: the IS (or null) is ours to destroy.
         chk!(unsafe { sys::DMGetStratumIS(self.raw, name.as_ptr(), value, &mut is) });
         take_is(is, true)
+    }
+}
+
+/// The PETSc array `ptr` of `n` indices, copied, and freed (`PetscFree`).
+///
+/// # Safety
+/// `ptr` is null or an array PETSc allocated for the caller, holding `n` indices.
+unsafe fn take_array(ptr: *mut sys::PetscInt, n: usize) -> Result<Vec<sys::PetscInt>> {
+    if ptr.is_null() {
+        return Ok(Vec::new());
+    }
+    let v = if n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, n) }.to_vec()
+    };
+    chk!(unsafe { sys::petsc_sys_free(ptr.cast()) });
+    Ok(v)
+}
+
+/// Discretizations: fields, boundary conditions, sections, and the scatters between local and
+/// global vectors.
+impl Dm {
+    /// A new DM with the topology, coordinates and point distribution of this one, copies of its
+    /// labels, and no fields (`DMClone`): fields and boundary conditions set on it leave this
+    /// DM unchanged. Collective.
+    pub fn clone_mesh(&self) -> Result<Dm> {
+        let mut raw = null_mut();
+        // SAFETY: `raw` receives a new DM.
+        chk!(unsafe { sys::DMClone(self.raw, &mut raw) });
+        Ok(Dm { raw })
+    }
+
+    /// Whether the cells are simplices (`DMPlexIsSimplex`).
+    pub fn is_simplex(&self) -> Result<bool> {
+        let mut simplex = false;
+        chk!(unsafe { sys::DMPlexIsSimplex(self.raw, &mut simplex) });
+        Ok(simplex)
+    }
+
+    /// Discretizes the coordinates with `fe`, projecting them onto it if `project`
+    /// (`DMSetCoordinateDisc`, not localized). Without `fe`, it makes sure the coordinates have
+    /// the affine (P1 or Q1) element, which [`Dm::local_offsets`] of [`Dm::coordinate_dm`]
+    /// needs. Collective.
+    pub fn set_coordinate_disc(&mut self, fe: Option<&Fe>, project: bool) -> Result<()> {
+        let fe = fe.map_or(null_mut(), Fe::as_raw);
+        chk!(unsafe { sys::DMSetCoordinateDisc(self.raw, fe, false, project) });
+        Ok(())
+    }
+
+    /// The DM of the coordinates (`DMGetCoordinateDM`), shared.
+    pub fn coordinate_dm(&self) -> Result<Dm> {
+        let mut raw = null_mut();
+        chk!(unsafe { sys::DMGetCoordinateDM(self.raw, &mut raw) });
+        // SAFETY: a borrowed reference of the DM, which becomes ours.
+        chk!(unsafe { sys::PetscObjectReference(raw as sys::PetscObject) });
+        Ok(Dm { raw })
+    }
+
+    /// The local coordinates (with those of ghost points), copied (`DMGetCoordinatesLocal`):
+    /// `coordinate_dimension` values per node of [`Dm::coordinate_dm`]. Collective, unless
+    /// they are set up (see [`Dm::set_up_local_coordinates`]).
+    pub fn local_coordinates(&self) -> Result<Vec<f64>> {
+        let mut raw = null_mut();
+        // SAFETY: the vector is borrowed from the DM.
+        chk!(unsafe { sys::DMGetCoordinatesLocal(self.raw, &mut raw) });
+        if raw.is_null() {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_WRONGSTATE,
+                "the DM has no coordinates",
+            ));
+        }
+        let mut n = 0;
+        chk!(unsafe { sys::VecGetLocalSize(raw, &mut n) });
+        let mut array = null();
+        chk!(unsafe { sys::VecGetArrayRead(raw, &mut array) });
+        let values = if n == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: `n` values, valid until the restore.
+            unsafe { std::slice::from_raw_parts(array, n as usize) }.to_vec()
+        };
+        chk!(unsafe { sys::VecRestoreArrayRead(raw, &mut array) });
+        Ok(values)
+    }
+
+    /// Adds the field discretized by `fe` on the whole mesh (`DMAddField`). The DM keeps a
+    /// reference to `fe`. [`Dm::create_ds`] completes the setup.
+    pub fn add_field(&mut self, fe: &Fe) -> Result<()> {
+        chk!(unsafe { sys::DMAddField(self.raw, null_mut(), fe.as_raw() as sys::PetscObject) });
+        Ok(())
+    }
+
+    /// Creates the discrete system of the fields (`DMCreateDS`). Collective.
+    pub fn create_ds(&mut self) -> Result<()> {
+        chk!(unsafe { sys::DMCreateDS(self.raw) });
+        Ok(())
+    }
+
+    /// Makes the field `field` essential (Dirichlet) on the points where the label `label` has
+    /// one of `values`, and on their closure (`DMAddBoundary` with `DM_BC_ESSENTIAL`, named
+    /// `name`, without boundary value functions): the section constrains their dofs, so global
+    /// vectors leave them out. Completes the label. Must come before the section is created
+    /// (by the first vector, for example).
+    pub fn add_essential_boundary(
+        &mut self,
+        name: &str,
+        label: &str,
+        values: &[sys::PetscInt],
+        field: usize,
+    ) -> Result<()> {
+        let c_name = c_string(name, "boundary name")?;
+        let c_label = c_string(label, "label name")?;
+        let mut raw_label = null_mut();
+        // SAFETY: the label is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLabel(self.raw, c_label.as_ptr(), &mut raw_label) });
+        if raw_label.is_null() {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_WRONG,
+                format!("DM has no label {label:?}"),
+            ));
+        }
+        // SAFETY: PETSc copies the name and the values; no functions and no context.
+        chk!(unsafe {
+            sys::DMAddBoundary(
+                self.raw,
+                sys::DM_BC_ESSENTIAL,
+                c_name.as_ptr(),
+                raw_label,
+                to_int(values.len(), "number of label values")?,
+                values.as_ptr(),
+                to_int(field, "field")?,
+                0,
+                null(),
+                None,
+                None,
+                null_mut(),
+                null_mut(),
+            )
+        });
+        Ok(())
+    }
+
+    /// The values the label `name` takes on any process, sorted; none if there is no such label
+    /// (`DMLabelGetValueISGlobal`, values of nonempty strata). Collective.
+    pub fn label_values_global(&self, name: &str) -> Result<Vec<sys::PetscInt>> {
+        let c_name = c_string(name, "label name")?;
+        let mut label = null_mut();
+        // SAFETY: the label is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLabel(self.raw, c_name.as_ptr(), &mut label) });
+        // Every process takes part in the reduction, also one without the label.
+        let mut has = sys::PetscInt::from(!label.is_null());
+        has = self.comm().max_int(has)?;
+        if has == 0 {
+            return Ok(Vec::new());
+        }
+        if label.is_null() {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_WRONG,
+                format!("label {name:?} exists on some processes only"),
+            ));
+        }
+        let mut is = null_mut();
+        // SAFETY: the IS is ours to destroy.
+        chk!(unsafe { sys::DMLabelGetValueISGlobal(self.comm().as_raw(), label, true, &mut is) });
+        let mut values = take_is(is, true)?;
+        values.sort_unstable();
+        Ok(values)
+    }
+
+    /// The local points in the closure of `point`, starting with `point`
+    /// (`DMPlexGetTransitiveClosure`).
+    pub fn closure(&self, point: Point) -> Result<Vec<Point>> {
+        let mut n = 0;
+        let mut pairs: *mut sys::PetscInt = null_mut();
+        // SAFETY: PETSc lends `2 n` values (point, orientation) until the restore.
+        chk!(unsafe { sys::DMPlexGetTransitiveClosure(self.raw, point, true, &mut n, &mut pairs) });
+        let points = if n == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(pairs, 2 * n as usize) }
+                .iter()
+                .step_by(2)
+                .copied()
+                .collect()
+        };
+        chk!(unsafe {
+            sys::DMPlexRestoreTransitiveClosure(self.raw, point, true, &mut n, &mut pairs)
+        });
+        Ok(points)
+    }
+
+    /// The indices in local vectors of the dofs of `point`, constrained ones included
+    /// (`DMGetLocalSection`, which creates the section from the fields). Collective on the first
+    /// call, which creates the section.
+    pub fn local_dofs(&self, point: Point) -> Result<Range<usize>> {
+        let mut section = null_mut();
+        // SAFETY: the section is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLocalSection(self.raw, &mut section) });
+        let (mut dof, mut offset) = (0, 0);
+        chk!(unsafe { sys::PetscSectionGetDof(section, point, &mut dof) });
+        chk!(unsafe { sys::PetscSectionGetOffset(section, point, &mut offset) });
+        let (offset, dof) = (offset as usize, dof as usize);
+        Ok(offset..offset + dof)
+    }
+
+    /// The number of dofs of `point` constrained by essential boundary conditions
+    /// (`PetscSectionGetConstraintDof` of the local section).
+    pub fn constrained_dofs(&self, point: Point) -> Result<usize> {
+        let mut section = null_mut();
+        // SAFETY: the section is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLocalSection(self.raw, &mut section) });
+        let mut n = 0;
+        chk!(unsafe { sys::PetscSectionGetConstraintDof(section, point, &mut n) });
+        Ok(n as usize)
+    }
+
+    /// The cell restriction of field `field` on the cells of the local mesh, in the order of the
+    /// cells (`DMPlexGetLocalOffsets` on height 0). Essential dofs are included (their indices
+    /// are decoded). Needs the discrete system ([`Dm::create_ds`]).
+    pub fn local_offsets(&self, field: usize) -> Result<LocalOffsets> {
+        let (mut num_cells, mut cell_size, mut num_comp, mut local_size) = (0, 0, 0, 0);
+        let mut offsets: *mut sys::PetscInt = null_mut();
+        // SAFETY: `offsets` receives an array of `num_cells * cell_size` indices which we free.
+        chk!(unsafe {
+            sys::DMPlexGetLocalOffsets(
+                self.raw,
+                null_mut(),
+                0,
+                0,
+                to_int(field, "field")?,
+                &mut num_cells,
+                &mut cell_size,
+                &mut num_comp,
+                &mut local_size,
+                &mut offsets,
+            )
+        });
+        let (num_cells, cell_size) = (num_cells as usize, cell_size as usize);
+        let offsets = unsafe { take_array(offsets, num_cells * cell_size) }?;
+        Ok(LocalOffsets {
+            num_cells,
+            cell_size,
+            num_comp: num_comp as usize,
+            local_size: local_size as usize,
+            offsets,
+        })
+    }
+
+    /// For every entry of a local vector, the index of its entry in global vectors: owned by this
+    /// or another process, or negative for a constrained (essential) dof, which global vectors
+    /// leave out (`DMGetLocalToGlobalMapping`). Collective on the first call.
+    pub fn local_to_global_indices(&self) -> Result<Vec<sys::PetscInt>> {
+        let mut ltog = null_mut();
+        // SAFETY: the mapping is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLocalToGlobalMapping(self.raw, &mut ltog) });
+        let mut n = 0;
+        chk!(unsafe { sys::ISLocalToGlobalMappingGetSize(ltog, &mut n) });
+        let mut indices: *const sys::PetscInt = null();
+        chk!(unsafe { sys::ISLocalToGlobalMappingGetIndices(ltog, &mut indices) });
+        let v = if n == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: `n` indices, valid until the restore.
+            unsafe { std::slice::from_raw_parts(indices, n as usize) }.to_vec()
+        };
+        chk!(unsafe { sys::ISLocalToGlobalMappingRestoreIndices(ltog, &mut indices) });
+        Ok(v)
+    }
+
+    /// Scatters the global vector `global` to the local vector `local`, with the entries of
+    /// ghost points (`DMGlobalToLocal`, `INSERT_VALUES`). Constrained entries of `local` are
+    /// left as they are. Collective.
+    pub fn global_to_local(&self, global: &impl AsVec, local: &mut impl AsVecMut) -> Result<()> {
+        chk!(unsafe {
+            sys::DMGlobalToLocal(
+                self.raw,
+                global.as_raw(),
+                sys::INSERT_VALUES,
+                local.as_raw(),
+            )
+        });
+        Ok(())
+    }
+
+    /// Scatters the local vector `local` to the global vector `global` (`DMLocalToGlobal`):
+    /// with [`InsertMode::Add`], the entries of a point shared by several processes add up
+    /// into `global`, which is not zeroed first. Constrained entries are dropped. Collective.
+    pub fn local_to_global(
+        &self,
+        local: &impl AsVec,
+        mode: InsertMode,
+        global: &mut impl AsVecMut,
+    ) -> Result<()> {
+        chk!(unsafe {
+            sys::DMLocalToGlobal(self.raw, local.as_raw(), mode.raw(), global.as_raw())
+        });
+        Ok(())
     }
 }
 

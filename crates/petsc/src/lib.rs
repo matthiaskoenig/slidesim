@@ -26,6 +26,7 @@
 
 mod dm;
 mod error;
+mod fe;
 mod ksp;
 mod matrix;
 mod ts;
@@ -38,11 +39,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use petsc_sys as sys;
 
-pub use dm::{Dm, Point};
+pub use dm::{Dm, InsertMode, LocalOffsets, Point};
 use error::check;
 pub use error::{Error, Result};
 #[doc(hidden)]
 pub use error::{check as __check, ensure_alive as __ensure_alive};
+pub use fe::{Fe, Quadrature, Tabulation};
 pub use ksp::Ksp;
 pub use matrix::{Matrix, ShellOperator};
 pub use ts::Ts;
