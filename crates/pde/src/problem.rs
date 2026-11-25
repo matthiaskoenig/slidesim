@@ -59,13 +59,18 @@ const SHIFT_TOLERANCE: f64 = 1e-12;
 /// the coarse operator assembled again).
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
-/// field `u`, so its linear solver reads `-u_ksp_type`). The problem sets its options in the
-/// global options database under that prefix while it lives, and removes them when dropped:
-/// first `-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails` and
-/// `-ksp_rtol 1e-10`, then the options of the caller (`petsc_options` of [`Problem::new`], written without the
-/// prefix), which may override them. Options under the prefix from the command line hold too,
-/// unless the caller's override them. They override the multigrid preconditioner too: for
-/// example `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
+/// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
+/// 1. the defaults of the problem: `-ksp_error_if_not_converged -snes_error_if_not_converged
+///    -ts_error_if_step_fails` and `-ksp_rtol 1e-10`;
+/// 2. the options of the caller (`petsc_options` of [`Problem::new`], for example
+///    `solver.petsc_options` of a study), written without the prefix;
+/// 3. options under the prefix already in the global options database, from the command line
+///    (or set by the caller of PETSc), for example `-u_ksp_rtol 1e-6`.
+///
+/// The problem sets the options of 1 and 2 which are not in the database already under the
+/// prefix while it lives ([`OptionsScope`]), and removes them when dropped; it leaves those of
+/// 3 as they are. The options override the multigrid preconditioner too: for example
+/// `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
 /// `-mg_coarse_pc_type lu` its coarse solver (on one process).
 ///
 /// Processes: the solution depends on the number of processes up to the tolerance of the linear
@@ -101,7 +106,8 @@ impl Problem {
     /// The problem of the field `field` on the finest level of `mesh`, at t = 0 with the uniform
     /// initial value `field.initial` and the uniform source `field.source`, stepped as `time`
     /// says (its time step and adaptivity), and with the PETSc options `petsc_options` (for
-    /// example `-ksp_rtol 1e-8`). Collective.
+    /// example `-ksp_rtol 1e-8`), which override the defaults of the problem and give way to
+    /// options under the prefix already in the database (see [`Problem`]). Collective.
     ///
     /// Errors: [`PdeError::Unsupported`] if the field id cannot be an options prefix (it starts
     /// with an ASCII letter and has ASCII letters, digits and `_` only), or a flux is on a tag

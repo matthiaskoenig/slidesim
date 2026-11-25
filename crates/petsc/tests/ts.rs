@@ -337,7 +337,7 @@ fn residual_error_reaches_solve() {
 }
 
 #[test]
-fn options_scope_sets_and_restores_prefixed_options() {
+fn options_scope_sets_and_removes_prefixed_options() {
     let p = Petsc::init(&["-s_ksp_type", "gmres"]).unwrap();
     let scope = OptionsScope::new(
         "s_",
@@ -345,7 +345,8 @@ fn options_scope_sets_and_restores_prefixed_options() {
     )
     .unwrap();
     assert_eq!(p.option("-s_ksp_monitor").unwrap().as_deref(), Some(""));
-    assert_eq!(p.option("-s_ksp_type").unwrap().as_deref(), Some("cg"));
+    // The command line holds over the scope.
+    assert_eq!(p.option("-s_ksp_type").unwrap().as_deref(), Some("gmres"));
     // A later text overrides an earlier one.
     assert_eq!(p.option("-s_ksp_rtol").unwrap().as_deref(), Some("1e-6"));
     assert_eq!(p.option("-ksp_type").unwrap(), None);
@@ -363,6 +364,35 @@ fn options_scope_sets_and_restores_prefixed_options() {
     drop(other);
     assert_eq!(p.option("-t_ksp_type").unwrap(), None);
     OptionsScope::new("s_", &[]).unwrap();
+}
+
+#[test]
+fn options_already_set_survive_the_scope_and_its_drop() {
+    // From the command line, and set by the caller (in another case: names are case
+    // insensitive).
+    let p = Petsc::init(&["-s_ksp_rtol", "1e-2", "-s_ksp_monitor"]).unwrap();
+    p.set_option("-S_KSP_MAX_IT", Some("5")).unwrap();
+    let scope = OptionsScope::new(
+        "s_",
+        &["-ksp_rtol 1e-10 -ksp_max_it 100 -ksp_monitor_short -ksp_type cg"],
+    )
+    .unwrap();
+    assert_eq!(p.option("-s_ksp_rtol").unwrap().as_deref(), Some("1e-2"));
+    assert_eq!(p.option("-s_ksp_max_it").unwrap().as_deref(), Some("5"));
+    assert_eq!(p.option("-s_ksp_monitor").unwrap().as_deref(), Some(""));
+    // Options not set before are the scope's.
+    assert_eq!(p.option("-s_ksp_type").unwrap().as_deref(), Some("cg"));
+    assert_eq!(
+        p.option("-s_ksp_monitor_short").unwrap().as_deref(),
+        Some("")
+    );
+    drop(scope);
+    // The options set before are untouched, the scope's are gone.
+    assert_eq!(p.option("-s_ksp_rtol").unwrap().as_deref(), Some("1e-2"));
+    assert_eq!(p.option("-s_ksp_max_it").unwrap().as_deref(), Some("5"));
+    assert_eq!(p.option("-s_ksp_monitor").unwrap().as_deref(), Some(""));
+    assert_eq!(p.option("-s_ksp_type").unwrap(), None);
+    assert_eq!(p.option("-s_ksp_monitor_short").unwrap(), None);
 }
 
 #[test]

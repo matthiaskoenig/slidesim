@@ -45,8 +45,9 @@ Output files in DIR:
 
 PETSc options after '--' go to PETSc's options database. The solvers of a field take the
 prefix '<field id>_', for example '-oxygen_ksp_monitor' (residuals of the linear solves of the
-field 'oxygen') or '-oxygen_ts_monitor' (its time steps). Options in solver.petsc_options of
-the study take precedence.";
+field 'oxygen'), '-oxygen_ts_monitor' (its time steps) or '-oxygen_ksp_rtol 1e-8'. Precedence,
+lowest first: slidesim's defaults ('-ksp_rtol 1e-10', solvers which do not converge are
+errors), solver.petsc_options of the study, the options after '--'.";
 
 #[derive(Debug, Args)]
 struct RunArgs {

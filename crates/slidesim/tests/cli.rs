@@ -192,6 +192,51 @@ fn bad_petsc_option_fails_cleanly() {
     assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
 }
 
+/// The relative tolerances of the outer linear solver of the field `oxygen` in the output of
+/// `-oxygen_ksp_view`, one per solve.
+fn outer_rtols(stdout: &str) -> Vec<String> {
+    let mut lines = stdout.lines();
+    let mut rtols = Vec::new();
+    while lines.any(|line| line.starts_with("KSP Object: (oxygen_)")) {
+        let tolerances = lines
+            .find_map(|line| line.trim().strip_prefix("tolerances: relative="))
+            .expect("tolerances of the KSP");
+        rtols.push(tolerances.split(',').next().unwrap().to_string());
+    }
+    rtols
+}
+
+#[test]
+fn petsc_options_precedence() {
+    // A short run of the study: no refinement, one step.
+    let dir = scratch("petsc_options_precedence");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(study()).unwrap()).unwrap();
+    doc["scene"] = Value::from(study().with_file_name("scene.json").display().to_string());
+    doc["mesh"]["refinements"] = Value::from(0);
+    doc["time"] = serde_json::json!({"end": 0.5, "dt": 0.5, "outputs": [0.5]});
+    let defaults = dir.join("defaults.json");
+    std::fs::write(&defaults, doc.to_string()).unwrap();
+    doc["solver"] = serde_json::json!({"petsc_options": "-ksp_rtol 1e-6"});
+    let with_options = dir.join("with_options.json");
+    std::fs::write(&with_options, doc.to_string()).unwrap();
+    let out = dir.join("out");
+    let rtols = |study: &Path, command_line: &[&str]| {
+        let mut options = vec!["-oxygen_ksp_view"];
+        options.extend(command_line);
+        let run = slidesim(&args(study, &out, &options));
+        assert_success(&run);
+        let rtols = outer_rtols(&run.stdout);
+        assert!(!rtols.is_empty(), "{}", run.stdout);
+        rtols
+    };
+
+    // Lowest first: the defaults of the problem, the study, the command line.
+    assert!(rtols(&defaults, &[]).iter().all(|r| r == "1e-10"));
+    assert!(rtols(&with_options, &[]).iter().all(|r| r == "1e-06"));
+    let rtols = rtols(&with_options, &["-oxygen_ksp_rtol", "1e-2"]);
+    assert!(rtols.iter().all(|r| r == "0.01"), "{rtols:?}");
+}
+
 #[test]
 fn usage_error_exits_1() {
     let run = slidesim(&["frobnicate".to_string()]);

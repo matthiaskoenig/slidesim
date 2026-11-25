@@ -76,8 +76,10 @@ thread_local! {
 
 /// Options in the global options database under a prefix, for as long as the scope lives: the
 /// options of the PETSc objects with that prefix (`TSSetOptionsPrefix` and the like), and of no
-/// other object. Dropping the scope sets each of its options back to what it was before (unset,
-/// as a rule).
+/// other object. The scope sets only options which are not in the database yet: an option
+/// already there (from the command line of [`crate::Petsc::init`], or set by the caller) holds,
+/// so the command line overrides the scope. Dropping the scope removes the options it set, and
+/// leaves every other option as it is.
 ///
 /// One scope per prefix lives at a time, so that objects of different scopes never read each
 /// other's options.
@@ -85,17 +87,20 @@ thread_local! {
 pub struct OptionsScope {
     /// The key of the prefix in [`LIVE`].
     key: String,
-    /// The full names of the options set (`-prefix_name`) and their previous values, as [`get`]
-    /// returned them.
-    previous: Vec<(String, Option<String>)>,
+    /// The full names (`-prefix_name`) of the options the scope set, which were not in the
+    /// database before.
+    set: Vec<String>,
     _not_send: PhantomData<*const ()>,
 }
 
 impl OptionsScope {
-    /// Sets the options of `texts` under `prefix`: each text is an options string as on the
-    /// command line (for example `-ksp_type cg -ksp_monitor`, read by `PetscOptionsInsertString`,
-    /// so `-options_file` works too), and a later text overrides the options of an earlier one.
-    /// `-ksp_type cg` under the prefix `u_` sets `-u_ksp_type cg`.
+    /// Sets the options of `texts` under `prefix`, each unless it is in the database already:
+    /// each text is an options string as on the command line (for example `-ksp_type cg
+    /// -ksp_monitor`, read by `PetscOptionsInsertString`, so `-options_file` works too), and a
+    /// later text overrides the options of an earlier one. `-ksp_type cg` under the prefix `u_`
+    /// sets `-u_ksp_type cg`, unless `-u_ksp_type` is set (option names are case insensitive).
+    /// So the order of precedence, lowest first, is: the texts in order, then the options in
+    /// the database (the command line).
     ///
     /// Errors: `prefix` does not start with a letter or has characters other than ASCII letters,
     /// digits and `_`, (`PETSC_ERR_ARG_WRONG`); a scope of `prefix` is alive
@@ -125,15 +130,17 @@ impl OptionsScope {
         LIVE.with(|live| live.borrow_mut().insert(key.clone()));
         let mut scope = OptionsScope {
             key,
-            previous: Vec::with_capacity(options.len()),
+            set: Vec::with_capacity(options.len()),
             _not_send: PhantomData,
         };
-        // On an error, dropping the scope restores the options set so far.
+        // On an error, dropping the scope removes the options set so far.
         for (name, value) in options {
             let name = format!("-{name}");
-            let previous = get(&name)?;
+            if get(&name)?.is_some() {
+                continue;
+            }
             set(&name, value.as_deref())?;
-            scope.previous.push((name, previous));
+            scope.set.push(name);
         }
         Ok(scope)
     }
@@ -142,9 +149,9 @@ impl OptionsScope {
 impl Drop for OptionsScope {
     fn drop(&mut self) {
         if alive() {
-            for (name, previous) in self.previous.iter().rev() {
-                // Nothing to report an error to; the other options are still restored.
-                let _ = restore(name, previous.as_deref());
+            for name in &self.set {
+                // Nothing to report an error to; the other options are still removed.
+                let _ = clear(name);
             }
         }
         LIVE.with(|live| live.borrow_mut().remove(&self.key));

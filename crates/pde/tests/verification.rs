@@ -345,6 +345,38 @@ fn user_options_override_the_defaults() {
 }
 
 #[test]
+fn command_line_options_override_the_defaults_and_the_caller() {
+    // A loose tolerance from the command line, against the caller's 1e-12 and the default 1e-10.
+    let p = Petsc::init(&["-u_ksp_rtol", "1e-1"]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let iterations = |rtol: &str| {
+        let mut problem = Problem::new(
+            &mesh,
+            &field(D, K),
+            &fixed(0.1, 0.1),
+            &ceed(),
+            "-ksp_rtol 1e-12",
+        )
+        .unwrap();
+        assert_eq!(p.option("-u_ksp_rtol").unwrap().as_deref(), Some(rtol));
+        problem.set_initial_condition(phi).unwrap();
+        problem.step_to(0.1).unwrap();
+        problem.linear_iterations().unwrap()
+    };
+    let loose = iterations("1e-1");
+    // The problem leaves the command line option as it was.
+    assert_eq!(p.option("-u_ksp_rtol").unwrap().as_deref(), Some("1e-1"));
+    // Without it, the caller's option holds over the default.
+    p.clear_option("-u_ksp_rtol").unwrap();
+    let tight = iterations("1e-12");
+    assert_eq!(p.option("-u_ksp_rtol").unwrap(), None);
+    assert!(
+        loose < tight,
+        "{loose} iterations at 1e-1, {tight} at 1e-12"
+    );
+}
+
+#[test]
 fn steps_end_at_the_requested_times() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = unit_square(&p, 2);
