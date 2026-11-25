@@ -46,7 +46,10 @@ tar xzf "$SRC/flex-$FLEX_VERSION.tar.gz" -C "$FLEX/src" --strip-components=1
 
 # PETSc with its own BLAS/LAPACK and the PT-Scotch graph partitioner (which needs bison and flex
 # to build), no C++ or Fortran. Every package comes from a pinned tarball in deps/src (fetch.sh).
-# PT-Scotch is compiled with PETSc's C flags, so with COPTFLAGS.
+# PT-Scotch is compiled with PETSc's C flags, so with COPTFLAGS. Its CMake build would add threads
+# (THREADS=ON by default, despite PETSc's -USCOTCH_PTHREAD), whose results may depend on the
+# scheduling: THREADS=OFF, and SCOTCH_DETERMINISTIC=FULL for its deterministic algorithms with a
+# fixed random seed. Then a partition depends on the graph and the number of processes only.
 rm -rf "$ROOT/deps/build/petsc-$MODE"
 cp -a "$ROOT/deps/src/petsc" "$ROOT/deps/build/petsc-$MODE"
 (
@@ -56,12 +59,22 @@ cp -a "$ROOT/deps/src/petsc" "$ROOT/deps/build/petsc-$MODE"
   ./configure --prefix="$PREFIX" --with-cc=mpicc --with-cxx=0 --with-fc=0 \
     --download-f2cblaslapack="$SRC/f2cblaslapack-$F2CBLASLAPACK_VERSION.tar.gz" \
     --download-ptscotch="$SRC/scotch-v$PTSCOTCH_VERSION.tar.gz" \
+    --download-ptscotch-cmake-arguments="-DTHREADS=OFF -DSCOTCH_DETERMINISTIC=FULL" \
     --download-bison="$SRC/bison-$BISON_VERSION.tar.gz" \
     --with-shared-libraries=1 \
     --with-debugging="$DEBUGGING" COPTFLAGS="$FLAGS"
   make -j"$JOBS" all
   make install
 )
+
+# PT-Scotch built without threads: none of its libraries imports pthread_create.
+for lib in "$PREFIX"/lib/lib*scotch*.so; do
+  symbols="$(nm -D --undefined-only "$lib")"
+  if grep -qw pthread_create <<<"$symbols"; then
+    echo "error: $lib imports pthread_create: PT-Scotch was built with threads" >&2
+    exit 1
+  fi
+done
 
 cat > "$PREFIX/env.sh" <<ENV
 export PETSC_DIR="$PREFIX"

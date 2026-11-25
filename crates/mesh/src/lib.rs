@@ -38,6 +38,14 @@ const USE_REGIONS: &str = "-dm_plex_gmsh_use_regions";
 /// process together, so few faces are shared between processes (a small edge cut, little
 /// communication). Without it, PETSc's `simple` partitioner splits the cells by their number in
 /// the file, which scatters them. The option `-petscpartitioner_type` selects another.
+///
+/// A PT-Scotch partition is reproducible: the same mesh file on the same number of processes gives
+/// the same partition, in every run and every time in a run. That takes PT-Scotch built without
+/// threads (`THREADS=OFF`, whose routines may depend on the scheduling) and with its
+/// deterministic algorithms with a fixed random seed (`SCOTCH_DETERMINISTIC=FULL`), as
+/// `scripts/deps/build-native.sh` builds it, and its random generator reset before each
+/// partitioning ([`Petsc::reset_partitioner_random`]). The environment variables
+/// `SCOTCH_DETERMINISTIC=0` or `SCOTCH_RANDOM_FIXED_SEED=0` would undo the build options.
 pub const PARTITIONER: &str = "ptscotch";
 
 /// The partitioner without [`PARTITIONER`].
@@ -165,8 +173,8 @@ fn read(petsc: &Petsc, comm: &Comm, path: &Path) -> petsc::Result<Dm> {
 
 /// Sets the partitioner of `dm`: [`PARTITIONER`] if PETSc has it, else [`FALLBACK_PARTITIONER`],
 /// unless the option `-petscpartitioner_type` selects another. Resets PT-Scotch's random
-/// generator, so that the partition depends on the mesh and the number of processes only, not on
-/// earlier partitionings in the process. Collective.
+/// generator, so that the partition does not depend on earlier partitionings in the process (see
+/// [`PARTITIONER`] for what else a reproducible partition takes). Collective.
 fn select_partitioner(petsc: &Petsc, dm: &Dm) -> petsc::Result<()> {
     petsc.reset_partitioner_random();
     let partitioner = dm.partitioner()?;

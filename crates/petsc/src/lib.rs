@@ -171,6 +171,11 @@ impl Petsc {
     /// (`SCOTCH_randomReset`), so that the next partitioning gives the same partition as the
     /// first in this process; does nothing if PETSc has no PT-Scotch. The generator is global and
     /// otherwise continues from one partitioning to the next. Call it on every process.
+    ///
+    /// The reset alone makes partitions reproducible only with a PT-Scotch built without threads
+    /// and with its deterministic algorithms (`THREADS=OFF`, `SCOTCH_DETERMINISTIC=FULL`, as
+    /// `scripts/deps/build-native.sh` builds it): then the partition depends on the graph and the
+    /// number of processes only.
     pub fn reset_partitioner_random(&self) {
         // SAFETY: no arguments; PT-Scotch is initialized lazily.
         unsafe { sys::petsc_sys_ptscotch_random_reset() };
