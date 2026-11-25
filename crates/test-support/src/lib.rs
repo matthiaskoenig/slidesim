@@ -13,7 +13,11 @@
 //!     test_support::parallel(2, &["mpi_world_has_the_expected_size", "some_test"]);
 //! }
 //! ```
+//!
+//! For other programs (a binary of the workspace, or a test expected to fail), [`Mpiexec`] makes
+//! the `mpiexec` command and [`run_with_timeout`] runs it, a hang killed after a timeout.
 
+use std::ffi::OsStr;
 use std::io::{ErrorKind, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
@@ -45,32 +49,21 @@ pub fn parallel_with_env(ranks: usize, tests: &[&str], env: &[(&str, &str)]) {
         // A run under mpiexec: do not start runs from it.
         return;
     }
-    let version = match Command::new("mpiexec").arg("--version").output() {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            eprintln!("skipped: no mpiexec");
-            return;
-        }
-        Err(e) => panic!("cannot run mpiexec: {e}"),
+    let Some(mpiexec) = Mpiexec::find() else {
+        eprintln!("skipped: no mpiexec");
+        return;
     };
-    let open_mpi = version.contains("Open MPI") || version.contains("OpenRTE");
     let exe = std::env::current_exe().unwrap();
     for test in tests {
-        let mut cmd = Command::new("mpiexec");
-        if open_mpi {
-            // More processes than cores is fine for the small meshes of tests.
-            cmd.arg("--oversubscribe");
-        }
-        cmd.args(["-n", &ranks.to_string()])
-            .arg(&exe)
-            .args(["--exact", test, "--test-threads", "1", "--color", "never"])
+        let mut cmd = mpiexec.command(ranks, &exe);
+        cmd.args(["--exact", test, "--test-threads", "1", "--color", "never"])
             .env(MPI_RANKS, ranks.to_string())
-            .envs(env.iter().copied())
-            // Its own process group, so that a timeout kills mpiexec and every process.
-            .process_group(0)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let (status, stdout, stderr) = run_with_timeout(cmd, PARALLEL_TIMEOUT);
+            .envs(env.iter().copied());
+        let Run {
+            status,
+            stdout,
+            stderr,
+        } = run_with_timeout(cmd, PARALLEL_TIMEOUT);
         let output = format!("{stdout}\n{stderr}");
         let status = status.unwrap_or_else(|| {
             panic!("{test} on {ranks} processes timed out after {PARALLEL_TIMEOUT:?}:\n{output}")
@@ -89,10 +82,63 @@ pub fn parallel_with_env(ranks: usize, tests: &[&str], env: &[(&str, &str)]) {
     }
 }
 
-/// Runs `cmd` (in its own process group) for at most `timeout`: its exit status, or `None` if it
-/// was killed (with its whole process group) for taking longer; and its stdout and stderr.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> (Option<ExitStatus>, String, String) {
-    let mut child = cmd.spawn().unwrap();
+/// The `mpiexec` of the system, for runs of any program on several processes.
+#[derive(Debug, Clone, Copy)]
+pub struct Mpiexec {
+    /// Open MPI, which refuses more processes than cores unless told otherwise.
+    open_mpi: bool,
+}
+
+impl Mpiexec {
+    /// The `mpiexec` on the `PATH`, or `None` if there is none (the caller skips its test).
+    /// Panics if it is there but cannot run.
+    pub fn find() -> Option<Mpiexec> {
+        match Command::new("mpiexec").arg("--version").output() {
+            Ok(out) => {
+                let version = String::from_utf8_lossy(&out.stdout);
+                Some(Mpiexec {
+                    open_mpi: version.contains("Open MPI") || version.contains("OpenRTE"),
+                })
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => panic!("cannot run mpiexec: {e}"),
+        }
+    }
+
+    /// `mpiexec -n ranks program`, in its own process group (so that [`run_with_timeout`] can
+    /// kill mpiexec and every process). Arguments of `program` and the environment are for the
+    /// caller to add.
+    pub fn command(&self, ranks: usize, program: impl AsRef<OsStr>) -> Command {
+        let mut cmd = Command::new("mpiexec");
+        if self.open_mpi {
+            // More processes than cores is fine for the small meshes of tests.
+            cmd.arg("--oversubscribe");
+        }
+        cmd.args(["-n", &ranks.to_string()])
+            .arg(program)
+            .process_group(0);
+        cmd
+    }
+}
+
+/// The result of [`run_with_timeout`].
+#[derive(Debug)]
+pub struct Run {
+    /// The exit status, or `None` if the run was killed for taking too long.
+    pub status: Option<ExitStatus>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs `cmd` for at most `timeout`, with its stdout and stderr piped and collected. If it takes
+/// longer, it is killed: with its whole process group if `cmd` was made the leader of one
+/// (`process_group(0)`, as [`Mpiexec::command`] does), else alone.
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Run {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("cannot run {cmd:?}: {e}"));
     let read = |mut pipe: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut text = String::new();
@@ -108,16 +154,22 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> (Option<ExitStatus>,
             break Some(status);
         }
         if start.elapsed() > timeout {
-            // The group id is the pid of mpiexec (`process_group(0)`).
+            // A leader's group id is its pid; killing a group which does not exist fails, so
+            // the child alone is killed as well.
             let group = format!("-{}", child.id());
-            Command::new("kill")
+            let _ = Command::new("kill")
                 .args(["-KILL", "--", &group])
-                .status()
-                .unwrap();
+                .stderr(Stdio::null())
+                .status();
+            let _ = child.kill();
             child.wait().unwrap();
             break None;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    (status, stdout.join().unwrap(), stderr.join().unwrap())
+    Run {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
 }

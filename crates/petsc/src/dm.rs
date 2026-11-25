@@ -5,7 +5,10 @@ use std::ops::Range;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use crate::{AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, alive, c_string, chk, sys, to_int};
+use crate::{
+    AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, alive, c_string, chk, string_from, sys,
+    to_int,
+};
 
 /// A mesh point (cell, face, edge or vertex) of a DMPlex.
 pub type Point = sys::PetscInt;
@@ -533,6 +536,81 @@ impl Dm {
         chk!(unsafe { sys::PetscSectionGetOffset(section, point, &mut offset) });
         let (offset, dof) = (offset as usize, dof as usize);
         Ok(offset..offset + dof)
+    }
+
+    /// Names the field `field` of the local section `name`, and its components `components`, one
+    /// name each (`PetscSectionSetFieldName`, `PetscSectionSetComponentName`): for viewers, which
+    /// name data after them (a VTK viewer names point data `<vector><field>.<component>`).
+    /// Collective on the first call, which creates the section. Errors for a field which does
+    /// not exist, or a number of names other than the number of components.
+    pub fn set_field_names(&mut self, field: usize, name: &str, components: &[&str]) -> Result<()> {
+        let section = self.local_section()?;
+        let field_int = to_int(field, "field")?;
+        let c_name = c_string(name, "field name")?;
+        // SAFETY: a valid section; PETSc checks the field number and copies the name.
+        chk!(unsafe { sys::PetscSectionSetFieldName(section, field_int, c_name.as_ptr()) });
+        let mut n = 0;
+        // SAFETY: a valid section and field (checked above).
+        chk!(unsafe { sys::PetscSectionGetFieldComponents(section, field_int, &mut n) });
+        if components.len() != n as usize {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_SIZ,
+                format!(
+                    "{} component names for field {field}, which has {n} components",
+                    components.len()
+                ),
+            ));
+        }
+        for (c, component) in components.iter().enumerate() {
+            let c_component = c_string(component, "component name")?;
+            // SAFETY: a valid section, field and component; PETSc copies the name.
+            chk!(unsafe {
+                sys::PetscSectionSetComponentName(
+                    section,
+                    field_int,
+                    to_int(c, "component")?,
+                    c_component.as_ptr(),
+                )
+            });
+        }
+        Ok(())
+    }
+
+    /// The name of the field `field` of the local section and the names of its components (see
+    /// [`Dm::set_field_names`]). Collective on the first call, which creates the section.
+    pub fn field_names(&self, field: usize) -> Result<(String, Vec<String>)> {
+        let section = self.local_section()?;
+        let field = to_int(field, "field")?;
+        let mut name: *const c_char = null();
+        // SAFETY: a valid section; PETSc checks the field number; `name` receives a string of
+        // the section.
+        chk!(unsafe { sys::PetscSectionGetFieldName(section, field, &mut name) });
+        // SAFETY: null or a NUL terminated string of the section, valid for this call.
+        let name = unsafe { string_from(name) }.unwrap_or_default();
+        let mut n = 0;
+        // SAFETY: a valid section and field.
+        chk!(unsafe { sys::PetscSectionGetFieldComponents(section, field, &mut n) });
+        let components = (0..n)
+            .map(|c| {
+                let mut component: *const c_char = null();
+                // SAFETY: a valid section, field and component.
+                chk!(unsafe {
+                    sys::PetscSectionGetComponentName(section, field, c, &mut component)
+                });
+                // SAFETY: null or a NUL terminated string of the section, valid for this call.
+                Ok(unsafe { string_from(component) }.unwrap_or_default())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((name, components))
+    }
+
+    /// The local section (`DMGetLocalSection`), borrowed from the DM: valid while the DM lives
+    /// and its fields do not change. Collective on the first call, which creates it.
+    fn local_section(&self) -> Result<sys::PetscSection> {
+        let mut section = null_mut();
+        // SAFETY: the section is borrowed from the DM.
+        chk!(unsafe { sys::DMGetLocalSection(self.raw, &mut section) });
+        Ok(section)
     }
 
     /// The number of dofs of `point` constrained by essential boundary conditions

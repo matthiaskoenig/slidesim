@@ -228,3 +228,34 @@ fn schemas_match_load() {
         assert!(Scene::load(data(f)).is_err(), "load accepts {f}");
     }
 }
+
+/// The studies of `testdata/studies` (`<name>/study.json`, run end to end by the `slidesim`
+/// tests) are valid: by the
+/// schemas, and by `Study::load` and `Scene::load`, which resolve the scene and the mesh.
+#[test]
+fn example_studies_are_valid() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies");
+    let validates = |schema: serde_json::Value, path: &Path| {
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        jsonschema::validator_for(&schema).unwrap().is_valid(&doc)
+    };
+    let mut studies: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    studies.sort();
+    assert!(!studies.is_empty());
+    for study in studies {
+        let study_path = study.join("study.json");
+        let study = study.display();
+        assert!(validates(contracts::schema_study(), &study_path), "{study}");
+        let loaded = Study::load(&study_path).unwrap();
+        assert!(
+            validates(contracts::schema_scene(), &loaded.scene),
+            "{study}"
+        );
+        let scene = Scene::load(&loaded.scene).unwrap();
+        assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
+    }
+}

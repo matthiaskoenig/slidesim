@@ -440,3 +440,33 @@ fn petsc_dropped_during_mult_stays_initialized() {
     assert_eq!(y.norm2().unwrap(), 126.0_f64.sqrt());
     Ksp::create(&comm).unwrap();
 }
+
+/// Set in the run of [`abort_ends_every_process`] under `mpiexec`.
+const ABORT_RUN: &str = "SLIDESIM_TEST_ABORT_RUN";
+
+#[test]
+fn abort_ends_every_process() {
+    if std::env::var_os(ABORT_RUN).is_some() {
+        // Process 0 aborts, while the others wait for it in a collective call.
+        let p = Petsc::init(&[]).unwrap();
+        let comm = p.comm();
+        if comm.rank() == 0 {
+            p.abort_world(3);
+        }
+        comm.sum_real(1.0).unwrap();
+        panic!("process {} left the collective call", comm.rank());
+    }
+    let Some(mpiexec) = test_support::Mpiexec::find() else {
+        eprintln!("skipped: no mpiexec");
+        return;
+    };
+    let mut cmd = mpiexec.command(2, std::env::current_exe().unwrap());
+    cmd.args(["--exact", "abort_ends_every_process", "--test-threads", "1"])
+        .env(ABORT_RUN, "1")
+        .env(test_support::MPI_RANKS, "2");
+    let run = test_support::run_with_timeout(cmd, std::time::Duration::from_secs(60));
+    let output = format!("{}\n{}", run.stdout, run.stderr);
+    let status = run.status.unwrap_or_else(|| panic!("hangs:\n{output}"));
+    assert!(!status.success(), "{output}");
+    assert!(!output.contains("left the collective call"), "{output}");
+}

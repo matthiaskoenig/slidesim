@@ -3,9 +3,10 @@
 //!
 //! Native targets link the shared `libpetsc.so`, and MPI as `mpicc -show` reports it (the Rust
 //! code calls MPI directly, and PETSc's pkg-config file does not list MPI). At run time
-//! `LD_LIBRARY_PATH` (set by `env.sh`) finds `libpetsc.so`: an rpath from here would not help,
-//! since `cargo:rustc-link-arg` of a build script applies to the targets of its own package only,
-//! not to the crates depending on it.
+//! `LD_LIBRARY_PATH` (set by `env.sh`) finds `libpetsc.so` for tests: an rpath from here would
+//! not help, since `cargo:rustc-link-arg` of a build script applies to the targets of its own
+//! package only, not to the crates depending on it. The `slidesim` binary sets its own rpath
+//! (`crates/slidesim/build.rs`).
 //!
 //! bindgen uses wasi-sdk's libclang (`$WASI_SDK_PATH/lib`, default `~/opt/wasi-sdk`) and its
 //! resource directory: one clang for the bindings of every target, and the system libclang may
@@ -115,7 +116,7 @@ fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String]) {
         // The PETSc API: everything declared in PETSc's headers (`petsc*.h`), plus the MPI
         // functions used directly and the shim.
         .allowlist_file(r".*/petsc[^/]*\.h")
-        .allowlist_function("MPI_(Comm_rank|Comm_size|Allreduce)")
+        .allowlist_function("MPI_(Comm_rank|Comm_size|Allreduce|Abort)")
         .allowlist_function("petsc_sys_.*")
         .prepend_enum_name(false)
         .layout_tests(false)

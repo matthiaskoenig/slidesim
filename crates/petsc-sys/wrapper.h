@@ -3,6 +3,8 @@
 
 /* PETSC_COMM_SELF (MPI_COMM_SELF is a macro whose value depends on the MPI implementation). */
 MPI_Comm petsc_sys_comm_self(void);
+/* MPI_COMM_WORLD (a macro too), for MPI_Abort. */
+MPI_Comm petsc_sys_comm_world(void);
 
 /* MPI_Allreduce arguments: MPIU_INT, MPIU_REAL, MPI_SUM, MPI_MAX. */
 MPI_Datatype petsc_sys_mpiu_int(void);

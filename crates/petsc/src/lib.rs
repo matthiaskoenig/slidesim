@@ -34,6 +34,7 @@ mod pc;
 mod snes;
 mod ts;
 mod vector;
+mod viewer;
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::marker::PhantomData;
@@ -55,6 +56,7 @@ pub use pc::Pc;
 pub use snes::Snes;
 pub use ts::{ExactFinalTime, Implicit, ProblemType, Ts};
 pub use vector::{AsVec, AsVecMut, VecMut, VecRef, Vector};
+pub use viewer::Viewer;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -138,6 +140,16 @@ impl Petsc {
     /// `PETSC_COMM_WORLD`.
     pub fn comm(&self) -> Comm {
         Comm::new(unsafe { sys::PETSC_COMM_WORLD })
+    }
+
+    /// Ends every process of `MPI_COMM_WORLD` with the exit code `code` (`MPI_Abort`), without
+    /// finalizing PETSc. For an error on some processes only, which would otherwise leave the
+    /// others waiting in a collective call forever; with one process, return the error instead.
+    pub fn abort_world(&self, code: i32) -> ! {
+        // SAFETY: MPI is initialized while `self` lives. MPI_Abort does not return; if an MPI
+        // implementation does, this process exits all the same.
+        unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
+        std::process::exit(code)
     }
 
     /// `PETSC_COMM_SELF`: this process alone.

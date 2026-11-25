@@ -439,6 +439,42 @@ fn uniform_initial_and_source_and_dirichlet_values() {
     problem.step_to(1.0).unwrap();
     let error = problem.l2_error(|_, _| 2.0).unwrap();
     assert!(error < 1e-10, "{error}");
+    // On the unit square: the norm of 2 is 2.
+    let norm = problem.l2_norm().unwrap();
+    assert!((norm - 2.0).abs() < 1e-10, "{norm}");
+}
+
+#[test]
+fn local_solution_has_the_dirichlet_values() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    // u = 1 inside, Dirichlet 3 on the left side only.
+    let mut field = natural_field(
+        0.0,
+        vec![BoundarySpec {
+            tag: "left".to_string(),
+            condition: Condition::Dirichlet { value: 3.0 },
+        }],
+    );
+    field.initial = 1.0;
+    let problem = Problem::new(&mesh, &field, &fixed(1.0, 0.25), &ceed(), ACCURATE).unwrap();
+    let local = problem.local_solution().unwrap();
+    // Named for viewers: the point data of a VTK viewer is `u.mM`.
+    assert_eq!(local.name().unwrap(), "");
+    assert_eq!(
+        problem.discretization().dm().field_names(0).unwrap(),
+        ("u".to_string(), vec!["mM".to_string()])
+    );
+    let disc = problem.discretization();
+    let values = local.with_array(<[f64]>::to_vec).unwrap();
+    assert_eq!(values.len(), disc.node_coordinates().len());
+    for (u, [x, _]) in values.iter().zip(disc.node_coordinates()) {
+        let expected = if *x == 0.0 { 3.0 } else { 1.0 };
+        assert_eq!(*u, expected, "at x = {x}");
+    }
+    // The norm with the Dirichlet values: a P1 ramp from 3 to 1 in the cells along the side.
+    let norm = problem.l2_norm().unwrap();
+    assert!(norm > 1.0 && norm < 3.0, "{norm}");
 }
 
 #[test]
@@ -496,7 +532,7 @@ fn field_id_must_be_an_options_prefix() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 7] = [
+const PARALLEL_TESTS: [&str; 8] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
@@ -504,6 +540,7 @@ const PARALLEL_TESTS: [&str; 7] = [
     "fixed_steps_keep_their_size_after_requested_times",
     "spatial_order_p1_on_refinements_2_and_3",
     "uniform_initial_and_source_and_dirichlet_values",
+    "local_solution_has_the_dirichlet_values",
 ];
 
 #[test]

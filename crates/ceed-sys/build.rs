@@ -2,8 +2,8 @@
 //! (`deps/install/<config>/env.sh` sets it).
 //!
 //! Native targets link the shared `libceed.so`, found through pkg-config (`ceed.pc` of
-//! `CEED_DIR`). At run time `LD_LIBRARY_PATH` (set by `env.sh`) finds it, as for PETSc (see
-//! `crates/petsc-sys/build.rs`).
+//! `CEED_DIR`). At run time `LD_LIBRARY_PATH` (set by `env.sh`) finds it for tests, and the
+//! rpath of the `slidesim` binary for it, as for PETSc (see `crates/petsc-sys/build.rs`).
 //!
 //! bindgen uses wasi-sdk's libclang (`$WASI_SDK_PATH/lib`, default `~/opt/wasi-sdk`) and its
 //! resource directory: one clang for the bindings of every target, and the system libclang may

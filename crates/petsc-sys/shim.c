@@ -2,6 +2,7 @@
 #include <petsc.h>
 
 MPI_Comm petsc_sys_comm_self(void) { return PETSC_COMM_SELF; }
+MPI_Comm petsc_sys_comm_world(void) { return MPI_COMM_WORLD; }
 
 /* Data types and reduction operations of MPI_Allreduce (Open MPI defines them as addresses of
    its globals, MPICH as casted integers). */

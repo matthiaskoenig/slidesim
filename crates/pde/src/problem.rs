@@ -27,6 +27,10 @@ const ERRORS_IF_NOT_CONVERGED: &str =
 /// where PETSc's default (`1e-5`) would not.
 const TOLERANCE: &str = "-ksp_rtol 1e-10";
 
+/// The unit of concentrations (of the contracts): the name of the component of the field, for
+/// viewers.
+const CONCENTRATION_UNIT: &str = "mM";
+
 /// A change of the shift of the Jacobian, relative to the shift, beyond which the
 /// preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a fixed step computes
 /// shifts which differ in the last bits).
@@ -141,6 +145,11 @@ impl Problem {
         let essential: Vec<&str> = dirichlet.iter().map(|(tag, _)| tag.as_str()).collect();
         let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
         let disc = levels.last().expect("a mesh has a level").clone();
+        // For viewers of the solution (see `Problem::local_solution`); the clone is a handle of
+        // the same DM.
+        disc.dm()
+            .clone()
+            .set_field_names(0, &field.id, &[CONCENTRATION_UNIT])?;
 
         let (d, k) = (field.diffusion, field.decay);
         let mut source = SourceField::new(&disc)?;
@@ -357,6 +366,23 @@ impl Problem {
         Ok(self.disc.dm().comm().sum_real(local)?.sqrt())
     }
 
+    /// The L2 norm of the solution at the current time (in mM*um), by the quadrature of the
+    /// discretization: [`Problem::l2_error`] against zero. Collective.
+    pub fn l2_norm(&self) -> Result<f64> {
+        self.l2_error(|_, _| 0.0)
+    }
+
+    /// The solution as a new local vector of [`Problem::discretization`]: the entries of the
+    /// local cells, ghosts and Dirichlet values included. For viewers: the field of the DM is
+    /// named after the field id and its component after the unit, `mM`, and the vector has an
+    /// empty name, so that a VTK viewer names its point data `<field id>.mM`. Collective.
+    pub fn local_solution(&self) -> Result<Vector> {
+        let mut local = local_with_dirichlet(&self.disc, &self.dirichlet)?;
+        self.disc.dm().global_to_local(&self.u, &mut local)?;
+        local.set_name("")?;
+        Ok(local)
+    }
+
     /// The integral of the solution over the domain (in mM*um^2). Collective.
     pub fn total_mass(&self) -> Result<f64> {
         let values = self.point_values()?;
@@ -370,8 +396,7 @@ impl Problem {
 
     /// The solution at the quadrature points of the local cells, Dirichlet values included.
     fn point_values(&self) -> Result<Vec<f64>> {
-        let mut local = local_with_dirichlet(&self.disc, &self.dirichlet)?;
-        self.disc.dm().global_to_local(&self.u, &mut local)?;
+        let local = self.local_solution()?;
         let mut values = vec![0.0; self.disc.num_quadrature_points()];
         self.values.apply(&local, &mut values)?;
         Ok(values)

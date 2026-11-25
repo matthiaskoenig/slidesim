@@ -1,11 +1,12 @@
 //! `Vec`: PETSc vectors, owned ([`Vector`]) or lent by PETSc to a callback ([`VecRef`],
 //! [`VecMut`]).
 
+use std::ffi::c_char;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
 
-use crate::{Comm, Dm, Petsc, Result, alive, chk, sys, to_int};
+use crate::{Comm, Dm, Petsc, Result, Viewer, alive, c_string, chk, string_from, sys, to_int};
 
 mod sealed {
     pub trait Sealed {}
@@ -97,6 +98,14 @@ impl Vector {
         Ok(Vector { raw })
     }
 
+    /// Names the vector (`PetscObjectSetName`), for example for the data a viewer writes.
+    pub fn set_name(&mut self, name: &str) -> Result<()> {
+        let name = c_string(name, "vector name")?;
+        // SAFETY: a valid vector and a NUL terminated name, which PETSc copies.
+        chk!(unsafe { sys::PetscObjectSetName(self.raw as sys::PetscObject, name.as_ptr()) });
+        Ok(())
+    }
+
     /// A local vector of `dm`, with ghost points (`DMCreateLocalVector`).
     pub fn create_local(dm: &Dm) -> Result<Vector> {
         let mut raw = null_mut();
@@ -146,6 +155,23 @@ macro_rules! read_ops {
             let mut dot = 0.0;
             chk!(unsafe { sys::VecDot(self.raw, y.as_raw(), &mut dot) });
             Ok(dot)
+        }
+
+        /// The name of the vector (`PetscObjectGetName`); PETSc names an unnamed one `Vec_<n>`.
+        pub fn name(&self) -> Result<String> {
+            let mut name: *const c_char = std::ptr::null();
+            // SAFETY: a valid vector; `name` receives a string of the vector.
+            chk!(unsafe { sys::PetscObjectGetName(self.raw as sys::PetscObject, &mut name) });
+            // SAFETY: null or a NUL terminated string of the vector, valid for this call.
+            Ok(unsafe { string_from(name) }.unwrap_or_default())
+        }
+
+        /// Views the vector with `viewer` (`VecView`): for a [`Viewer::vtk`], queues it to be
+        /// written by [`Viewer::flush`]. Collective.
+        pub fn view(&self, viewer: &mut Viewer) -> Result<()> {
+            // SAFETY: a valid vector and viewer.
+            chk!(unsafe { sys::VecView(self.raw, viewer.as_raw()) });
+            Ok(())
         }
 
         /// Calls `f` with the entries on this process.
