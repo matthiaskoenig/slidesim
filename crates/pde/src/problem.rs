@@ -222,21 +222,14 @@ impl Problem {
             }
         }
         // Before the first step: the flow enters only where the field is fixed. The flows are the
-        // same on every process. A tag whose flow is below `INFLOW_THRESHOLD` of the largest one
-        // counts as without flow: its sign is rounding, which may differ between process
-        // counts.
+        // same on every process.
         if let Some(flow) = flow {
-            let largest = flow
-                .tag_flows()
-                .iter()
-                .fold(0.0_f64, |m, (_, q)| m.max(q.abs()));
-            for (tag, q) in flow.tag_flows() {
-                if *q > INFLOW_THRESHOLD * largest && !dirichlet.iter().any(|(t, _)| t == tag) {
-                    return Err(PdeError::Inflow {
-                        tag: tag.clone(),
-                        field: field.id.clone(),
-                    });
-                }
+            let fixed: Vec<&str> = dirichlet.iter().map(|(t, _)| t.as_str()).collect();
+            if let Some(tag) = inflow_without_dirichlet(flow.tag_flows(), &fixed) {
+                return Err(PdeError::Inflow {
+                    tag: tag.to_string(),
+                    field: field.id.clone(),
+                });
             }
         }
         let conditions = field
@@ -601,6 +594,17 @@ impl Problem {
     }
 }
 
+/// The first tag of `flows` (net flows into the domain by tag) with inflow which `fixed` does not
+/// list. A tag whose flow is at most `INFLOW_THRESHOLD` of the largest one counts as without
+/// flow: its sign is rounding, which may differ between process counts and builds.
+fn inflow_without_dirichlet<'a>(flows: &'a [(String, f64)], fixed: &[&str]) -> Option<&'a str> {
+    let largest = flows.iter().fold(0.0_f64, |m, (_, q)| m.max(q.abs()));
+    flows
+        .iter()
+        .find(|(tag, q)| *q > INFLOW_THRESHOLD * largest && !fixed.contains(&tag.as_str()))
+        .map(|(tag, _)| tag.as_str())
+}
+
 /// The options prefix of the field `id`: `<id>_`.
 fn options_prefix(id: &str) -> Result<String> {
     let valid = id.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -798,5 +802,37 @@ impl Implicit for Equation {
             multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
         }
         Ok(!same)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inflow_without_dirichlet;
+
+    fn flows(values: &[(&str, f64)]) -> Vec<(String, f64)> {
+        values.iter().map(|&(t, q)| (t.to_string(), q)).collect()
+    }
+
+    /// Rounding of either sign is no inflow; a flow above the threshold is, fixed or not.
+    #[test]
+    fn rounding_is_not_inflow() {
+        let rounding = flows(&[
+            ("left", 1.0),
+            ("right", -1.0),
+            ("top", 2e-12),
+            ("bottom", -5e-12),
+        ]);
+        assert_eq!(inflow_without_dirichlet(&rounding, &["left"]), None);
+        assert_eq!(inflow_without_dirichlet(&rounding, &[]), Some("left"));
+        // Relative to the largest flow, whatever its scale.
+        let scaled = flows(&[("left", 1e6), ("right", -1e6), ("top", 1e-5)]);
+        assert_eq!(inflow_without_dirichlet(&scaled, &["left"]), None);
+        // Above the threshold: inflow.
+        let small = flows(&[("left", 1.0), ("right", -1.0), ("top", 1e-9)]);
+        assert_eq!(inflow_without_dirichlet(&small, &["left"]), Some("top"));
+        assert_eq!(inflow_without_dirichlet(&small, &["left", "top"]), None);
+        // No flow at all: no inflow.
+        let none = flows(&[("left", 0.0), ("right", 0.0)]);
+        assert_eq!(inflow_without_dirichlet(&none, &[]), None);
     }
 }
