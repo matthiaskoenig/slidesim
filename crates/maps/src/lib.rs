@@ -112,25 +112,34 @@ impl Map {
                 rr.start as u64..rr.end as u64,
                 cr.start as u64..cr.end as u64,
             ]);
+            // no-value pixels are matched in the array's own precision, before widening
             data = if is_f64 {
-                array
+                let mut v = array
                     .retrieve_array_subset::<Vec<f64>>(&subset)
-                    .map_err(|e| zarr_err(id, e))?
+                    .map_err(|e| zarr_err(id, e))?;
+                if let Some(nv) = spec.no_value {
+                    for p in &mut v {
+                        if *p == nv {
+                            *p = f64::NAN;
+                        }
+                    }
+                }
+                v
             } else {
+                let nv = spec.no_value.map(|nv| nv as f32);
                 array
                     .retrieve_array_subset::<Vec<f32>>(&subset)
                     .map_err(|e| zarr_err(id, e))?
                     .into_iter()
-                    .map(f64::from)
+                    .map(|p| {
+                        if Some(p) == nv {
+                            f64::NAN
+                        } else {
+                            f64::from(p)
+                        }
+                    })
                     .collect()
             };
-            if let Some(nv) = spec.no_value {
-                for v in &mut data {
-                    if *v == nv {
-                        *v = f64::NAN;
-                    }
-                }
-            }
         }
         Ok(Map {
             id: spec.id.clone(),

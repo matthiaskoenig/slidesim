@@ -24,7 +24,7 @@
           ]
         },
         "origin_um": {
-          "description": "Position in um of the corner of the raster the pixel grid starts at (pixel 0, 0).",
+          "description": "Position `[x, y]` in um of the centre of pixel (row 0, col 0); rows run along y, columns\nalong x.",
           "items": {
             "format": "double",
             "type": "number"

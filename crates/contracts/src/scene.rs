@@ -39,7 +39,8 @@ pub struct MapSpec {
     /// Pixel size in um, must be > 0.
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub um_per_px: f64,
-    /// Position in um of the corner of the raster the pixel grid starts at (pixel 0, 0).
+    /// Position `[x, y]` in um of the centre of pixel (row 0, col 0); rows run along y, columns
+    /// along x.
     pub origin_um: [f64; 2],
     /// Pixel value that marks "no data", if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]

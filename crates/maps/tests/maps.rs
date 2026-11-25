@@ -169,3 +169,35 @@ fn tempdir() -> PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
+
+#[test]
+fn float32_no_value_matches_in_f32_precision() {
+    use std::sync::Arc;
+    use zarrs::array::{ArrayBuilder, data_type};
+    let dir = tempdir().join("f32");
+    let store = Arc::new(zarrs::filesystem::FilesystemStore::new(&dir).unwrap());
+    let mut values = vec![1.0f32; 16];
+    values[5] = -9999.9; // row 1, col 1
+    let array = ArrayBuilder::new(vec![4, 4], vec![4, 4], data_type::float32(), 0.0f32)
+        .build(store, "/")
+        .unwrap();
+    array.store_metadata().unwrap();
+    array
+        .store_array_subset(&array.subset_all(), values)
+        .unwrap();
+    let spec = MapSpec {
+        id: "f32map".into(),
+        path: dir.clone(),
+        units: "1".into(),
+        um_per_px: 1.0,
+        origin_um: [0.0, 0.0],
+        no_value: Some(-9999.9),
+    };
+    let map = Map::read(&spec, FULL).unwrap();
+    assert!(matches!(
+        map.sample([1.2, 1.3]),
+        Err(MapError::NoValue { .. })
+    ));
+    assert_eq!(map.sample([2.5, 2.5]).unwrap(), 1.0);
+    std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+}
