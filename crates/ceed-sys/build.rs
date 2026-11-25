@@ -7,7 +7,8 @@
 //!
 //! bindgen uses wasi-sdk's libclang (`$WASI_SDK_PATH/lib`, default `~/opt/wasi-sdk`) and its
 //! resource directory: one clang for the bindings of every target, and the system libclang may
-//! lack its builtin headers.
+//! lack its builtin headers. Without wasi-sdk the build fails, with where it looked
+//! (`crates/petsc-sys/wasi_sdk.rs`).
 //!
 //! Only `-L` and `-l` of the pkg-config link line are used: `ceed.pc` carries the compile flag
 //! `-fopenmp-simd` among its link flags (`Libs.private`), which must not reach the linker.
@@ -19,6 +20,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "../petsc-sys/wasi_sdk.rs"]
+mod wasi_sdk;
 
 fn run(cmd: &str, args: &[&str], envs: &[(&str, String)]) -> String {
     let out = Command::new(cmd)
@@ -110,11 +114,8 @@ fn main() {
     let ceed_dir = PathBuf::from(
         env::var("CEED_DIR").expect("CEED_DIR unset: source deps/install/<config>/env.sh"),
     );
-    let sdk = env::var("WASI_SDK_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env::var("HOME").expect("HOME unset")).join("opt/wasi-sdk")
-        });
+    let sdk = wasi_sdk::locate(env::var_os(wasi_sdk::VAR), env::var_os("HOME"))
+        .unwrap_or_else(|e| panic!("{e}"));
 
     link_native(&ceed_dir);
     let include_dirs = include_dirs_native(&ceed_dir);

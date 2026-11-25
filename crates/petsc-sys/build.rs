@@ -10,7 +10,8 @@
 //!
 //! bindgen uses wasi-sdk's libclang (`$WASI_SDK_PATH/lib`, default `~/opt/wasi-sdk`) and its
 //! resource directory: one clang for the bindings of every target, and the system libclang may
-//! lack its builtin headers.
+//! lack its builtin headers. Without wasi-sdk the build fails, with where it looked
+//! (`wasi_sdk.rs`).
 //!
 //! Only `-L` and `-l` of the pkg-config and `mpicc` link lines are used: anything else there is
 //! a compile flag that must not reach the linker.
@@ -33,6 +34,9 @@ use std::process::Command;
 #[path = "petscvariables.rs"]
 mod petscvariables;
 use petscvariables::Package;
+
+#[path = "wasi_sdk.rs"]
+mod wasi_sdk;
 
 /// C flags of every C file in slidesim (reproducible floating point on every target).
 const C_FLAGS: [&str; 2] = ["-ffp-contract=off", "-fno-fast-math"];
@@ -180,11 +184,8 @@ fn main() {
     let petsc_dir = PathBuf::from(
         env::var("PETSC_DIR").expect("PETSC_DIR unset: source deps/install/<config>/env.sh"),
     );
-    let sdk = env::var("WASI_SDK_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env::var("HOME").expect("HOME unset")).join("opt/wasi-sdk")
-        });
+    let sdk = wasi_sdk::locate(env::var_os(wasi_sdk::VAR), env::var_os("HOME"))
+        .unwrap_or_else(|e| panic!("{e}"));
 
     link_native(&petsc_dir);
     let mut include_dirs = include_dirs_native(&petsc_dir);
