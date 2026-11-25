@@ -1,0 +1,4 @@
+[env]
+# Open MPI's hwloc probes the X server for GPUs and prints "Authorization required" on a desktop
+# session without X authorization; slidesim needs no GL topology.
+HWLOC_COMPONENTS = "-gl"

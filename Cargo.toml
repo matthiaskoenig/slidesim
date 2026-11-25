@@ -1,8 +1,13 @@
 [workspace]
 resolver = "3"
-members = []
+members = ["crates/*"]
 exclude = ["spike"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
+
+[workspace.dependencies]
+bindgen = "0.73.2"
+cc = "1.2.41"
+petsc-sys = { path = "crates/petsc-sys" }

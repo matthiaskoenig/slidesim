@@ -16,6 +16,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Install wasi-sdk
+        # bindgen uses wasi-sdk's libclang for every target (petsc-sys/build.rs).
+        run: |
+          . deps/versions.env
+          WASI_SDK_PATH="$RUNNER_TEMP/wasi-sdk"
+          mkdir -p "$WASI_SDK_PATH"
+          curl -fsSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz --strip-components=1 -C "$WASI_SDK_PATH"
+          echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
       - name: Cache native dependencies
         id: deps-cache
         uses: actions/cache@v4
