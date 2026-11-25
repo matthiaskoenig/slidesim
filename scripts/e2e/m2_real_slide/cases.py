@@ -31,7 +31,7 @@ def main() -> None:
     args = parser.parse_args()
     plt.switch_backend("Agg")
     fig, axes = plt.subplots(1, len(args.runs), figsize=(3.3 * len(args.runs) + 1.0, 4.4), sharey=True,
-                             layout="constrained")
+                             layout="compressed")
     for ax, spec in zip(np.atleast_1d(axes), args.runs, strict=True):
         label, rest = spec.split("=", 1)
         run_dir, study = rest.split(":")
@@ -47,7 +47,7 @@ def main() -> None:
         if ax is not np.atleast_1d(axes)[0]:
             ax.set_ylabel("")
         ax.set_title(label, fontsize=10)
-    fig.colorbar(mappable, ax=axes, label=f"{args.field} (mM)", shrink=0.85)
+    fig.colorbar(mappable, ax=axes, label=f"{args.field} (mM)", shrink=0.85, pad=0.012)
     handles = [Line2D([], [], color=PORTAL, lw=2, label="portal wall (1 mM)"),
                Line2D([], [], color=CENTRAL, lw=2, label="central wall (free outflow)"),
                Line2D([], [], color=OTHER, lw=1.2, label="other edge"),

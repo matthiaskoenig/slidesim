@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True, help="the PNG file to write")
     args = parser.parse_args()
     plt.switch_backend("Agg")
-    fig, axes = plt.subplots(1, 2, figsize=(11.0, 5.4), layout="constrained")
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 5.0), layout="constrained")
     bounds: dict[float, list] = {}
     lowest, highest_bin = np.inf, 0.0
     for spec, color in zip(args.runs, COLORS, strict=False):
@@ -98,8 +98,8 @@ def main() -> None:
     axes[0].set_title("Median and 10-90 % band per distance class;\ndashed: 1D bound k_along/mu x pressure drop / "
                       "distance / phi", fontsize=10)
     medians = axes[0].get_legend_handles_labels()[0]
-    axes[0].legend(handles=medians + handles, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2,
-                   frameon=False)
+    # below both axes, centred on the figure
+    fig.legend(handles=medians + handles, fontsize=8, loc="outside lower center", ncol=4, frameon=False)
     axes[1].axvspan(*MEASURED, color="0.88", lw=0, zorder=0)
     axes[1].fill_between([], [], color="0.88", label=f"measured in mice, {MEASURED[0]:g}-{MEASURED[1]:g} um/s")
     axes[1].set_ylim(0, highest_bin * 1.45)

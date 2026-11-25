@@ -16,6 +16,11 @@ from pathlib import Path
 OUTLET = "central_wall"
 
 
+def whole(x: float) -> str:
+    """x rounded to a whole number, without the sign of a value that rounds to zero ("0", not "-0")."""
+    return str(round(x) + 0)
+
+
 def flows(runs: dict) -> list[str]:
     lines = [("| Run | portal_wall | central_wall | sum / largest | portal pieces (all inflow) | central pieces "
              "(all outflow) | pieces vs tag_flows |"), "|---|---|---|---|---|---|---|"]
@@ -54,9 +59,26 @@ def balance(runs: dict) -> list[str]:
             free = b["free_outflow"]
             leak = " / ".join(f"{free[t]['pct_of_portal_flow']:.2f}" if t in free else "-"
                               for t in ("vessel_wall", "field_cut", "section_edge"))
-            lines.append(f"| {name} | {b['t']:g} | {b['storage_rate']:.0f} | {portal['advective']:.0f} + "
-                         f"{portal['diffusive']:.0f} | {b['inflow'][OUTLET]['advective']:.0f} | {leak} | "
+            lines.append(f"| {name} | {b['t']:g} | {whole(b['storage_rate'])} | {whole(portal['advective'])} + "
+                         f"{whole(portal['diffusive'])} | {whole(b['inflow'][OUTLET]['advective'])} | {leak} | "
                          f"{b['defect_pct_of_portal_flow']:.1f} | {b['closure_over_largest_term']:.0e} |")
+    return lines
+
+
+def balance_terms(runs: dict) -> list[str]:
+    """The terms of the balance in mM*um^2/s, per run and output time."""
+    lines = [("| Run | t (s) | storage_rate | portal_wall advective + diffusive | central_wall advective | "
+              "vessel_wall / field_cut / section_edge advective | advection_defect |"),
+             "|---|---|---|---|---|---|---|"]
+    for name, r in runs.items():
+        for b in r["balance"]:
+            inflow = b["inflow"]
+            portal = inflow["portal_wall"]
+            walls = " / ".join(whole(inflow[t]["advective"]) if t in inflow else "-"
+                               for t in ("vessel_wall", "field_cut", "section_edge"))
+            lines.append(f"| {name} | {b['t']:g} | {whole(b['storage_rate'])} | {whole(portal['advective'])} + "
+                         f"{whole(portal['diffusive'])} | {whole(inflow[OUTLET]['advective'])} | {walls} | "
+                         f"{whole(b['advection_defect'])} |")
     return lines
 
 
@@ -96,7 +118,7 @@ def front(runs: dict) -> list[str]:
     for name, r in runs.items():
         for f in r["front"]:
             lines.append(f"| {name} | {f['t']:g} | {f['area_above_half_pct']:.1f} % | {f['central_wall_mean']:.3f} | "
-                         f"{f['min']:.1e} | {f['max']:.6f} | {f['total_mass']:.0f} |")
+                         f"{f['min']:.1e} | {f['max']:.6f} | {whole(f['total_mass'])} |")
     return lines
 
 
@@ -107,7 +129,9 @@ def main() -> None:
     args = parser.parse_args()
     runs = {p.stem: json.loads(p.read_text()) for p in args.analyses}
     for title, table in (("Flows", flows), ("Flow per wall piece (um^2/s, positive into the domain)", pieces),
-                         ("Mass balance of the tracer (mM*um^2/s)", balance),
+                         ("Mass balance of the tracer (mM*um^2/s; leak and defect in % of the portal flow)",
+                          balance),
+                         ("Terms of the mass balance of the tracer (mM*um^2/s)", balance_terms),
                          ("Outflow through walls without flow, by piece", leak_pieces),
                          ("Interstitial velocity (um/s)", velocity), ("Tracer front", front)):
         print(f"## {title}\n")

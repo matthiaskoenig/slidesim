@@ -182,13 +182,13 @@ middle) are the high-pressure islands. The y axis points down, as the rows of th
 ![Flow over the H&E](2026-11-m2-real-slide/velocity.png)
 
 Streamlines of the Darcy velocity over the H&E of the field (gray scale, contrast stretched),
-colored by the interstitial velocity |u|/phi. The color scale ends at 68 um/s, the 98th
-percentile of |u|/phi over the tissue (area weighted); faster paths, next to the portal walls,
-show in the top color (radial10: 41 um/s). The mesh walls lie on the lumina of the H&E. Flow leaves each
-portal wall to all sides and enters the central walls around it; the fastest paths join the
-portal wall at (3440, 2550) um with the central walls at (3720-3870, 2370-2410) um, and the three
-portal walls at the upper right with the central walls at (3760, 1740) and (4180, 1530) um. The
-left part of the field (x below 3300 um) has no portal wall and slow flow.
+colored by the interstitial velocity |u|/phi. The color scale ends at 68 um/s, the 98th percentile
+of |u|/phi over the tissue (area weighted); faster paths, next to the portal walls, show in the top
+color (radial10: 41 um/s). The mesh walls lie on the lumina of the H&E. Flow leaves each portal wall
+to all sides and enters the central walls around it; the fastest paths join the portal wall at
+(3440, 2550) um with the central walls at (3720-3870, 2370-2410) um, and the three portal walls at
+the upper right with the central walls at (3760, 1740) and (4180, 1530) um. The left part of the
+field (x below 3300 um) has no portal wall and slow flow.
 
 With strong radial anisotropy (radial10) the flow follows the zonation gradient more strictly:
 paths between near pairs are straighter, and where the gradient turns, in the left half, the
@@ -221,14 +221,14 @@ elsewhere.
 
 ![Velocity against the portal-central distance, and its distribution](2026-11-m2-real-slide/velocity_distribution.png)
 
-Left: the interstitial velocity falls with the local portal-central distance as Darcy flow
-should. The dashed lines, k_along/mu x 390 Pa / distance / phi for a straight one-dimensional
-path, are upper bounds, one per study; baseline and radial10 share theirs (gray), as they have
-the same k_along and viscosity. For the baseline the median is within a factor of 1.2-1.4 of it
-at 250-350 um, the shortest distances in this field. radial10 stays a factor of 2.5-5 below it, since its flow has to cross the zonation gradient in
-places. Beyond 900 um (the left part without portal walls) the velocity drops steeply. Right:
-the distribution over the tissue is wide; the calibrated study puts 26 % of the tissue into the
-measured range, the baseline 1.9 %.
+Left: the interstitial velocity falls with the local portal-central distance as Darcy flow should.
+The dashed lines, k_along/mu x 390 Pa / distance / phi for a straight one-dimensional path, are
+upper bounds, one per study; baseline and radial10 share theirs (gray), as they have the same
+k_along and viscosity. For the baseline the median is within a factor of 1.2-1.4 of it at 250-350
+um, the shortest distances in this field. radial10 stays a factor of 2.5-5 below it, since its flow
+has to cross the zonation gradient in places. Beyond 900 um (the left part without portal walls) the
+velocity drops steeply. Right: the distribution over the tissue is wide; the calibrated study puts
+26 % of the tissue into the measured range, the baseline 1.9 %.
 
 Why the field mean is low: the field holds about 13 lobules (CYP2E1 peaks), and so about 13
 central veins and as many portal tracts, but the mesh has 5 portal walls (see "Choice of the
@@ -254,10 +254,10 @@ portal regions. The front spreads to all sides of each portal wall, also into th
 | 5 | 20.5 % | 0.055 | 69609 |
 | 10 | 36.2 % | 0.208 | 120079 |
 
-The mean at the central wall nodes is low because 9 of the 13 central wall pieces lie more than
-300 um from the nearest portal wall. With 2 refinements the minimum of the field stays above
--1e-13 mM (with 0 refinements -1e-6 mM at 1 s) and the maximum at 1 mM: no over- or undershoot at these cell Peclet numbers (Darcy
-velocity times element size over diffusion: 0.02-0.1 near the portal walls).
+The mean at the central wall nodes is low because 9 of the 13 central wall pieces lie more than 300
+um from the nearest portal wall. With 2 refinements the minimum of the field stays above -1e-13 mM
+(with 0 refinements -1e-6 mM at 1 s) and the maximum at 1 mM: no over- or undershoot at these cell
+Peclet numbers (Darcy velocity times element size over diffusion: 0.02-0.1 near the portal walls).
 
 ![Sucrose at 3 s in the four studies](2026-11-m2-real-slide/sucrose_cases_3s.png)
 
@@ -279,12 +279,15 @@ residual of the discrete equations, at a Dirichlet tag; zero at a tag without co
 split is exact: both parts are computed apart in slidesim. The balance closes to 3e-13 of its
 largest term in every run and at every output time.
 
-Baseline, 2 refinements (portal wall flow 13955 um^2/s, so 13955 mM*um^2/s at 1 mM):
+Baseline, 2 refinements (portal wall flow 13955 um^2/s, so 13955 mM*um^2/s at 1 mM; the table of
+`report.py`, in whole mM*um^2/s):
 
 | t (s) | storage_rate | portal_wall advective + diffusive | central_wall advective | vessel_wall / field_cut / section_edge advective | advection_defect |
 |---|---|---|---|---|---|
-| 1 | 14300 | 12754 + 380 | -0 | -34 / -9 / -0 | -1209 |
-| 3 | 13715 | 12754 + 100 | -240 | -69 / -21 / -0 | -1190 |
+| 1 | 14300 | 12754 + 380 | 0 | -34 / -9 / 0 | -1209 |
+| 2 | 14058 | 12754 + 179 | -12 | -58 / -17 / 0 | -1212 |
+| 3 | 13715 | 12754 + 100 | -240 | -69 / -21 / 0 | -1190 |
+| 5 | 12045 | 12754 + 37 | -1702 | -77 / -27 / -1 | -1061 |
 | 10 | 8485 | 12754 + 6 | -4938 | -82 / -43 / -5 | -793 |
 
 ### Outflow through walls without flow (leak)
@@ -309,13 +312,14 @@ times 1 mM:
 All of the `vessel_wall` leak goes through the one unclassified lumen, at x 3512-3577 um, y
 2610-2661 um (the white lumen right of the portal wall at (3443, 2557) in the figures), which the
 tracer front reaches at about 1 s. The `field_cut` leak is spread along the field edges where the
-flow from the portal regions meets them (bottom and right edges). `analyze.py` recomputes the outflow per tag and per
-piece from `pressure.vtu`, the tracer and the zonation map, and matches the advective parts of
-`summary.json` to all printed digits. The leak falls by a factor of 1.6 per refinement (order
-about 0.67 in the element size), at 1 s as at 10 s. Against the outflow through the central walls (4938 mM*um^2/s at 10 s, baseline) it is
-small, and it does not change the front: the amounts and fronts below agree between the levels.
-The structural fix is a conservative velocity with u.n = 0 on the no-flow walls (flux recovery
-from the pressure residual, or a mixed method), planned for milestone 3.
+flow from the portal regions meets them (bottom and right edges). `analyze.py` recomputes the
+outflow per tag and per piece from `pressure.vtu`, the tracer and the zonation map, and matches the
+advective parts of `summary.json` to all printed digits. The leak falls by a factor of 1.6 per
+refinement (order about 0.67 in the element size), at 1 s as at 10 s. Against the outflow through
+the central walls (4938 mM*um^2/s at 10 s, baseline) it is small, and it does not change the front:
+the amounts and fronts below agree between the levels. The structural fix is a conservative velocity
+with u.n = 0 on the no-flow walls (flux recovery from the pressure residual, or a mixed method),
+planned for milestone 3.
 
 ### advection_defect
 
@@ -399,10 +403,13 @@ at 1 s was 18.9, 12.2, 7.6 and 4.6 % at 0 to 3 refinements, the total mass at 1 
 ## Reproduce
 
 ```bash
-export SLIDEVIZ_DATA=/path/to/APAP_zarr     # slides, sidecars and predictions/; read only
-scripts/e2e/m2_real_slide.sh                 # slideviz chain, four studies, baseline at 0 and 1 refinements, analysis
-FIGURES=docs/results/2026-11-m2-real-slide STEPS=analysis scripts/e2e/m2_real_slide.sh   # the figures of this document
-CENTRE_ROW=14000 CENTRE_COL=12000 OUT=/tmp/first-field scripts/e2e/m2_real_slide.sh   # the first field
+export SLIDEVIZ_DATA=/path/to/APAP_zarr  # slides, sidecars and predictions/; read only
+# slideviz chain, four studies, baseline at 0 and 1 refinements, analysis
+scripts/e2e/m2_real_slide.sh
+# the figures of this document, from the runs above
+FIGURES=docs/results/2026-11-m2-real-slide STEPS=analysis scripts/e2e/m2_real_slide.sh
+# the first field
+CENTRE_ROW=14000 CENTRE_COL=12000 OUT=/tmp/first-field scripts/e2e/m2_real_slide.sh
 ```
 
 The script writes to `OUT` (default `target/e2e/m2_real_slide`; see its header for the settings):
