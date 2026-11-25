@@ -35,6 +35,12 @@ pub fn ranks() -> usize {
 /// and panics unless every process of every run passes. Does nothing inside such a run, and is
 /// skipped (with a message) if there is no `mpiexec`.
 pub fn parallel(ranks: usize, tests: &[&str]) {
+    parallel_with_env(ranks, tests, &[]);
+}
+
+/// As [`parallel`], with the environment variables `env` (name, value) set in the runs: for
+/// example results of this process for the runs to compare theirs with.
+pub fn parallel_with_env(ranks: usize, tests: &[&str], env: &[(&str, &str)]) {
     if std::env::var_os(MPI_RANKS).is_some() {
         // A run under mpiexec: do not start runs from it.
         return;
@@ -59,6 +65,7 @@ pub fn parallel(ranks: usize, tests: &[&str]) {
             .arg(&exe)
             .args(["--exact", test, "--test-threads", "1", "--color", "never"])
             .env(MPI_RANKS, ranks.to_string())
+            .envs(env.iter().copied())
             // Its own process group, so that a timeout kills mpiexec and every process.
             .process_group(0)
             .stdout(Stdio::piped())

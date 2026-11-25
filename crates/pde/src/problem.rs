@@ -20,6 +20,13 @@ use crate::{
 const ERRORS_IF_NOT_CONVERGED: &str =
     "-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails";
 
+/// The tolerance every problem sets for its linear solves, before the options of the caller, who
+/// may override it: the residual reduced by `1e-10`. The solution depends on the number of
+/// processes up to the tolerance (the multigrid preconditioner does, through the partition), so
+/// the tolerance keeps results of different process counts within about `1e-10` of each other,
+/// where PETSc's default (`1e-5`) would not.
+const TOLERANCE: &str = "-ksp_rtol 1e-10";
+
 /// A change of the shift of the Jacobian, relative to the shift, beyond which the
 /// preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a fixed step computes
 /// shifts which differ in the last bits).
@@ -50,12 +57,19 @@ const SHIFT_TOLERANCE: f64 = 1e-12;
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). The problem sets its options in the
 /// global options database under that prefix while it lives, and removes them when dropped:
-/// first `-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails`,
-/// then the options of the caller (`petsc_options` of [`Problem::new`], written without the
+/// first `-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails` and
+/// `-ksp_rtol 1e-10`, then the options of the caller (`petsc_options` of [`Problem::new`], written without the
 /// prefix), which may override them. Options under the prefix from the command line hold too,
 /// unless the caller's override them. They override the multigrid preconditioner too: for
 /// example `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
 /// `-mg_coarse_pc_type lu` its coarse solver (on one process).
+///
+/// Processes: the solution depends on the number of processes up to the tolerance of the linear
+/// solves, since the preconditioner does (algebraic multigrid aggregates the coarse level by
+/// partition, and the eigenvalue estimates of the smoothers start from a vector of the global
+/// numbering of the dofs, which follows the partition). With the default `-ksp_rtol 1e-10`, runs
+/// on different numbers of processes agree to about the tolerance (integrals of the solution
+/// within `1e-11` relative on `tissue_small`); a looser tolerance loosens this too.
 ///
 /// Limit: one problem per field id lives at a time in a process, since it owns the options under
 /// its prefix; [`Problem::new`] fails for a second one until the first is dropped. Field ids
@@ -98,7 +112,10 @@ impl Problem {
         petsc_options: &str,
     ) -> Result<Problem> {
         let prefix = options_prefix(&field.id)?;
-        let options = OptionsScope::new(&prefix, &[ERRORS_IF_NOT_CONVERGED, petsc_options])?;
+        let options = OptionsScope::new(
+            &prefix,
+            &[ERRORS_IF_NOT_CONVERGED, TOLERANCE, petsc_options],
+        )?;
 
         let dim = mesh.finest().dimension()?;
         let mut dirichlet = Vec::new();

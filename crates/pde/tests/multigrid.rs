@@ -319,6 +319,67 @@ fn adaptive_problem_matches_jacobi() {
     assert_matches_jacobi(time, &[0.2, 0.5]);
 }
 
+/// The results of this process in [`two_processes_match_one`]: the L2 norm and the total mass
+/// of the solution, for the runs on two processes.
+const REFERENCE: &str = "SLIDESIM_TEST_REFERENCE";
+
+/// The L2 norm and the total mass of the solution of the tissue field at t = 2 s, after 4 BDF2
+/// steps on `tissue_small` at 2 refinements, with the default options of [`Problem`].
+fn tissue_results(p: &Petsc) -> [f64; 2] {
+    let mesh = tissue_small(p, 2);
+    let time = TimeSpec {
+        end: 2.0,
+        dt: 0.5,
+        adaptive: false,
+        outputs: Vec::new(),
+    };
+    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "").unwrap();
+    problem.step_to(2.0).unwrap();
+    assert_eq!(problem.steps().unwrap(), 4);
+    [
+        problem.l2_error(|_, _| 0.0).unwrap(),
+        problem.total_mass().unwrap(),
+    ]
+}
+
+/// The results of a [`Problem`] on two processes match those on one up to the tolerance of the
+/// linear solves: multigrid depends on the partition. Run alone, the test computes the results
+/// on one process and starts itself on two with them (in [`REFERENCE`]) to compare.
+#[test]
+fn two_processes_match_one() {
+    let p = Petsc::init(&[]).unwrap();
+    let results = tissue_results(&p);
+    match std::env::var(REFERENCE) {
+        Err(_) => {
+            assert_eq!(test_support::ranks(), 1);
+            // MPI is finalized before mpiexec starts.
+            drop(p);
+            let reference = format!("{:e} {:e}", results[0], results[1]);
+            println!("on one process: L2 norm and total mass {reference}");
+            test_support::parallel_with_env(
+                2,
+                &["two_processes_match_one"],
+                &[(REFERENCE, &reference)],
+            );
+        }
+        Ok(reference) => {
+            let reference: Vec<f64> = reference.split(' ').map(|v| v.parse().unwrap()).collect();
+            for (name, (r, one)) in ["L2 norm", "total mass"]
+                .iter()
+                .zip(results.iter().zip(&reference))
+            {
+                let difference = ((r - one) / one).abs();
+                println!(
+                    "{name} on {} processes: {r:e}, on one: {one:e}, relative difference \
+                     {difference:e}",
+                    test_support::ranks()
+                );
+                assert!(difference <= 1e-8, "{name}: {r} against {one}");
+            }
+        }
+    }
+}
+
 /// The tests `parallel_on_*_processes` run on several processes: multigrid on a distributed
 /// mesh hierarchy, with the coarse level solved by algebraic multigrid.
 const PARALLEL_TESTS: [&str; 6] = [
