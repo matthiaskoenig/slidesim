@@ -1,7 +1,7 @@
 # Milestone 2 end to end on a real slide
 
-Status: 2026-11-25, slidesim `feat/m2-perfusion` at d399cfb, slideviz `feat/scene-export` at
-06f9b0f.
+Status: 2026-11-25, slidesim branch `feat/m2-perfusion`, slideviz branch `feat/scene-export`
+(7ddd651); the run outputs of this document come from `scripts/e2e/m2_real_slide.sh` on that state.
 Verification item 6 of `docs/superpowers/specs/2026-11-25-slidesim-m2-perfusion-design.md`, with
 the parameters of `docs/parameters/m2-perfusion-mouse.md`. Not part of CI: the slides are not in
 the repository.
@@ -12,7 +12,8 @@ the repository.
   (`scripts/e2e/m2_real_slide.sh`, about 30 s for the slideviz part, 7-8 min per study on 4
   processes).
 - The flow checks hold in every run: portal walls inflow, central walls outflow, net flow below
-  3e-13 of the wall flow.
+  3e-13 of the wall flow; and per wall piece (spec item 6): each of the 5 portal wall pieces has
+  net inflow and each of the 13 central wall pieces net outflow, in all four studies.
 - The field is the 1500 um window of the slide with the most tagged vessels (5 portal, 13 central
   wall pieces). Its mean interstitial velocity is 20 um/s for the baseline, a quarter of the 73
   um/s the parameter document expects; calibrated 50 um/s instead of 180 um/s. The velocities
@@ -26,9 +27,15 @@ the repository.
   inflow at 1 s and 5.7 % at 10 s with 2 refinements, 13.7 % and 9.1 % with 1, 21.2 % and 14.2 %
   with none; on the first field it was 4.6 % at 1 s with 3 refinements. It falls with the element
   size at an order of about 0.65. The total mass hardly shows it: it agrees between the levels
-  within 0.7 %, and its growth between 1 and 2 s does not depend on the level (0.1 %). The numbers
-  are consistent with most of the defect being the error of the normal velocity at the walls. The
-  last section says what this means for milestone 3.
+  within 0.7 %, and its rate of change at 1 s does not depend on the level (0.1 %). The split of
+  the mass balance shows the defect is the error of the primal normal velocity at the portal
+  walls: their primal flux is 8.6 % below the conservative flow at 2 refinements (defect 8.7 %),
+  13.6 % at 1 (13.7 %) and 20.9 % at 0 (21.2 %). The last section says what this means for
+  milestone 3.
+- The mass balance of the tracer (`summary.json`, per output time) closes to 3e-13. The primal
+  velocity lets 0.3 % (1 s) to 0.9 % (10 s) of the portal inflow out through walls without flow
+  (the unclassified lumen next to a portal wall, the field cut) with 2 refinements, 0.8 % to 2.3 %
+  with none: the normal velocity of P1 Darcy flow on a no-flow wall is not zero.
 
 ## Choice of the field
 
@@ -109,6 +116,10 @@ Optimized build (`deps/install/native-opt`, `cargo build --release`), `mpiexec -
 | whole_blood | 680976 | 421 s |
 | radial10 | 680976 | 420 s |
 
+These are the times of the first runs of this field. The rerun for this version of the document
+(`summary.json` with the mass balance; the fields are the same to the last digit) ran next to the
+workspace test suite and took 14, 111, 659, 556, 440 and 650 s in the order of the table.
+
 ## Flow checks
 
 `perfusion.tag_flows` of `summary.json` (um^2/s, positive into the domain):
@@ -117,15 +128,47 @@ Optimized build (`deps/install/native-opt`, `cargo build --release`), `mpiexec -
 |---|---|---|---|
 | baseline, 0 refinements | 13999.5 | -13999.5 | -8.1e-14 |
 | baseline, 1 refinement | 13966.2 | -13966.2 | 5.9e-14 |
-| baseline, 2 refinements | 13954.8 | -13954.8 | 3.7e-14 |
-| calibrated | 34078.8 | -34078.8 | 2.9e-14 |
-| whole_blood | 9569.0 | -9569.0 | 3.8e-14 |
+| baseline, 2 refinements | 13954.8 | -13954.8 | 3.6e-14 |
+| calibrated | 34078.8 | -34078.8 | 2.8e-14 |
+| whole_blood | 9569.0 | -9569.0 | 3.7e-14 |
 | radial10 | 5946.3 | -5946.3 | -3.0e-13 |
 
 Every portal flow is positive, every central flow negative, and the sums are zero to rounding
 (the check asked for 1e-8). The wall flow changes by 0.3 % from 0 to 2 refinements. The ratios
 between the studies are those of k/mu: calibrated / baseline 2.44 (k ratio 2.44), whole_blood /
 baseline 0.686 (2.4/3.5 = 0.686).
+
+Per wall piece (the connected pieces of the `portal_wall` and `central_wall` edges), the
+consistent flow of the pressure equation, recomputed by `analyze.py` from `pressure.vtu` and the
+zonation map (its sums agree with `tag_flows` within 7e-5, radial10 3e-3, from the quadrature),
+um^2/s, positive into the domain, 2 refinements:
+
+| Piece (centre, um) | baseline | calibrated | whole_blood | radial10 |
+|---|---|---|---|---|
+| portal (3343, 2920) | 2548.8 | 6227.1 | 1747.8 | 940.9 |
+| portal (3443, 2557) | 4397.9 | 10731.8 | 3015.7 | 2379.0 |
+| portal (4046, 1872) | 3542.6 | 8654.5 | 2429.2 | 1300.1 |
+| portal (4273, 1916) | 1617.9 | 3956.0 | 1109.4 | 556.9 |
+| portal (4327, 1781) | 1846.7 | 4507.0 | 1266.3 | 788.3 |
+| central (2927, 2177) | -593.8 | -1450.5 | -407.2 | -257.1 |
+| central (2990, 2714) | -2403.5 | -5866.3 | -1648.1 | -1113.3 |
+| central (3105, 1896) | -582.6 | -1425.2 | -399.5 | -162.7 |
+| central (3333, 1511) | -131.8 | -323.6 | -90.4 | -15.9 |
+| central (3365, 1507) | -126.0 | -307.9 | -86.4 | -39.3 |
+| central (3793, 2397) | -2662.8 | -6496.3 | -1825.9 | -1598.9 |
+| central (3764, 1750) | -1799.6 | -4395.0 | -1234.0 | -667.2 |
+| central (3926, 2858) | -977.1 | -2386.4 | -670.0 | -346.9 |
+| central (4048, 2368) | -1501.7 | -3672.0 | -1029.7 | -442.7 |
+| central (4121, 2751) | -481.0 | -1179.2 | -329.9 | -84.7 |
+| central (4126, 1498) | -309.4 | -758.0 | -212.2 | -67.1 |
+| central (4151, 1537) | -2256.5 | -5503.7 | -1547.3 | -1110.0 |
+| central (4188, 1489) | -128.7 | -314.1 | -88.2 | -45.3 |
+
+Every portal piece has net inflow and every central piece net outflow in all four studies, also
+for radial10, whose pressure has no discrete maximum principle (it leaves the wall range by 4e-5,
+see the deviations). The smallest central outflow is 15.9 um^2/s (radial10, the piece at
+(3333, 1511) on the field edge), 0.3 % of the radial10 wall flow. The baseline pieces change by
+less than 0.5 % from 0 to 2 refinements, except the 5-edge piece at (4188, 1489) (147 to 129).
 
 ## Pressure and flow
 
@@ -138,8 +181,10 @@ middle) are the high-pressure islands. The y axis points down, as the rows of th
 
 ![Flow over the H&E](2026-11-m2-real-slide/velocity.png)
 
-Streamlines of the Darcy velocity over the H&E of the field (gray scale), colored by the
-interstitial velocity |u|/phi. The mesh walls lie on the lumina of the H&E. Flow leaves each
+Streamlines of the Darcy velocity over the H&E of the field (gray scale, contrast stretched),
+colored by the interstitial velocity |u|/phi. The color scale ends at 68 um/s, the 98th
+percentile of |u|/phi over the tissue (area weighted); faster paths, next to the portal walls,
+show in the top color (radial10: 41 um/s). The mesh walls lie on the lumina of the H&E. Flow leaves each
 portal wall to all sides and enters the central walls around it; the fastest paths join the
 portal wall at (3440, 2550) um with the central walls at (3720-3870, 2370-2410) um, and the three
 portal walls at the upper right with the central walls at (3760, 1740) and (4180, 1530) um. The
@@ -177,9 +222,10 @@ elsewhere.
 ![Velocity against the portal-central distance, and its distribution](2026-11-m2-real-slide/velocity_distribution.png)
 
 Left: the interstitial velocity falls with the local portal-central distance as Darcy flow
-should. The dashed line, a straight one-dimensional path, is an upper bound; for the baseline the
-median is within a factor of 1.2-1.4 of it at 250-350 um, the shortest distances in this field.
-radial10 stays a factor of 2.5-5 below it, since its flow has to cross the zonation gradient in
+should. The dashed lines, k_along/mu x 390 Pa / distance / phi for a straight one-dimensional
+path, are upper bounds, one per study; baseline and radial10 share theirs (gray), as they have
+the same k_along and viscosity. For the baseline the median is within a factor of 1.2-1.4 of it
+at 250-350 um, the shortest distances in this field. radial10 stays a factor of 2.5-5 below it, since its flow has to cross the zonation gradient in
 places. Beyond 900 um (the left part without portal walls) the velocity drops steeply. Right:
 the distribution over the tissue is wide; the calibrated study puts 26 % of the tissue into the
 measured range, the baseline 1.9 %.
@@ -206,23 +252,74 @@ portal regions. The front spreads to all sides of each portal wall, also into th
 | 2 | 8.2 % | 0.000 | 29811 |
 | 3 | 12.5 % | 0.007 | 43729 |
 | 5 | 20.5 % | 0.055 | 69609 |
-| 10 | 36.2 % | 0.209 | 120079 |
+| 10 | 36.2 % | 0.208 | 120079 |
 
 The mean at the central wall nodes is low because 9 of the 13 central wall pieces lie more than
 300 um from the nearest portal wall. With 2 refinements the minimum of the field stays above
--1e-13 mM and the maximum at 1 mM: no over- or undershoot at these cell Peclet numbers (Darcy
+-1e-13 mM (with 0 refinements -1e-6 mM at 1 s) and the maximum at 1 mM: no over- or undershoot at these cell Peclet numbers (Darcy
 velocity times element size over diffusion: 0.02-0.1 near the portal walls).
 
 ![Sucrose at 3 s in the four studies](2026-11-m2-real-slide/sucrose_cases_3s.png)
 
 At 3 s the tissue above 0.5 mM is 12.5 % (baseline), 28.9 % (calibrated), 8.4 % (whole_blood)
-and 5.6 % (radial10); at 10 s the mean at the central wall nodes is 0.209, 0.519, 0.122 and
-0.069 mM.
+and 5.6 % (radial10); at 10 s the mean at the central wall nodes is 0.208, 0.518, 0.122 and
+0.070 mM.
 
 ## Conservation of the primal Darcy velocity
 
-`advection_defect` (mM*um^2/s, from `summary.json`), relative to the advective inflow at the
-portal walls, taken as the portal wall flow times 1 mM (`tag_flows.portal_wall`; it is the
+`summary.json` has, per field and output time after 0, the mass balance of the last step from
+the discrete equations (`mass_balance`, mM*um^2/s):
+
+`storage_rate = source + sum over the tags of (advective + diffusive) - advection_defect`,
+
+with the inflow through each tag of the boundary split into its advective part (minus the flux of
+the primal velocity times the concentration at the Gauss points of the edges; on edges without a
+condition for the tracer only the outflow) and its diffusive part (the consistent flux, the
+residual of the discrete equations, at a Dirichlet tag; zero at a tag without condition). The
+split is exact: both parts are computed apart in slidesim. The balance closes to 3e-13 of its
+largest term in every run and at every output time.
+
+Baseline, 2 refinements (portal wall flow 13955 um^2/s, so 13955 mM*um^2/s at 1 mM):
+
+| t (s) | storage_rate | portal_wall advective + diffusive | central_wall advective | vessel_wall / field_cut / section_edge advective | advection_defect |
+|---|---|---|---|---|---|
+| 1 | 14300 | 12754 + 380 | -0 | -34 / -9 / -0 | -1209 |
+| 3 | 13715 | 12754 + 100 | -240 | -69 / -21 / -0 | -1190 |
+| 10 | 8485 | 12754 + 6 | -4938 | -82 / -43 / -5 | -793 |
+
+### Outflow through walls without flow (leak)
+
+The pressure equation has no flow through `vessel_wall` (the unclassified lumen), `field_cut`
+and `section_edge`: their condition is natural, so the P1 velocity meets it only weakly and has a
+normal component there. The tracer has no condition on these tags either, so where that
+component points out (u.n > 0) the tracer leaves as free outflow. The advective flux on these
+walls is kept on purpose (dropping it would cost the dissipativity of the advection operator);
+the leak it causes shows in the advective part of each tag. In percent of the portal wall flow
+times 1 mM:
+
+| Run | 1 s: vessel_wall / field_cut / section_edge | 3 s | 10 s | sum at 1 s / 10 s |
+|---|---|---|---|---|
+| baseline, 0 refinements | 0.54 / 0.26 / 0.00 | 1.03 / 0.56 / 0.00 | 1.20 / 1.12 / 0.02 | 0.80 / 2.34 |
+| baseline, 1 refinement | 0.37 / 0.13 / 0.00 | 0.73 / 0.29 / 0.00 | 0.87 / 0.59 / 0.03 | 0.50 / 1.49 |
+| baseline, 2 refinements | 0.24 / 0.07 / 0.00 | 0.49 / 0.15 / 0.00 | 0.59 / 0.31 / 0.04 | 0.31 / 0.94 |
+| calibrated | 0.47 / 0.11 / 0.00 | 0.57 / 0.22 / 0.02 | 0.58 / 0.42 / 0.05 | 0.58 / 1.05 |
+| whole_blood | 0.16 / 0.05 / 0.00 | 0.41 / 0.13 / 0.00 | 0.56 / 0.26 / 0.02 | 0.21 / 0.84 |
+| radial10 | 0.17 / 0.06 / 0.00 | 0.44 / 0.29 / 0.00 | 0.61 / 0.93 / 0.01 | 0.23 / 1.55 |
+
+All of the `vessel_wall` leak goes through the one unclassified lumen, at x 3512-3577 um, y
+2610-2661 um (the white lumen right of the portal wall at (3443, 2557) in the figures), which the
+tracer front reaches at about 1 s. The `field_cut` leak is spread along the field edges where the
+flow from the portal regions meets them (bottom and right edges). `analyze.py` recomputes the outflow per tag and per
+piece from `pressure.vtu`, the tracer and the zonation map, and matches the advective parts of
+`summary.json` to all printed digits. The leak falls by a factor of 1.6 per refinement (order
+about 0.67 in the element size), at 1 s as at 10 s. Against the outflow through the central walls (4938 mM*um^2/s at 10 s, baseline) it is
+small, and it does not change the front: the amounts and fronts below agree between the levels.
+The structural fix is a conservative velocity with u.n = 0 on the no-flow walls (flux recovery
+from the pressure residual, or a mixed method), planned for milestone 3.
+
+### advection_defect
+
+`advection_defect` relative to the portal wall flow times 1 mM (`tag_flows.portal_wall`, the
 conservative flow, from the residual of the pressure equation):
 
 | Baseline | 1 s | 2 s | 3 s | 5 s | 10 s |
@@ -243,33 +340,30 @@ refinements (order 0.71, 4.6 %). It is largest at early times, when the sucrose 
 to the portal walls, and largest for radial10, where the velocity jumps most between cells. On
 the toy mesh of the tests (`lobule_toy`) it was 11-20 %.
 
-What the defect does and does not do to the result:
+The split of the balance shows where it comes from. The advective inflow at the portal walls,
+where the tracer is 1 mM, is the flux of the primal velocity through them: 11067, 12065 and 12754
+mM*um^2/s at 0, 1 and 2 refinements, 79.1, 86.4 and 91.4 % of the conservative wall flow. That
+shortfall, 20.9, 13.6 and 8.6 %, is the defect at 1 s (21.2, 13.7 and 8.7 %) almost to the
+digit: the defect is the error of the normal velocity at the portal walls, and the transport term
+in the tissue carries the conservative flow. What it does and does not do to the result:
 
 - The total mass agrees between the levels: 15759, 15673 and 15649 mM*um^2 at 1 s for 0, 1 and
   2 refinements (0.7 % apart), 119358, 119733 and 120079 at 10 s (0.6 %). If the defect were mass
   created in the tissue, 0 and 2 refinements would differ by about (2964 - 1209) mM*um^2/s x 1 s,
   11 % of the mass at 1 s.
-- Between 1 and 2 s, before the sucrose reaches the central walls, the mass grows at 14155, 14151
-  and 14163 mM*um^2/s for 0, 1 and 2 refinements: the same at every level within 0.1 %, while
-  the defect changes by 1755 mM*um^2/s. The growth is 1.1-1.5 % above the conservative portal
-  flow (13955-14000 um^2/s times 1 mM); the rest is diffusive inflow at the portal walls, which
-  the summary does not report separately. On the first field the same balance closed within 0.3
-  %.
-- The defect compares the transport term in the tissue with the advective flux through the
-  boundary computed from the primal velocity at the Gauss points of the wall edges. That wall
-  flux is too small: the cell pressure gradient at the portal walls gives a flux 26, 19 and 14 %
-  below the conservative one with k_along, and 17, 9 and 4 % below with k_across, at 0, 1 and 2
-  refinements (the permeability normal to the wall lies between the two). The numbers are
-  consistent with the defect being mostly this error of the normal velocity at the walls; they do
-  not exclude local errors in the tissue that cancel in the total.
+- `storage_rate` at 1 s is 14312, 14296 and 14300 mM*um^2/s at 0, 1 and 2 refinements, the same
+  within 0.1 % while the defect changes by 1755. It is the conservative portal flow (13955-14000)
+  plus the diffusive inflow at the portal walls (394, 384 and 380, 2.7 %) less the leak: the
+  balance with the conservative wall flow closes within 0.5 % at every level.
 
 For milestone 3 this means: the tracer amounts are right to about 1 % already at 0 refinements,
 but any flux through an edge computed from the primal velocity (the flux into a central vein, an
 outflow balance per vessel, a per-cell uptake balance driven by the velocity) has an error of
-several percent at the resolution used here and converges slowly, with order about 0.65. A
-velocity with continuous normal flux (flux recovery from the pressure residual, or a mixed
-method) would make such fluxes consistent with the conservative wall flows that slidesim already
-reports. It is not needed for the concentrations themselves.
+several percent at the resolution used here and converges slowly, with order about 0.65, and
+walls without flow let a little tracer out. A velocity with continuous normal flux and u.n = 0 on
+the no-flow walls (flux recovery from the pressure residual, or a mixed method) would make such
+fluxes consistent with the conservative wall flows that slidesim already reports, and remove the
+leak. It is not needed for the concentrations themselves.
 
 ## First field: distance scaling and 3 refinements
 
@@ -306,11 +400,30 @@ at 1 s was 18.9, 12.2, 7.6 and 4.6 % at 0 to 3 refinements, the total mass at 1 
 
 ```bash
 export SLIDEVIZ_DATA=/path/to/APAP_zarr     # slides, sidecars and predictions/; read only
-scripts/e2e/m2_real_slide.sh                 # slideviz chain, four studies, baseline at 0 and 1 refinements
+scripts/e2e/m2_real_slide.sh                 # slideviz chain, four studies, baseline at 0 and 1 refinements, analysis
+FIGURES=docs/results/2026-11-m2-real-slide STEPS=analysis scripts/e2e/m2_real_slide.sh   # the figures of this document
 CENTRE_ROW=14000 CENTRE_COL=12000 OUT=/tmp/first-field scripts/e2e/m2_real_slide.sh   # the first field
 ```
 
-The script writes to `OUT` (see its header for the settings), one folder per run with
-`summary.json`, `pressure.vtu`, `velocity.vtu` and `sucrose_<i>.vtu`, and stops if a flow check
-fails. The 3-refinement and time step checks were run by hand with the baseline study changed by
-`jq` (`mesh.refinements = 3, time.end = 3`; `time.dt = 0.025, time.end = 3`).
+The script writes to `OUT` (default `target/e2e/m2_real_slide`; see its header for the settings):
+the slideviz outputs, one folder per run in `OUT/runs` with `summary.json`, `pressure.vtu`,
+`velocity.vtu` and `sucrose_<i>.vtu`, and it stops if a flow check fails. Its `analysis` step runs
+the scripts of `scripts/e2e/m2_real_slide/` in the uv environment of the slideviz checkout
+(`uv run --project $SLIDEVIZ_REPO python ...`; numpy, scipy, matplotlib, zarr, and slideviz itself
+for the H&E crop and the window search):
+
+| Script | Writes | Behind |
+|---|---|---|
+| `analyze.py` | `OUT/analysis/<run>.json` | flows per wall piece, mass balance and leak per tag and piece, velocities, pressure gradient, front |
+| `report.py` | `OUT/analysis/report.md` | the tables of this document, from the JSON files |
+| `windows.py` | `OUT/analysis/windows.json` | "Choice of the field" |
+| `he_crop.py` | `OUT/analysis/he.npz` | the H&E under the flow figures |
+| `render.py` | `pressure.png`, `velocity.png`, `sucrose.png`, `velocity_radial10.png` | the figures of the baseline and of radial10 |
+| `cases.py` | `sucrose_cases_3s.png` | the four studies at 3 s |
+| `velocity_distribution.py` | `velocity_distribution.png` | velocity against distance, distribution |
+
+`slidesim_io.py` reads the outputs: it merges the VTU pieces of the processes, tags the boundary
+edges of the refined mesh from the slideviz mesh, and recomputes the permeability from the scene's
+zonation map as slidesim does. The 3-refinement and time step checks of the first field were run by
+hand with the baseline study changed by `jq` (`mesh.refinements = 3, time.end = 3`;
+`time.dt = 0.025, time.end = 3`).
