@@ -13,4 +13,5 @@
 EXPORT(SetupGeometry2D)
 EXPORT(QuadraturePoints2D)
 EXPORT(Mass)
+EXPORT(Values)
 EXPORT(DiffusionReaction2D)

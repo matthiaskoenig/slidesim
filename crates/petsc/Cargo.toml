@@ -8,3 +8,6 @@ publish = false
 
 [dependencies]
 petsc-sys.workspace = true
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

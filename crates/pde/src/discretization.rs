@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use ceed::{Basis, CVector, Ceed, ElemRestriction, EvalMode, FieldVector, Operator, QFunction};
 use mesh::Mesh;
-use petsc::{Dm, Fe, LocalOffsets, Matrix, ShellOperator, Vector, sys};
+use petsc::{AsVecMut, Dm, Fe, InsertMode, LocalOffsets, Matrix, ShellOperator, Vector, sys};
 
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE};
 use crate::{PdeError, Result};
@@ -48,6 +48,10 @@ pub(crate) struct Shared {
     /// The length of local vectors.
     pub(crate) local_size: usize,
     points: Vec<[f64; 2]>,
+    /// The weights of the points: `w det J`, in the layout of [`Discretization`].
+    weights: Vec<f64>,
+    /// The coordinates of the node of each entry of a local vector.
+    nodes: Vec<[f64; 2]>,
     /// The essential tags and the local dofs they constrain, in the order given.
     essential: Vec<(String, Vec<usize>)>,
 }
@@ -152,6 +156,14 @@ impl Discretization {
             )));
         }
 
+        // The node of an entry of a local vector: a vertex, where the coordinate restriction
+        // has the coordinates of the same node of the same cell.
+        let mut nodes = vec![[f64::NAN; 2]; local_size];
+        for (&dof, &x) in offsets.offsets.iter().zip(&x_offsets.offsets) {
+            let (dof, x) = (dof as usize, x as usize);
+            nodes[dof] = [coordinates[x], coordinates[x + 1]];
+        }
+
         let basis = basis_of(ceed, &fe, 1)?;
         let basis_x = basis_of(ceed, &fe, dim)?;
         let q = basis.num_quadrature_points();
@@ -201,6 +213,13 @@ impl Discretization {
         let mut q_data = CVector::new(ceed, q_data_restriction.l_size())?;
         op.apply(&x, &mut q_data)?;
         check_orientation(&dm, &q_data, &basis.quadrature_weights()?, num_cells)?;
+        // w det(J) at [e][0][q].
+        let weights = q_data.with_array(|values| {
+            values
+                .chunks_exact(GEOMETRY_2D_SIZE * q)
+                .flat_map(|cell| cell[..q].iter().copied())
+                .collect()
+        })?;
 
         // The coordinates of the points.
         // SAFETY: the fields match what QuadraturePoints2D reads and writes; no context.
@@ -244,6 +263,8 @@ impl Discretization {
                 global_sizes,
                 local_size,
                 points,
+                weights,
+                nodes,
                 essential,
             }),
         })
@@ -268,6 +289,97 @@ impl Discretization {
     /// [`Discretization`]).
     pub fn quadrature_points(&self) -> &[[f64; 2]] {
         &self.shared.points
+    }
+
+    /// The weights of the quadrature points of the local cells, in the layout of
+    /// [`Discretization::quadrature_points`]: the quadrature weight times the Jacobian
+    /// determinant, so that `sum_q weights[q] f(x_q)` is the integral of `f` over the local cells.
+    pub fn quadrature_weights(&self) -> &[f64] {
+        &self.shared.weights
+    }
+
+    /// The coordinates of the nodes of the entries of local vectors: of the vertices, for P1.
+    pub fn node_coordinates(&self) -> &[[f64; 2]] {
+        &self.shared.nodes
+    }
+
+    /// Sets the global vector `u` to the interpolant of `f`, the values of `f` at the nodes of
+    /// its dofs (essential dofs are not in `u`). Collective.
+    pub fn interpolate(&self, f: impl Fn([f64; 2]) -> f64, u: &mut Vector) -> Result<()> {
+        let mut local = self.local_vector()?;
+        local.with_array_mut(|values| {
+            for (v, &x) in values.iter_mut().zip(&self.shared.nodes) {
+                *v = f(x);
+            }
+        })?;
+        self.shared
+            .dm
+            .local_to_global(&local, InsertMode::Insert, u)?;
+        Ok(())
+    }
+
+    /// The load of inward boundary fluxes, `sum_i int_(Gamma_i) q_i v` for the test functions
+    /// `v` of the global dofs, as a global vector: `fluxes` are pairs of a tag of edges
+    /// `Gamma_i` and a flux `q_i` (in mM*um/s, uniform on the tag). Each edge counts once, on the
+    /// process which owns it; the vertices on the tags are ignored. Collective.
+    ///
+    /// Errors (on every process): [`PdeError::Unsupported`] if a tag marks cells (a region,
+    /// whose refinements mark interior edges too).
+    pub fn boundary_load(&self, fluxes: &[(&str, f64)]) -> Result<Vector> {
+        let dm = &self.shared.dm;
+        let cells = dm.height_stratum(0)?;
+        let edges = dm.depth_stratum(1)?;
+        let vertices = dm.depth_stratum(0)?;
+        let ghosts = dm.ghost_points()?;
+        let mut tagged = Vec::with_capacity(fluxes.len());
+        for &(tag, _) in fluxes {
+            let mut points = BTreeSet::new();
+            for value in dm.label_values(tag)? {
+                points.extend(dm.stratum_points(tag, value)?);
+            }
+            let marks_cells = points.iter().any(|p| cells.contains(p));
+            if dm.comm().max_int(marks_cells.into())? > 0 {
+                return Err(PdeError::Unsupported(format!(
+                    "a boundary flux on tag '{tag}', which marks cells"
+                )));
+            }
+            tagged.push(points);
+        }
+        // P1 on an edge of length l: q l / 2 to each of its two vertices.
+        let mut contributions = Vec::new();
+        for (&(tag, q), points) in fluxes.iter().zip(tagged) {
+            for edge in points {
+                if !edges.contains(&edge) || ghosts.binary_search(&edge).is_ok() {
+                    continue;
+                }
+                let mut ends = Vec::with_capacity(2);
+                for p in dm.closure(edge)? {
+                    if vertices.contains(&p) {
+                        ends.push(dm.local_dofs(p)?.start);
+                    }
+                }
+                let &[a, b] = ends.as_slice() else {
+                    return Err(PdeError::Unsupported(format!(
+                        "edge {edge} of tag '{tag}' with {} vertices",
+                        ends.len()
+                    )));
+                };
+                let ([xa, ya], [xb, yb]) = (self.shared.nodes[a], self.shared.nodes[b]);
+                let half = 0.5 * q * (xb - xa).hypot(yb - ya);
+                contributions.extend([(a, half), (b, half)]);
+            }
+        }
+        let mut local = self.local_vector()?;
+        local.with_array_mut(|values| {
+            values.fill(0.0);
+            for (i, v) in contributions {
+                values[i] += v;
+            }
+        })?;
+        let mut load = self.global_vector()?;
+        load.zero()?;
+        dm.local_to_global(&local, InsertMode::Add, &mut load)?;
+        Ok(load)
     }
 
     /// The number of quadrature points of the local cells.

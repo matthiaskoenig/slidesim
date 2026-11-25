@@ -9,8 +9,8 @@ use std::rc::Rc;
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError};
-use pde::{DiffusionReaction, Discretization, PdeError, SourceField};
-use petsc::{Petsc, ShellOperator, VecMut, VecRef, Vector};
+use pde::{DiffusionReaction, Discretization, PdeError, SharedOperator, SourceField};
+use petsc::{Petsc, Vector};
 
 fn fixture(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -153,26 +153,12 @@ fn assembled_matches_shell() {
     assert!(error < 1e-14, "relative |A x - A_coo x| = {error}");
 }
 
-/// A shell operator forwarding to a shared [`DiffusionReaction`], whose coefficients can change
-/// while PETSc owns the shell (as an implicit time integrator changes the shift each step).
-struct Shared(Rc<RefCell<DiffusionReaction>>);
-
-impl ShellOperator for Shared {
-    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
-        self.0.borrow().mult(x, y)
-    }
-
-    fn diagonal(&self, d: &mut VecMut<'_>) -> petsc::Result<()> {
-        self.0.borrow().diagonal(d)
-    }
-}
-
 #[test]
 fn changed_coefficients_reach_mult_and_diagonal() {
     let p = Petsc::init(&[]).unwrap();
     let (disc, op) = tissue_operator(&p);
     let op = Rc::new(RefCell::new(op));
-    let shell = disc.shell_matrix(Shared(Rc::clone(&op))).unwrap();
+    let shell = disc.shell_matrix(SharedOperator(Rc::clone(&op))).unwrap();
     let mut x = disc.global_vector().unwrap();
     let rank = p.comm().rank();
     x.with_array_mut(|a| {
@@ -343,6 +329,80 @@ fn quadrature_points_cover_every_cell() {
 }
 
 #[test]
+fn quadrature_weights_sum_to_the_area() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "unit_square.msh", 1);
+    let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
+    let weights = disc.quadrature_weights();
+    assert_eq!(weights.len(), disc.num_quadrature_points());
+    assert!(weights.iter().all(|&w| w > 0.0));
+    let area = p.comm().sum_real(weights.iter().sum()).unwrap();
+    assert!((area - 1.0).abs() < 1e-14, "{area}");
+}
+
+#[test]
+fn interpolation_takes_the_values_at_the_nodes() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "unit_square.msh", 1);
+    let disc = Discretization::with_essential(&mesh, 1, &ceed(), 1, &["left"]).unwrap();
+    let f = |[x, y]: [f64; 2]| 1.0 + 2.0 * x + 3.0 * y;
+    let mut u = disc.global_vector().unwrap();
+    disc.interpolate(f, &mut u).unwrap();
+    let mut local = disc.local_vector().unwrap();
+    local.set(f64::NAN).unwrap();
+    disc.dm().global_to_local(&u, &mut local).unwrap();
+    let nodes = disc.node_coordinates();
+    let values = local.with_array(<[f64]>::to_vec).unwrap();
+    assert_eq!(values.len(), nodes.len());
+    // Every entry but the essential ones (on x = 0, left NaN) is f at its node.
+    for (&v, &x) in values.iter().zip(nodes) {
+        if x[0] == 0.0 {
+            assert!(v.is_nan(), "{x:?}: {v}");
+        } else {
+            assert!((v - f(x)).abs() < 1e-14, "{x:?}: {v}");
+        }
+    }
+    let total = p.comm().sum_int(nodes.len() as i32).unwrap();
+    assert!(total >= 31 * 3, "{total}");
+}
+
+#[test]
+fn boundary_load_integrates_the_fluxes() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = load(&p, "unit_square.msh", 1);
+    let disc = Discretization::new(&mesh, 1, &ceed(), 1).unwrap();
+    let one = constant(&disc, 1.0);
+    // Sides of length 1.
+    let load = disc.boundary_load(&[("left", 2.0), ("top", 0.5)]).unwrap();
+    let total = one.dot(&load).unwrap();
+    assert!((total - 2.5).abs() < 1e-13, "{total}");
+    // int_left x v = 0 for P1, which is exact for linear x.
+    let mut x = disc.global_vector().unwrap();
+    disc.interpolate(|[x, _]| x, &mut x).unwrap();
+    let left = disc.boundary_load(&[("left", 1.0)]).unwrap();
+    assert!(x.dot(&left).unwrap().abs() < 1e-14);
+    // int_bottom y v = 0, int_top y v = 1.
+    let mut y = disc.global_vector().unwrap();
+    disc.interpolate(|[_, y]| y, &mut y).unwrap();
+    let top_bottom = disc
+        .boundary_load(&[("top", 1.0), ("bottom", 1.0)])
+        .unwrap();
+    assert!((y.dot(&top_bottom).unwrap() - 1.0).abs() < 1e-14);
+    // A region is not a boundary.
+    let e = disc.boundary_load(&[("domain", 1.0)]).unwrap_err();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
+    assert!(e.to_string().contains("domain"), "{e}");
+    // Essential dofs are not in the load: the corners of "left" are lost to "top".
+    let essential = Discretization::with_essential(&mesh, 1, &ceed(), 1, &["left"]).unwrap();
+    let one = constant(&essential, 1.0);
+    let top = essential.boundary_load(&[("top", 1.0)]).unwrap();
+    let total = one.dot(&top).unwrap();
+    // The top side has 8 edges after one refinement: the corner on the left side lacks half of
+    // the first one.
+    assert!((total - 15.0 / 16.0).abs() < 1e-14, "{total}");
+}
+
+#[test]
 fn inverted_element_is_error() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = load(&p, "inverted_triangle.msh", 0);
@@ -412,7 +472,7 @@ fn level_out_of_range_is_error() {
 /// mesh (ghost dofs shared between processes, global numbering by owner), and errors found on
 /// some processes only. On 3 processes, `inverted_triangle.msh` (2 cells) leaves one without
 /// cells.
-const PARALLEL_TESTS: [&str; 11] = [
+const PARALLEL_TESTS: [&str; 14] = [
     "mpi_world_has_the_expected_size",
     "mass_integrates_area",
     "diffusion_kills_constants",
@@ -423,6 +483,9 @@ const PARALLEL_TESTS: [&str; 11] = [
     "apply_local_uses_essential_values",
     "source_integrates_over_the_domain",
     "quadrature_points_cover_every_cell",
+    "quadrature_weights_sum_to_the_area",
+    "interpolation_takes_the_values_at_the_nodes",
+    "boundary_load_integrates_the_fluxes",
     "inverted_element_is_error",
 ];
 

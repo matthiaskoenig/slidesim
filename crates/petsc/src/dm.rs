@@ -283,6 +283,30 @@ impl Dm {
         Ok(values)
     }
 
+    /// The local points owned by another process (the leaves of the point SF, `DMGetPointSF`),
+    /// sorted: each point of a distributed mesh has one owner, and is a ghost on the other
+    /// processes which have it. None on one process.
+    pub fn ghost_points(&self) -> Result<Vec<Point>> {
+        let mut sf = null_mut();
+        // SAFETY: the SF is borrowed from the DM.
+        chk!(unsafe { sys::DMGetPointSF(self.raw, &mut sf) });
+        let (mut roots, mut leaves) = (0, 0);
+        let mut local: *const sys::PetscInt = null();
+        // SAFETY: `local` (the leaf points, or null for 0..leaves) is borrowed from the SF.
+        chk!(unsafe { sys::PetscSFGetGraph(sf, &mut roots, &mut leaves, &mut local, null_mut()) });
+        // Without a graph (roots < 0), no point is shared.
+        if roots < 0 || leaves <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut points = if local.is_null() {
+            (0..leaves).collect()
+        } else {
+            unsafe { std::slice::from_raw_parts(local, leaves as usize) }.to_vec()
+        };
+        points.sort_unstable();
+        Ok(points)
+    }
+
     /// The local points where the label `name` has the value `value`; none if there is no such
     /// label or value (`DMGetStratumIS`).
     pub fn stratum_points(&self, name: &str, value: sys::PetscInt) -> Result<Vec<Point>> {

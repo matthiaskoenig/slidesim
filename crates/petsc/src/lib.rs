@@ -29,10 +29,12 @@ mod error;
 mod fe;
 mod ksp;
 mod matrix;
+mod options;
+mod snes;
 mod ts;
 mod vector;
 
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CString, c_char, c_int};
 use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,9 +47,11 @@ pub use error::{Error, Result};
 #[doc(hidden)]
 pub use error::{check as __check, ensure_alive as __ensure_alive};
 pub use fe::{Fe, Quadrature, Tabulation};
-pub use ksp::Ksp;
+pub use ksp::{ConvergedReason, Ksp};
 pub use matrix::{Matrix, ShellOperator};
-pub use ts::Ts;
+pub use options::OptionsScope;
+pub use snes::Snes;
+pub use ts::{ExactFinalTime, Implicit, ProblemType, Ts};
 pub use vector::{AsVec, AsVecMut, VecMut, VecRef, Vector};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -130,53 +134,18 @@ impl Petsc {
     /// The value of the option `name` (for example `-ksp_type`) in the global options database:
     /// `None` if it is not set, `Some("")` if it is set without a value (`PetscOptionsFindPair`).
     pub fn option(&self, name: &str) -> Result<Option<String>> {
-        let name = c_string(name, "PETSc option")?;
-        let mut value: *const c_char = null();
-        let mut set = false;
-        // SAFETY: `value` points into the options database, and is copied before any other call.
-        chk!(unsafe {
-            sys::PetscOptionsFindPair(null_mut(), null(), name.as_ptr(), &mut value, &mut set)
-        });
-        Ok(set.then(|| {
-            if value.is_null() {
-                String::new()
-            } else {
-                unsafe { CStr::from_ptr(value) }
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        }))
+        options::get(name)
     }
 
     /// Sets the option `name` (starting with `-`) to `value`, or without a value, in the global
     /// options database (`PetscOptionsSetValue`).
     pub fn set_option(&self, name: &str, value: Option<&str>) -> Result<()> {
-        if !name.starts_with('-') {
-            return Err(Error::new(
-                sys::PETSC_ERR_ARG_WRONG,
-                format!("PETSc option {name:?} does not start with '-'"),
-            ));
-        }
-        let name = c_string(name, "PETSc option")?;
-        let value = value
-            .map(|v| c_string(v, "PETSc option value"))
-            .transpose()?;
-        // SAFETY: PETSc copies both strings.
-        chk!(unsafe {
-            sys::PetscOptionsSetValue(
-                null_mut(),
-                name.as_ptr(),
-                value.as_ref().map_or(null(), |v| v.as_ptr()),
-            )
-        });
-        Ok(())
+        options::set(name, value)
     }
 
     /// Removes the option `name` from the global options database (`PetscOptionsClearValue`).
     pub fn clear_option(&self, name: &str) -> Result<()> {
-        let name = c_string(name, "PETSc option")?;
-        chk!(unsafe { sys::PetscOptionsClearValue(null_mut(), name.as_ptr()) });
-        Ok(())
+        options::clear(name)
     }
 
     /// Runs `body` with the option `name` set to `value` (or without a value) in the global
@@ -191,11 +160,7 @@ impl Petsc {
         let previous = self.option(name)?;
         self.set_option(name, value)?;
         let result = body();
-        let restored = match previous.as_deref() {
-            None => self.clear_option(name),
-            Some("") => self.set_option(name, None),
-            Some(v) => self.set_option(name, Some(v)),
-        };
+        let restored = options::restore(name, previous.as_deref());
         let value = result?;
         restored?;
         Ok(value)

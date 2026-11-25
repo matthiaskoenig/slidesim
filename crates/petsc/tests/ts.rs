@@ -1,0 +1,336 @@
+//! Tests of time steppers with implicit equations from Rust, their solvers and their converged
+//! reasons, and of options scoped to a prefix. nextest runs each test in its own process, so
+//! every test initializes PETSc once.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use petsc::sys;
+use petsc::{
+    Error, ExactFinalTime, Implicit, Matrix, OptionsScope, Petsc, ProblemType, Result,
+    ShellOperator, Ts, VecMut, VecRef, Vector,
+};
+
+const N: usize = 4;
+
+/// The operator `(shift + lambda_i) I`: the Jacobian of [`Decay`].
+struct Diagonal {
+    shift: Rc<Cell<f64>>,
+}
+
+/// The rates `lambda_i` of [`Decay`].
+fn lambda(i: usize) -> f64 {
+    0.5 + i as f64
+}
+
+impl ShellOperator for Diagonal {
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()> {
+        let x = x.with_array(<[f64]>::to_vec)?;
+        y.with_array_mut(|y| {
+            for (i, (y, x)) in y.iter_mut().zip(x).enumerate() {
+                *y = (self.shift.get() + lambda(i)) * x;
+            }
+        })
+    }
+
+    fn diagonal(&self, d: &mut VecMut<'_>) -> Result<()> {
+        d.with_array_mut(|d| {
+            for (i, d) in d.iter_mut().enumerate() {
+                *d = self.shift.get() + lambda(i);
+            }
+        })
+    }
+}
+
+/// `u_t + lambda_i u_i = 0`, recording the shifts of its Jacobians.
+struct Decay {
+    shift: Rc<Cell<f64>>,
+    shifts: Rc<RefCell<Vec<f64>>>,
+    residuals: usize,
+    /// Fail the residual from this evaluation on.
+    fail_at: Option<usize>,
+}
+
+impl Implicit for Decay {
+    fn residual(
+        &mut self,
+        _t: f64,
+        u: &VecRef<'_>,
+        u_t: &VecRef<'_>,
+        f: &mut VecMut<'_>,
+    ) -> Result<()> {
+        self.residuals += 1;
+        if self.fail_at.is_some_and(|n| self.residuals >= n) {
+            return Err(Error {
+                code: sys::PETSC_ERR_USER,
+                message: "residual failed on purpose".to_string(),
+            });
+        }
+        let u = u.with_array(<[f64]>::to_vec)?;
+        let u_t = u_t.with_array(<[f64]>::to_vec)?;
+        f.with_array_mut(|f| {
+            for (i, f) in f.iter_mut().enumerate() {
+                *f = u_t[i] + lambda(i) * u[i];
+            }
+        })
+    }
+
+    fn jacobian(
+        &mut self,
+        _t: f64,
+        _u: &VecRef<'_>,
+        _u_t: &VecRef<'_>,
+        shift: f64,
+    ) -> Result<bool> {
+        self.shifts.borrow_mut().push(shift);
+        let changed = self.shift.get() != shift;
+        self.shift.set(shift);
+        Ok(changed)
+    }
+}
+
+/// A BDF2 stepper of [`Decay`] with time step `dt`, CG and Jacobi, with the options under
+/// `decay_`; its solution, all ones; and its Jacobian.
+fn decay(p: &Petsc, dt: f64, fail_at: Option<usize>) -> (Ts<Decay>, Vector, Matrix) {
+    let shift = Rc::new(Cell::new(f64::NAN));
+    let jacobian = Matrix::shell(
+        &p.comm_self(),
+        N,
+        N,
+        Box::new(Diagonal {
+            shift: Rc::clone(&shift),
+        }),
+    )
+    .unwrap();
+    let equation = Decay {
+        shift,
+        shifts: Rc::default(),
+        residuals: 0,
+        fail_at,
+    };
+    let mut ts = Ts::implicit(&p.comm_self(), equation, &jacobian, &jacobian).unwrap();
+    ts.set_options_prefix("decay_").unwrap();
+    ts.set_type("bdf").unwrap();
+    ts.set_bdf_order(2).unwrap();
+    ts.set_problem_type(ProblemType::Linear).unwrap();
+    ts.set_adapt_type("none").unwrap();
+    ts.set_exact_final_time(ExactFinalTime::MatchStep).unwrap();
+    ts.set_time(0.0).unwrap();
+    ts.set_time_step(dt).unwrap();
+    let mut ksp = ts.snes().unwrap().ksp().unwrap();
+    ksp.set_type("cg").unwrap();
+    ksp.set_pc_type("jacobi").unwrap();
+    ts.set_from_options().unwrap();
+    let mut u = Vector::create_seq(p, N).unwrap();
+    u.set(1.0).unwrap();
+    (ts, u, jacobian)
+}
+
+/// The largest error of `u` against `exp(-lambda_i t)`.
+fn error(u: &Vector, t: f64) -> f64 {
+    u.with_array(|u| {
+        u.iter()
+            .enumerate()
+            .map(|(i, u)| (u - (-lambda(i) * t).exp()).abs())
+            .fold(0.0, f64::max)
+    })
+    .unwrap()
+}
+
+#[test]
+fn bdf2_converges_with_order_two() {
+    let p = Petsc::init(&["-decay_ksp_rtol", "1e-14"]).unwrap();
+    let errors: Vec<f64> = [0.02, 0.01]
+        .into_iter()
+        .map(|dt| {
+            let (mut ts, mut u, _) = decay(&p, dt, None);
+            ts.set_max_time(1.0).unwrap();
+            ts.solve(&mut u).unwrap();
+            assert_eq!(ts.time().unwrap(), 1.0);
+            assert_eq!(ts.step_number().unwrap(), (1.0 / dt).round() as usize);
+            let reason = ts.converged_reason().unwrap();
+            assert_eq!(reason.code, sys::TS_CONVERGED_TIME);
+            assert_eq!(reason.name, "CONVERGED_TIME");
+            assert!(!reason.diverged());
+            let snes = ts.snes().unwrap();
+            assert!(snes.converged_reason().unwrap().code > 0);
+            assert!(snes.ksp().unwrap().converged_reason().unwrap().code > 0);
+            error(&u, 1.0)
+        })
+        .collect();
+    let order = (errors[0] / errors[1]).log2();
+    assert!((1.9..=2.1).contains(&order), "{errors:?}: order {order}");
+}
+
+/// The state of `m` (`PetscObjectStateGet`), which increases with each change.
+fn state(m: &Matrix) -> sys::PetscObjectState {
+    let mut state = 0;
+    assert_eq!(
+        unsafe { sys::PetscObjectStateGet(m.as_raw() as sys::PetscObject, &mut state) },
+        0
+    );
+    state
+}
+
+/// The number of changes of shift in `shifts`, from none.
+fn changes(shifts: &[f64]) -> usize {
+    1 + shifts.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+#[test]
+fn jacobian_sees_the_shifts_and_marks_changes() {
+    let p = Petsc::init(&[]).unwrap();
+    let (mut ts, mut u, jacobian) = decay(&p, 0.1, None);
+    let before = state(&jacobian);
+    ts.set_max_time(0.5).unwrap();
+    ts.solve(&mut u).unwrap();
+    // The first step in two halves, of BDF1 and BDF2 (TSBDF's start), then steps of BDF2.
+    let shifts = ts.context().shifts.borrow().clone();
+    assert_eq!(shifts.len(), 6, "{shifts:?}");
+    let expected = [20.0, 30.0, 15.0, 15.0, 15.0, 15.0];
+    for (s, e) in shifts.iter().zip(expected) {
+        assert!((s - e).abs() < 1e-12, "{shifts:?}");
+    }
+    // The matrix was marked changed with each change of shift (rounding included).
+    assert_eq!((state(&jacobian) - before) as usize, changes(&shifts));
+    // Restarted, the next step starts afresh; the context is reachable between solves.
+    ts.context_mut().shifts.borrow_mut().clear();
+    ts.restart_step().unwrap();
+    ts.set_max_time(0.6).unwrap();
+    ts.solve(&mut u).unwrap();
+    let shifts = ts.context().shifts.borrow().clone();
+    assert!((shifts[0] - 20.0).abs() < 1e-12, "{shifts:?}");
+    assert!((ts.time().unwrap() - 0.6).abs() < 1e-15);
+}
+
+#[test]
+fn solves_continue_from_the_time_reached() {
+    let p = Petsc::init(&["-decay_ksp_rtol", "1e-14"]).unwrap();
+    let (mut ts, mut u, _) = decay(&p, 0.1, None);
+    // Stops between steps, then goes on with the same steps.
+    for t in [0.25, 1.0] {
+        ts.set_max_time(t).unwrap();
+        ts.solve(&mut u).unwrap();
+        assert_eq!(ts.time().unwrap(), t);
+    }
+    assert!(error(&u, 1.0) < 1e-2, "{}", error(&u, 1.0));
+}
+
+#[test]
+fn not_converged_linear_solve_is_error() {
+    let p = Petsc::init(&[
+        "-decay_ksp_max_it",
+        "1",
+        "-decay_ksp_type",
+        "gmres",
+        "-decay_pc_type",
+        "none",
+        "-decay_ksp_error_if_not_converged",
+    ])
+    .unwrap();
+    let (mut ts, mut u, _) = decay(&p, 0.1, None);
+    ts.set_max_time(1.0).unwrap();
+    let e = ts.solve(&mut u).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_NOT_CONVERGED, "{e}");
+    let reason = ts
+        .snes()
+        .unwrap()
+        .ksp()
+        .unwrap()
+        .converged_reason()
+        .unwrap();
+    assert_eq!(reason.code, sys::KSP_DIVERGED_ITS);
+    assert_eq!(reason.name, "DIVERGED_ITS");
+    assert!(reason.diverged());
+    assert_eq!(ts.time().unwrap(), 0.0);
+}
+
+#[test]
+fn failed_step_sets_a_diverged_reason() {
+    let p = Petsc::init(&[
+        "-decay_ksp_max_it",
+        "1",
+        "-decay_ksp_type",
+        "gmres",
+        "-decay_pc_type",
+        "none",
+        "-decay_ts_error_if_step_fails",
+        "false",
+    ])
+    .unwrap();
+    let (mut ts, mut u, _) = decay(&p, 0.1, None);
+    ts.set_max_time(1.0).unwrap();
+    ts.solve(&mut u).unwrap();
+    let reason = ts.converged_reason().unwrap();
+    assert_eq!(reason.code, sys::TS_DIVERGED_NONLINEAR_SOLVE);
+    assert_eq!(reason.name, "DIVERGED_NONLINEAR_SOLVE");
+    let snes = ts.snes().unwrap().converged_reason().unwrap();
+    assert_eq!(snes.name, "DIVERGED_LINEAR_SOLVE");
+}
+
+#[test]
+fn residual_error_reaches_solve() {
+    let p = Petsc::init(&[]).unwrap();
+    let (mut ts, mut u, _) = decay(&p, 0.1, Some(3));
+    ts.set_max_time(1.0).unwrap();
+    let e = ts.solve(&mut u).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_USER, "{e}");
+    assert!(e.message.contains("residual failed on purpose"), "{e}");
+    assert!(e.message.contains("Implicit::residual"), "{e}");
+}
+
+#[test]
+fn options_scope_sets_and_restores_prefixed_options() {
+    let p = Petsc::init(&["-s_ksp_type", "gmres"]).unwrap();
+    let scope = OptionsScope::new(
+        "s_",
+        &["-ksp_monitor -ksp_type cg -ksp_rtol 1e-3", "-ksp_rtol 1e-6"],
+    )
+    .unwrap();
+    assert_eq!(p.option("-s_ksp_monitor").unwrap().as_deref(), Some(""));
+    assert_eq!(p.option("-s_ksp_type").unwrap().as_deref(), Some("cg"));
+    // A later text overrides an earlier one.
+    assert_eq!(p.option("-s_ksp_rtol").unwrap().as_deref(), Some("1e-6"));
+    assert_eq!(p.option("-ksp_type").unwrap(), None);
+    // One scope per prefix (option names are case insensitive).
+    let e = OptionsScope::new("S_", &[]).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONGSTATE);
+    assert!(e.message.contains("S_"), "{e}");
+    let other = OptionsScope::new("t_", &["-ksp_type bcgs"]).unwrap();
+    drop(scope);
+    // As before: unset, or the value from the command line.
+    assert_eq!(p.option("-s_ksp_monitor").unwrap(), None);
+    assert_eq!(p.option("-s_ksp_rtol").unwrap(), None);
+    assert_eq!(p.option("-s_ksp_type").unwrap().as_deref(), Some("gmres"));
+    assert_eq!(p.option("-t_ksp_type").unwrap().as_deref(), Some("bcgs"));
+    drop(other);
+    assert_eq!(p.option("-t_ksp_type").unwrap(), None);
+    OptionsScope::new("s_", &[]).unwrap();
+}
+
+#[test]
+fn options_scope_reaches_the_solvers_of_its_prefix() {
+    let p = Petsc::init(&[]).unwrap();
+    let _scope = OptionsScope::new("decay_", &["-ksp_type gmres -ts_type beuler"]).unwrap();
+    let (ts, _, _) = decay(&p, 0.1, None);
+    let mut name: sys::TSType = std::ptr::null();
+    assert_eq!(unsafe { sys::TSGetType(ts.as_raw(), &mut name) }, 0);
+    assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"beuler");
+    let ksp = ts.snes().unwrap().ksp().unwrap();
+    let mut name: sys::KSPType = std::ptr::null();
+    assert_eq!(unsafe { sys::KSPGetType(ksp.as_raw(), &mut name) }, 0);
+    assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"gmres");
+}
+
+#[test]
+fn invalid_options_scopes_are_errors() {
+    let _p = Petsc::init(&[]).unwrap();
+    for prefix in ["", "1a_", "a b_", "a-b_", "-a_"] {
+        let e = OptionsScope::new(prefix, &[]).unwrap_err();
+        assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONG, "{prefix:?}: {e}");
+    }
+    let e = OptionsScope::new("a_", &["-options_file /nonexistent/options"]).unwrap_err();
+    assert!(e.message.contains("/nonexistent/options"), "{e}");
+    // The failed scope left nothing behind.
+    OptionsScope::new("a_", &[]).unwrap();
+}

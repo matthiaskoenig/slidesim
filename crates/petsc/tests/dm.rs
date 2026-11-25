@@ -198,3 +198,49 @@ fn refined_cell_volumes_need_local_coordinates() {
     let total: f64 = cells.map(|c| fine.cell_volume(c).unwrap()).sum();
     assert!((total - 2.0).abs() < 1e-14);
 }
+
+#[test]
+fn ghost_points_of_a_distributed_mesh() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mut dm = quad_box(&comm);
+    if let Some(distributed) = dm.distribute(0).unwrap() {
+        dm = distributed;
+    }
+    let ghosts = dm.ghost_points().unwrap();
+    assert!(ghosts.is_sorted());
+    if comm.size() == 1 {
+        assert!(ghosts.is_empty());
+    }
+    // Each point is owned by one process: 4 cells, 9 vertices and 12 edges in all.
+    let owned = |range: std::ops::Range<sys::PetscInt>| {
+        let ghost = ghosts.iter().filter(|g| range.contains(g)).count();
+        comm.sum_int((range.len() - ghost) as sys::PetscInt)
+            .unwrap()
+    };
+    assert_eq!(owned(dm.height_stratum(0).unwrap()), 4);
+    assert_eq!(owned(dm.depth_stratum(0).unwrap()), 9);
+    assert_eq!(owned(dm.depth_stratum(1).unwrap()), 12);
+}
+
+/// The tests `parallel_on_*_processes` run on several processes: points shared between them.
+const PARALLEL_TESTS: [&str; 2] = [
+    "mpi_world_has_the_expected_size",
+    "ghost_points_of_a_distributed_mesh",
+];
+
+#[test]
+fn mpi_world_has_the_expected_size() {
+    let p = Petsc::init(&[]).unwrap();
+    assert_eq!(p.comm().size(), test_support::ranks());
+}
+
+#[test]
+fn parallel_on_2_processes() {
+    test_support::parallel(2, &PARALLEL_TESTS);
+}
+
+#[test]
+fn parallel_on_3_processes() {
+    test_support::parallel(3, &PARALLEL_TESTS);
+}

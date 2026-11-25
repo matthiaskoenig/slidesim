@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ceed::{CVector, EvalMode, FieldVector, Operator, QFunction};
-use petsc::{AsVecMut, InsertMode, Matrix, ShellOperator, VecMut, VecRef, Vector};
+use petsc::{AsVec, AsVecMut, InsertMode, Matrix, ShellOperator, VecMut, VecRef, Vector};
 
 use crate::discretization::Shared;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE};
@@ -127,7 +127,8 @@ impl DiffusionReaction {
         Ok(())
     }
 
-    fn mult_global(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> Result<()> {
+    /// `y = A x` for the global vectors `x` and `y`, with zero essential values. Collective.
+    pub(crate) fn mult_global(&self, x: &impl AsVec, y: &mut impl AsVecMut) -> Result<()> {
         let mut work = self.work.borrow_mut();
         let Work {
             x: x_local,
@@ -193,6 +194,61 @@ impl ShellOperator for DiffusionReaction {
 
     fn diagonal(&self, d: &mut VecMut<'_>) -> petsc::Result<()> {
         self.diagonal_global(d).map_err(PdeError::into_petsc)
+    }
+}
+
+/// A [`DiffusionReaction`] shared between a shell matrix (as its [`ShellOperator`]) and the code
+/// which changes its coefficients while PETSc owns the matrix: an implicit time integrator
+/// changes the shift each step.
+#[derive(Clone, Debug)]
+pub struct SharedOperator(pub Rc<RefCell<DiffusionReaction>>);
+
+impl ShellOperator for SharedOperator {
+    fn mult(&self, x: &VecRef<'_>, y: &mut VecMut<'_>) -> petsc::Result<()> {
+        self.0.borrow().mult(x, y)
+    }
+
+    fn diagonal(&self, d: &mut VecMut<'_>) -> petsc::Result<()> {
+        self.0.borrow().diagonal(d)
+    }
+}
+
+/// The values of a field of a [`Discretization`] at its quadrature points, in their layout.
+#[derive(Debug)]
+pub(crate) struct PointValues {
+    op: Operator,
+}
+
+impl PointValues {
+    pub(crate) fn new(disc: &Discretization) -> Result<PointValues> {
+        let shared = disc.shared();
+        let ceed = &shared.ceed;
+        // SAFETY: the fields match what Values reads and writes; no context.
+        let mut qf =
+            unsafe { QFunction::interior(ceed, 1, Some(qf::slidesim_pde_Values), qf::VALUES) }?;
+        qf.add_input("u", 1, EvalMode::Interp)?;
+        qf.add_output("u_q", 1, EvalMode::None)?;
+        let mut op = Operator::new(ceed, &qf)?;
+        op.set_field(
+            "u",
+            Some(&shared.restriction),
+            Some(&shared.basis),
+            FieldVector::Active,
+        )?;
+        op.set_field(
+            "u_q",
+            Some(&shared.point_restriction),
+            None,
+            FieldVector::Active,
+        )?;
+        Ok(PointValues { op })
+    }
+
+    /// The values of the function `x_local` (a local vector, with its essential values) at the
+    /// quadrature points of the local cells, into `values`.
+    pub(crate) fn apply(&self, x_local: &Vector, values: &mut [f64]) -> Result<()> {
+        x_local.with_array(|x| self.op.apply_slices(x, values))??;
+        Ok(())
     }
 }
 

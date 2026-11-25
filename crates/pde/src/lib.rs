@@ -10,6 +10,9 @@
 //!   diagonal and its assembled matrix;
 //! - [`SourceField`]: values at the quadrature points, integrated against the test functions.
 //!
+//! A [`Problem`] steps one diffusion-reaction field of a study in time (BDF2, PETSc `TS`) on the
+//! finest level.
+//!
 //! The QFunctions are C headers in `qfunctions/` ([`QFUNCTION_DIR`]), compiled by `build.rs`
 //! for the CPU backends; backends which compile them at run time read them from there.
 //!
@@ -18,9 +21,11 @@
 
 mod discretization;
 mod operators;
+mod problem;
 
 pub use discretization::Discretization;
-pub use operators::{DiffusionReaction, SourceField};
+pub use operators::{DiffusionReaction, SharedOperator, SourceField};
+pub use problem::Problem;
 
 /// The absolute path of the directory of the QFunction sources.
 pub const QFUNCTION_DIR: &str = env!("SLIDESIM_PDE_QFUNCTIONS");
@@ -40,6 +45,14 @@ pub enum PdeError {
     #[error("tag '{tag}' is not an essential boundary of the discretization; essential: {}",
         .essential.join(", "))]
     NotEssential { tag: String, essential: Vec<String> },
+    /// The time integration failed: a solver diverged or a step failed. `reason` is the PETSc
+    /// converged reason of the innermost solver which failed (for example `KSP DIVERGED_ITS`),
+    /// `t` the time reached (in s), at the last step which succeeded.
+    #[error("time integration failed at t = {t} s: {reason}")]
+    Diverged { reason: String, t: f64 },
+    /// A time to step to which is before the current time (or not a number).
+    #[error("cannot step to t = {t} s from t = {time} s")]
+    InvalidTime { t: f64, time: f64 },
     #[error(transparent)]
     Mesh(#[from] mesh::MeshError),
     #[error(transparent)]
@@ -90,6 +103,7 @@ mod qfunctions {
         slidesim_pde_SetupGeometry2D,
         slidesim_pde_QuadraturePoints2D,
         slidesim_pde_Mass,
+        slidesim_pde_Values,
         slidesim_pde_DiffusionReaction2D
     );
 
@@ -103,6 +117,7 @@ mod qfunctions {
     pub const SETUP_GEOMETRY_2D: &str = source!("geometry.h:SetupGeometry2D");
     pub const QUADRATURE_POINTS_2D: &str = source!("geometry.h:QuadraturePoints2D");
     pub const MASS: &str = source!("mass.h:Mass");
+    pub const VALUES: &str = source!("mass.h:Values");
     pub const DIFFUSION_REACTION_2D: &str = source!("diffusion.h:DiffusionReaction2D");
 
     /// The number of components of the quadrature data (`GEOMETRY_2D_SIZE` of `geometry.h`).

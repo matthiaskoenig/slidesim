@@ -623,6 +623,7 @@ name = "petsc"
 version = "0.1.0"
 dependencies = [
  "petsc-sys",
+ "test-support",
 ]
 
 [[package]]
