@@ -51,8 +51,22 @@ impl QFunction {
     /// libCEED calls `f(ctx, Q, in, out)` with the context data ([`QFunction::set_context`],
     /// else NULL), the number of points `Q`, and arrays of `size * Q` values for the fields in
     /// the order added, laid out `[size][Q]`. `f` returns 0, or an error code which makes the
-    /// operator call fail. It must not unwind.
-    pub fn interior(
+    /// operator call fail.
+    ///
+    /// # Safety
+    ///
+    /// `f` must be sound whenever libCEED calls it as above: with the context data set on this
+    /// QFunction (or NULL if none is set), and with arrays of `size * Q` values for exactly the
+    /// input and output fields added with [`QFunction::add_input`] and
+    /// [`QFunction::add_output`], in the order added. The wrapper cannot check what `f` reads
+    /// or writes: the caller is responsible for adding the fields and setting the context so
+    /// that they match what `f` accesses, for every operator built on this QFunction.
+    ///
+    /// # Panics
+    ///
+    /// `f` is an `extern "C"` function: a panic unwinding out of it aborts the process. A Rust
+    /// QFunction must return an error code instead of panicking.
+    pub unsafe fn interior(
         ceed: &Ceed,
         vlength: usize,
         f: sys::CeedQFunctionUser,

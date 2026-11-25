@@ -105,7 +105,10 @@ fn mass_operator(
     let b_u = Basis::h1_lagrange_simplex(ceed, dim, 1, degree, q_order).unwrap();
     let r_u = ElemRestriction::new(ceed, ncell, b_u.num_nodes(), 1, 1, u_size, u_offsets).unwrap();
 
-    let mut qf = QFunction::interior(ceed, 1, Some(mass_qf), concat!(file!(), ":mass_qf")).unwrap();
+    // SAFETY: the fields below and the context [dim, scale] match what mass_qf reads.
+    let mut qf =
+        unsafe { QFunction::interior(ceed, 1, Some(mass_qf), concat!(file!(), ":mass_qf")) }
+            .unwrap();
     qf.add_input("dx", dim * dim, EvalMode::Grad).unwrap();
     qf.add_input("w", 1, EvalMode::Weight).unwrap();
     qf.add_input("u", 1, EvalMode::Interp).unwrap();
@@ -193,7 +196,8 @@ fn resources_lists_default() {
 #[test]
 fn libceed_error_has_message_and_call() {
     let ceed = ceed();
-    let mut qf = QFunction::interior(&ceed, 1, Some(mass_qf), "qf.h:mass_qf").unwrap();
+    // SAFETY: never applied (setting the field fails), so mass_qf is never called.
+    let mut qf = unsafe { QFunction::interior(&ceed, 1, Some(mass_qf), "qf.h:mass_qf") }.unwrap();
     qf.add_input("u", 2, EvalMode::Interp).unwrap();
     qf.add_output("v", 1, EvalMode::Interp).unwrap();
     let mut op = Operator::new(&ceed, &qf).unwrap();
@@ -215,14 +219,17 @@ fn libceed_error_has_message_and_call() {
 fn stale_message_never_attaches() {
     let ceed = ceed();
     // An error with a libCEED message: a source without a function name.
-    let e = QFunction::interior(&ceed, 1, Some(mass_qf), "no-function").unwrap_err();
+    // SAFETY: creation fails, so mass_qf is never called.
+    let e = unsafe { QFunction::interior(&ceed, 1, Some(mass_qf), "no-function") }.unwrap_err();
     assert!(e.message.contains("no-function"), "{e}");
 
     // An error without one: a QFunction returning an error code.
     let mesh = Mesh::interval(2);
     let r = ElemRestriction::new(&ceed, 2, 2, 1, 1, 3, &mesh.cells).unwrap();
     let b = Basis::h1_lagrange_simplex(&ceed, 1, 1, 1, 2).unwrap();
-    let mut qf = QFunction::interior(&ceed, 1, Some(failing_qf), "qf.h:failing_qf").unwrap();
+    // SAFETY: failing_qf accesses nothing.
+    let mut qf =
+        unsafe { QFunction::interior(&ceed, 1, Some(failing_qf), "qf.h:failing_qf") }.unwrap();
     qf.add_input("u", 1, EvalMode::Interp).unwrap();
     qf.add_output("v", 1, EvalMode::Interp).unwrap();
     let mut op = Operator::new(&ceed, &qf).unwrap();
@@ -440,6 +447,7 @@ fn basis_arrays_are_validated() {
 #[test]
 fn qfunction_is_validated() {
     let ceed = ceed();
-    assert!(QFunction::interior(&ceed, 1, None, "qf.h:none").is_err());
-    assert!(QFunction::interior(&ceed, 0, Some(mass_qf), "qf.h:mass_qf").is_err());
+    // SAFETY (both): creation fails, so no function is ever called.
+    assert!(unsafe { QFunction::interior(&ceed, 1, None, "qf.h:none") }.is_err());
+    assert!(unsafe { QFunction::interior(&ceed, 0, Some(mass_qf), "qf.h:mass_qf") }.is_err());
 }
