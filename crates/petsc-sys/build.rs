@@ -15,6 +15,10 @@
 //! Only `-L` and `-l` of the pkg-config and `mpicc` link lines are used: anything else there is
 //! a compile flag that must not reach the linker.
 //!
+//! If PETSc has PT-Scotch, the shim calls it too, with the include and link flags PETSc records in
+//! `lib/petsc/conf/petscvariables` (`PTSCOTCH_INCLUDE`, `PTSCOTCH_LIB`; `petscvariables.rs`):
+//! PT-Scotch may live outside `PETSC_DIR`.
+//!
 //! wasm32-wasip1 is not supported yet. It will link the static archives of `deps/install/wasi`
 //! (`pkg-config --static`) plus the wasi-libc emulation libraries listed in
 //! `spike/petsc-wasm/PATCHES.md`, take the sysroot from wasi-sdk instead of MPI include flags,
@@ -23,6 +27,12 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// Shared with other build scripts, each using part of it.
+#[allow(dead_code)]
+#[path = "petscvariables.rs"]
+mod petscvariables;
+use petscvariables::Package;
 
 /// C flags of every C file in slidesim (reproducible floating point on every target).
 const C_FLAGS: [&str; 2] = ["-ffp-contract=off", "-fno-fast-math"];
@@ -66,21 +76,32 @@ fn link_native(petsc_dir: &Path) {
     );
     link_line(&petsc);
     link_line(&run("mpicc", &["-show"], &[]));
-    // The shim calls PT-Scotch directly (`libpetsc.so` links it, but its symbols are not
-    // re-exported to the shim).
-    if petsc_has(petsc_dir, "PTSCOTCH") {
-        println!("cargo:rustc-link-lib=scotch");
-    }
 }
 
-/// Whether the PETSc installation defines `PETSC_HAVE_<package>` in its `petscconf.h`.
-fn petsc_has(petsc_dir: &Path, package: &str) -> bool {
-    let conf = petsc_dir.join("include/petscconf.h");
-    println!("cargo:rerun-if-changed={}", conf.display());
-    let text = std::fs::read_to_string(&conf)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", conf.display()));
-    let define = format!("#define PETSC_HAVE_{package} 1");
-    text.lines().any(|l| l.trim() == define)
+/// PT-Scotch, if PETSc has it: the shim calls it directly (`libpetsc.so` links it, but that
+/// does not link the shim to it). It may be installed outside `PETSC_DIR`, so its include and
+/// link flags come from PETSc's `petscvariables`. Panics if PETSc has PT-Scotch but its flags
+/// cannot be found: the shim would lose the reset of PT-Scotch's random generator.
+fn ptscotch(petsc_dir: &Path) -> Option<Package> {
+    for file in petscvariables::files(petsc_dir) {
+        println!("cargo:rerun-if-changed={}", file.display());
+    }
+    let package = petscvariables::package(petsc_dir, "PTSCOTCH")
+        .unwrap_or_else(|e| panic!("petsc-sys: {e}"))?;
+    for flag in package.include.ignored.iter().chain(&package.lib.ignored) {
+        println!("cargo:warning=petsc-sys: ignored flag {flag:?} of PT-Scotch in petscvariables");
+    }
+    Some(package)
+}
+
+/// Links the libraries of `package` (an rpath is for the binaries to set, see the crate docs).
+fn link_package(package: &Package) {
+    for dir in &package.lib.link_dirs {
+        println!("cargo:rustc-link-search=native={dir}");
+    }
+    for lib in &package.lib.libs {
+        println!("cargo:rustc-link-lib={lib}");
+    }
 }
 
 /// Include directories of PETSc and MPI.
@@ -95,7 +116,8 @@ fn include_dirs_native(petsc_dir: &Path) -> Vec<String> {
     dirs
 }
 
-/// `shim.c`: values PETSc defines as macros which bindgen cannot translate.
+/// `shim.c`: values PETSc defines as macros which bindgen cannot translate, and the calls into
+/// PETSc's external packages.
 fn compile_shim(include_dirs: &[String]) {
     println!("cargo:rerun-if-changed=shim.c");
     let mut build = cc::Build::new();
@@ -165,7 +187,11 @@ fn main() {
         });
 
     link_native(&petsc_dir);
-    let include_dirs = include_dirs_native(&petsc_dir);
+    let mut include_dirs = include_dirs_native(&petsc_dir);
+    if let Some(ptscotch) = ptscotch(&petsc_dir) {
+        link_package(&ptscotch);
+        include_dirs.extend(ptscotch.include.include_dirs);
+    }
     compile_shim(&include_dirs);
     generate_bindings(&target, &sdk, &include_dirs);
 }
