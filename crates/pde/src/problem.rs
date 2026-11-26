@@ -133,7 +133,7 @@ pub struct Exchanged {
 /// advection defect, zero to rounding for the conservative velocity, see [`MassBalance`]).
 /// [`Problem::interval_balance`] is the balance over the steps since a time
 /// ([`Problem::start_interval`]), the changes of [`Problem::modify`] included, each term its
-/// mean rate: the terms integrated by the weights of the BDF steps ([`Integral`]), so that they
+/// mean rate: the terms integrated by the weights of the BDF steps (`Integral`), so that they
 /// add up to the change of the amount exactly (up to the residuals of the linear solves).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
@@ -819,14 +819,14 @@ impl Problem {
     /// each term its mean rate there (the amount over the length of the interval, in
     /// mM*um^2/s): `storage_rate` the change of [`Problem::total_mass`]; `source`, the inflows
     /// and `advection_defect` the terms of the steps, integrated by the weights of the BDF
-    /// steps ([`Integral`]); `exchange` and [`BoundaryInflow::resupply`] what the changes of
+    /// steps (`Integral`); `exchange` and [`BoundaryInflow::resupply`] what the changes of
     /// [`Problem::modify`] booked. The interval starts at t = 0, then at every
     /// [`Problem::start_interval`] and [`Problem::set_initial_condition`]. Collective.
     ///
     /// Errors: [`PdeError::NotStepped`] for an interval of no length; [`PdeError::Poisoned`]
     /// after a failed [`Problem::step_to`]; [`PdeError::Unsupported`] if the options chose
     /// another time integration than `TSBDF` of order 2
-    /// ([`Problem::without_interval_balance`]), and if the steps were not as [`Integral`]
+    /// ([`Problem::without_interval_balance`]), and if the steps were not as `Integral`
     /// follows them.
     pub fn interval_balance(&self) -> Result<MassBalance> {
         self.ensure_usable()?;

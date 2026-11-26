@@ -82,7 +82,7 @@ impl CellModel {
     /// blood compartment, both volumes are settable compartments, every parameter a settable
     /// entity, every output a state or the target of an assignment rule, and both tolerances
     /// positive. For the batched path, also the QFunction of the model, compiled the same way
-    /// (see [`QModel`]). Collective.
+    /// (see `QModel`). Collective.
     ///
     /// Errors: [`CellsError::Tolerance`], [`CellsError::UnknownId`] (listing what the model
     /// has) and [`CellsError::Invalid`] for the checks; on every process,
@@ -117,7 +117,8 @@ impl CellModel {
 }
 
 /// The QFunction of a model for the batched path ([`sbmlsim_c::generate_qfunction`]): the model
-/// with the Rosenbrock integrator RODAS4, one step attempt per point and application.
+/// with the Rosenbrock integrator RODAS4, step attempts per point until it is done or failed, at
+/// most a number per application (`RosenbrockContext::attempts`).
 pub(crate) struct QModel {
     pub(crate) q: QSource,
     /// The library of [`QSource::host_code`], whose [`QSource::host_symbol`] the CPU backends of

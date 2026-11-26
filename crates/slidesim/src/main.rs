@@ -58,11 +58,14 @@ Output files in DIR:
                           resupply of Dirichlet values next to the cells (storage_rate = source
                           + inflows + exchange - advection_defect); with perfusion also
                           perfusion.tag_flows (um^2/s per pressure tag, positive into the
-                          domain); with cells also cells: their count, steps and rejected steps,
-                          per output time the amount each linked field got from them since
-                          t = 0 (exchanged) and the amounts of the species of the cell
-                          compartment (amounts, mM*um^2); phases: the wall time (s) of process 0
-                          in setup, pressure (the flow), transport, exchange, cells and output
+                          domain) and perfusion.pressure_islands (the count and area_um2 of the
+                          parts no pressure tag reaches: pressure 0, no flow); with cells also
+                          cells: their count, steps and rejected steps, seconds (the time of
+                          each process in its cells: mean and max over the processes), per
+                          output time the amount each linked field got from them since t = 0
+                          (exchanged) and the amounts of the species of the cell compartment
+                          (amounts, mM*um^2); phases: the wall time (s) of process 0 in setup,
+                          pressure (the flow), transport, exchange, cells and output
   pressure.vtu            with perfusion: the pressure, point data 'pressure.Pa'
   velocity.vtu            with perfusion: the Darcy velocity (um/s), the point vector 'velocity'
 Files <field id>_<index>.vtu, cells_<index>.vtu, pressure.vtu and velocity.vtu of an earlier run

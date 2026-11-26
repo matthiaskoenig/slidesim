@@ -19,7 +19,7 @@ const SHIFT_MATCH: f64 = 1e-8;
 /// derivative at `t_0`, whose sum is zero. The mass balance holds at the stage for any linear
 /// functional `T` of the terms (the storage, the sources, the inflows): `T(c_t) = sum` of the
 /// other terms at `c_0`. Hence, with `X` an integral of the terms which satisfies
-/// `a_0 (X_0 - X_1) - a_2 (X_2 - X_1) = x_0` at every stage, for `x_0` the terms at the stage,
+/// `a_0 (X_0 - X_1) + a_2 (X_2 - X_1) = x_0` at every stage, for `x_0` the terms at the stage,
 /// the integral of the storage is exactly the change of the amount, and the integrals of the
 /// terms add up as the terms do. `X` is affine in `x`, so this integrates the vectors the terms are
 /// linear in: the solution (and the source, in case it changes between steps) at the stages,

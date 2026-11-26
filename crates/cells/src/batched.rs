@@ -44,7 +44,7 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 /// The cells of a process as one libCEED operator: one point per cell (one element of one node
 /// per cell, strided restrictions, no basis), the QFunction of the model
 /// ([`sbmlsim_c::generate_qfunction`]: the model with the Rosenbrock integrator RODAS4, step
-/// attempts per point until it reaches the end of the advance, at most [`MAX_ATTEMPTS`])
+/// attempts per point until it reaches the end of the advance, at most `MAX_ATTEMPTS`, 10^6)
 /// compiled once per process (`sbmlsim_c`, cached across processes and runs).
 ///
 /// The cells are initialized as the engine path initializes its steppers (a
@@ -60,10 +60,10 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 /// often as the cell of the most attempts needs, the cells which are done included.) Each cell
 /// takes its own steps with the tolerances of the spec and keeps its step from one advance to
 /// the next, so a cell depends on no other cell, the number of processes, the backend or its
-/// blocks. A cell fails where its next step would be smaller than [`H_MIN`] (in the time unit of
-/// the model) or too small to advance the time, which rejected steps cause (an error estimate
-/// above the tolerances, values which are not finite, a singular Jacobian), or after
-/// [`MAX_ATTEMPTS`] step attempts in one advance.
+/// blocks. A cell fails where its next step would be smaller than `H_MIN` = 1e-10 (in the time
+/// unit of the model) or too small to advance the time, which rejected steps cause (an error
+/// estimate above the tolerances, values which are not finite, a singular Jacobian), or after
+/// `MAX_ATTEMPTS` step attempts in one advance.
 pub struct BatchedCells {
     species: Vec<String>,
     state_ids: Vec<String>,
@@ -143,7 +143,7 @@ impl Batch {
         let source = format!("{}:{}", qmodel.source.display(), q.function);
         // SAFETY: the fields added below are the inputs and outputs of the QFunction in their
         // order and sizes ([`sbmlsim_c::INPUTS`], [`sbmlsim_c::OUTPUTS`]), and its context is
-        // the four values of `RosenbrockContext`, set before any application.
+        // the five values of `RosenbrockContext`, set before any application.
         let mut qfunction = unsafe { QFunction::interior(ceed, 1, Some(function), &source) }?;
         let inputs = [ns, np, CONTROL, COUNTS];
         let outputs = [ns, CONTROL, COUNTS];
