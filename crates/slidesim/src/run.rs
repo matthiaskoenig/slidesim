@@ -96,6 +96,17 @@ struct Summary {
     phases: BTreeMap<&'static str, f64>,
 }
 
+/// `x` rounded to `digits` significant digits, for a log line (all digits before the point).
+fn significant(x: f64, digits: i32) -> String {
+    let magnitude = if x == 0.0 || !x.is_finite() {
+        0
+    } else {
+        x.abs().log10().floor() as i32
+    };
+    let decimals = usize::try_from(digits - 1 - magnitude).unwrap_or(0);
+    format!("{x:.decimals$}")
+}
+
 /// The wall time of process 0 in each phase of a run, the phases separated by barriers, so that
 /// a phase ends when every process ended it.
 #[derive(Debug)]
@@ -314,7 +325,8 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
             println!(
                 "perfusion: {} pressure island{plural} of {} um^2 in all, which no pressure \
                  boundary reaches: pressure 0 and no flow there",
-                islands.count, islands.area
+                islands.count,
+                significant(islands.area, 4)
             );
         }
         write_flow(flow, out)?;
@@ -527,7 +539,15 @@ fn write_vtu(problem: &Problem, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_output;
+    use super::{is_output, significant};
+
+    #[test]
+    fn log_values_have_significant_digits() {
+        assert_eq!(significant(1.000_000_000_000_2, 4), "1.000");
+        assert_eq!(significant(0.012_345_6, 4), "0.01235");
+        assert_eq!(significant(12_345.67, 4), "12346");
+        assert_eq!(significant(0.0, 4), "0.000");
+    }
 
     #[test]
     fn outputs_are_named_after_the_field_and_the_index() {

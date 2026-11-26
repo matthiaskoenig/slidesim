@@ -405,7 +405,11 @@ fn island_reports_pressure_islands() {
         .filter(|line| line.contains("pressure island"))
         .collect();
     assert_eq!(lines.len(), 1, "{}", run.stdout);
-    assert!(lines[0].contains("1 pressure island "), "{}", lines[0]);
+    assert!(
+        lines[0].contains("1 pressure island of 1.000 um^2 in all"),
+        "{}",
+        lines[0]
+    );
     // The mass balance of the tracer stays exact: the island exchanges nothing by advection.
     let portal = summary_json(&out)["perfusion"]["tag_flows"]["portal_wall"]
         .as_f64()
