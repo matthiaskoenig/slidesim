@@ -141,6 +141,11 @@ fn day(cells: &mut [&mut dyn CellSolver], fixed: &[f64]) -> Day {
     }
 }
 
+/// The largest difference of the batched path from the reference at the switch of the necrosis
+/// of [`batched_matches_engine`], in multiples of the bound: about twice the 473 measured (for
+/// `P_ext`), so that a change of the batched path which makes it worse there fails.
+const SWITCH_CAP: f64 = 1000.0;
+
 /// The SPT model with the 50 parameter sets as cells on `lobule_toy`, the blood held fixed,
 /// 1440 min in steps of 60 min: the batched path at the tolerances of the spec agrees with the
 /// engine at tight tolerances within the bound of sbmlsim-c's QFunction against its stepper;
@@ -152,7 +157,7 @@ fn day(cells: &mut [&mut dyn CellSolver], fixed: &[f64]) -> Day {
 /// the cells which reach it amplify the differences of their trajectories, so neither path
 /// keeps the bound there (measured: the batched path up to 473 times it, the engine at the
 /// tolerances of the spec up to 7818 times); the batched path is within the bound or the closer
-/// one for every state.
+/// one for every state, which the test prints; it asserts the cap [`SWITCH_CAP`].
 #[test]
 fn batched_matches_engine() {
     c_cache();
@@ -236,10 +241,11 @@ fn batched_matches_engine() {
     let worst = day(&mut [&mut engine, &mut batched, &mut engine_loose], &fixed).worst;
     for (s, id) in ids.iter().enumerate() {
         let (w_batched, w_engine) = (worst[1][s], worst[2][s]);
+        // The engine at the same tolerances for comparison only: its differences are no bound.
         eprintln!("{id} at the switch: batched {w_batched:.3}, engine {w_engine:.3} of the bound");
         assert!(
-            w_batched <= w_engine.max(1.0),
-            "{id}: batched {w_batched}, engine {w_engine}"
+            w_batched <= SWITCH_CAP,
+            "{id}: batched {w_batched} of the bound (engine {w_engine})"
         );
     }
 }
