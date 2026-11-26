@@ -92,6 +92,28 @@ impl<C: Implicit> Ts<C> {
         });
         Ok(ts)
     }
+
+    /// Replaces the matrices of the Jacobian and of its preconditioner (`TSSetIJacobian`, with
+    /// the equation of [`Ts::implicit`]), which the `TS` keeps references to; the matrices
+    /// [`Implicit::jacobian`] marks changed.
+    pub fn set_jacobian_matrices(
+        &mut self,
+        jacobian: &Matrix,
+        preconditioner: &Matrix,
+    ) -> Result<()> {
+        let ctx: *mut c_void = self.context.cast();
+        // SAFETY: as in `Ts::implicit`.
+        chk!(unsafe {
+            sys::TSSetIJacobian(
+                self.raw,
+                jacobian.as_raw(),
+                preconditioner.as_raw(),
+                Some(ijacobian::<C>),
+                ctx,
+            )
+        });
+        Ok(())
+    }
 }
 
 impl<C> Ts<C> {

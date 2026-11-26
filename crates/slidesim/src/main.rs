@@ -12,6 +12,7 @@ mod run;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use petsc::Petsc;
@@ -47,7 +48,8 @@ Output files in DIR:
                           advection_defect and, per boundary tag, the advective and diffusive
                           inflow (storage_rate = source + inflows - advection_defect); with
                           perfusion also perfusion.tag_flows (um^2/s per pressure tag,
-                          positive into the domain)
+                          positive into the domain); phases: the wall time (s) of process 0
+                          in setup, pressure (the flow), transport and output
   pressure.vtu            with perfusion: the pressure, point data 'pressure.Pa'
   velocity.vtu            with perfusion: the Darcy velocity (um/s), the point vector 'velocity'
 Files <field id>_<index>.vtu, pressure.vtu and velocity.vtu of an earlier run in DIR are removed
@@ -73,6 +75,8 @@ struct RunArgs {
 }
 
 fn main() -> ExitCode {
+    // The start of the run, for the phases of its summary.
+    let started = Instant::now();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -86,11 +90,11 @@ fn main() -> ExitCode {
         }
     };
     match cli.command {
-        Command::Run(args) => run_command(&args),
+        Command::Run(args) => run_command(&args, started),
     }
 }
 
-fn run_command(args: &RunArgs) -> ExitCode {
+fn run_command(args: &RunArgs, started: Instant) -> ExitCode {
     let options: Vec<&str> = args.petsc_options.iter().map(String::as_str).collect();
     let petsc = match Petsc::init(&options) {
         Ok(petsc) => petsc,
@@ -99,7 +103,7 @@ fn run_command(args: &RunArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run::run(&petsc, &args.study, &args.out) {
+    match run::run(&petsc, &args.study, &args.out, started) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let comm = petsc.comm();

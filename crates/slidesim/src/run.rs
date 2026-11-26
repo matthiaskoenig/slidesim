@@ -20,7 +20,8 @@
 //!     "mass_balance": [null | {
 //!         "storage_rate": ..., "source": ..., "advection_defect": ...,
 //!         "boundary": {"<tag>": {"advective": ..., "diffusive": ...}}}]}},
-//!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>}}}
+//!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>}},
+//!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "output": ...}}
 //! ```
 //!
 //! with, per output time, the time reached (s), the L2 norm of the field (mM*um), its amount of
@@ -30,10 +31,16 @@
 //! `storage_rate = source + sum over the tags of (advective + diffusive) - advection_defect`,
 //! the inflow through each tag of the boundary positive into the domain
 //! ([`pde::BoundaryInflow`]). `perfusion` is there for a study with perfusion: the flow through
-//! each pressure tag ([`Flow::tag_flows`], positive into the domain).
+//! each pressure tag ([`Flow::tag_flows`], positive into the domain). `phases` is the wall time
+//! of process 0 in each phase of the run (s), the phases separated by barriers: `setup` (from the
+//! start of the process: PETSc, the study, the mesh, the maps and the problems of the fields),
+//! `pressure` (the flow, zero without perfusion), `transport` (the steps of the fields) and
+//! `output` (the files and the values of the summary); together the time of the run but the
+//! writing of `summary.json` itself.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use ceed::Ceed;
@@ -50,6 +57,43 @@ struct Summary {
     fields: BTreeMap<String, FieldSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     perfusion: Option<PerfusionSummary>,
+    /// The wall time of process 0 in each phase: s.
+    phases: BTreeMap<&'static str, f64>,
+}
+
+/// The wall time of process 0 in each phase of a run, the phases separated by barriers, so that
+/// a phase ends when every process ended it.
+#[derive(Debug)]
+struct Phases {
+    comm: Comm,
+    /// The end of the last phase.
+    last: Instant,
+    seconds: BTreeMap<&'static str, f64>,
+}
+
+impl Phases {
+    /// The phases of a run started at `started`, each at zero seconds.
+    fn new(comm: Comm, started: Instant) -> Phases {
+        let seconds = ["setup", "pressure", "transport", "output"]
+            .into_iter()
+            .map(|name| (name, 0.0))
+            .collect();
+        Phases {
+            comm,
+            last: started,
+            seconds,
+        }
+    }
+
+    /// Ends a time spent in the phase `name`, from the end of the last phase, when every process
+    /// ended it. Collective.
+    fn end(&mut self, name: &'static str) -> Result<()> {
+        self.comm.barrier()?;
+        let now = Instant::now();
+        *self.seconds.entry(name).or_default() += (now - self.last).as_secs_f64();
+        self.last = now;
+        Ok(())
+    }
 }
 
 /// The flow of the study.
@@ -111,14 +155,15 @@ impl From<MassBalance> for BalanceSummary {
 }
 
 /// Runs the study of the file `study_path` and writes its results into the directory `out` (see
-/// the module documentation). Collective.
-pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
+/// the module documentation), for a process started at `started`. Collective.
+pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Result<()> {
     let study = Study::load(study_path).context("cannot load the study")?;
     let scene = Scene::load(&study.scene).context("cannot load the scene")?;
     check_maps(&study, &scene)?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
     let comm = petsc.comm();
+    let mut phases = Phases::new(comm, started);
     // Process 0 writes every file, after it removed the outputs of an earlier run.
     if comm.rank() == 0 {
         std::fs::create_dir_all(out)
@@ -128,6 +173,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
     comm.barrier()?;
 
     let maps = read_maps(&comm, &study, &scene, &mesh)?;
+    phases.end("setup")?;
     let flow = study
         .perfusion
         .as_ref()
@@ -136,9 +182,11 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
                 .context("perfusion")
         })
         .transpose()?;
+    phases.end("pressure")?;
     if let Some(flow) = &flow {
         write_flow(flow, out)?;
     }
+    phases.end("output")?;
     let inputs = Inputs {
         maps: &maps,
         flow: flow.as_ref(),
@@ -158,6 +206,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
             .with_context(|| format!("field '{}'", field.id))
         })
         .collect::<Result<Vec<_>>>()?;
+    phases.end("setup")?;
     let mut summary = Summary {
         fields: study
             .fields
@@ -167,6 +216,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
         perfusion: flow.as_ref().map(|flow| PerfusionSummary {
             tag_flows: flow.tag_flows().iter().cloned().collect(),
         }),
+        phases: BTreeMap::new(),
     };
     for (index, &t) in study.time.outputs.iter().enumerate() {
         for (field, problem) in study.fields.iter().zip(&mut problems) {
@@ -174,6 +224,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
             problem
                 .step_to(t)
                 .with_context(|| format!("field '{id}'"))?;
+            phases.end("transport")?;
             let values = summary
                 .fields
                 .get_mut(id)
@@ -191,6 +242,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
             let path = out.join(format!("{id}_{index}.vtu"));
             write_vtu(problem, &path)
                 .with_context(|| format!("cannot write {}", path.display()))?;
+            phases.end("output")?;
         }
     }
     for (field, problem) in study.fields.iter().zip(&mut problems) {
@@ -198,7 +250,9 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path) -> Result<()> {
             .step_to(study.time.end)
             .with_context(|| format!("field '{}'", field.id))?;
     }
+    phases.end("transport")?;
 
+    summary.phases = phases.seconds;
     if comm.rank() == 0 {
         let path = out.join("summary.json");
         let text = serde_json::to_string_pretty(&summary)? + "\n";

@@ -64,8 +64,19 @@ pub struct Transport {
     op: Operator,
     /// The context the QFunction holds: `[shift, terms]`.
     context: Cell<[f64; 2]>,
+    /// Of [`Terms::Jacobian`], once assembled: the values of the coordinate entries of libCEED
+    /// of the steady terms and of the mass term, of which the values at a shift `s` are
+    /// `steady + s mass` (the Jacobian is affine in the shift).
+    affine: RefCell<Option<Affine>>,
     /// Local vectors: the input of [`ShellOperator::mult`], and results.
     work: RefCell<Work>,
+}
+
+/// The values of the coordinate entries of a Jacobian, by term.
+#[derive(Debug)]
+struct Affine {
+    steady: Vec<f64>,
+    mass: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -139,6 +150,7 @@ impl Transport {
             qf: RefCell::new(qf),
             op,
             context: Cell::new(context),
+            affine: RefCell::new(None),
             work: RefCell::new(Work {
                 x: disc.local_vector()?,
                 y: disc.local_vector()?,
@@ -286,20 +298,46 @@ impl Transport {
     /// [`Transport::assemble`] of this operator or of one on the same discretization with the
     /// same terms and the same backflow entries ([`PointData::with_backflow`]): the coordinate
     /// pattern is that of libCEED for the discretization followed by the backflow entries, so
-    /// the entries keep their places and only their values are computed again (with the shift
-    /// and the coefficients at the time of the call). Collective.
+    /// the entries keep their places and only their values are computed again, with the shift
+    /// of the time of the call. The Jacobian ([`Terms::Jacobian`]) assembles its steady and
+    /// mass terms once, at its first assembly, and combines them for each shift (equal to its
+    /// assembly at the shift up to rounding): the assembly of libCEED costs several applications
+    /// of the operator, the combination one pass over the entries. Collective.
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
-        self.update_context()?;
-        let values = self.op.assemble_coo_values()?;
-        let backflow = self.backflow();
-        if backflow.is_empty() {
-            values.with_array(|values| matrix.set_values_coo(values))??;
-        } else {
-            let mut all = values.with_array(<[f64]>::to_vec)?;
-            all.extend(backflow.iter().map(|&(_, _, value)| value));
-            matrix.set_values_coo(&all)?;
-        }
+        let mut values = match self.terms {
+            Terms::Jacobian => {
+                let mut affine = self.affine.borrow_mut();
+                if affine.is_none() {
+                    // At shift 0 the Jacobian is the steady terms.
+                    *affine = Some(Affine {
+                        steady: self.coo_values([0.0, Terms::Jacobian.context()])?,
+                        mass: self.coo_values([1.0, Terms::Mass.context()])?,
+                    });
+                }
+                let affine = affine.as_ref().expect("assembled above");
+                affine
+                    .steady
+                    .iter()
+                    .zip(&affine.mass)
+                    .map(|(s, m)| s + self.shift * m)
+                    .collect()
+            }
+            Terms::Steady | Terms::Mass => {
+                self.update_context()?;
+                self.op.assemble_coo_values()?.with_array(<[f64]>::to_vec)?
+            }
+        };
+        values.extend(self.backflow().iter().map(|&(_, _, value)| value));
+        matrix.set_values_coo(&values)?;
         Ok(())
+    }
+
+    /// The values of the coordinate entries of libCEED of the operator with the context
+    /// `context` (`[shift, terms]`) instead of its own, which it sets again at its next use.
+    fn coo_values(&self, context: [f64; 2]) -> Result<Vec<f64>> {
+        self.qf.borrow_mut().set_context(&context)?;
+        self.context.set(context);
+        Ok(self.op.assemble_coo_values()?.with_array(<[f64]>::to_vec)?)
     }
 
     /// The discretization of the operator.

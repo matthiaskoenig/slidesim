@@ -17,7 +17,7 @@ use std::rc::Rc;
 use common::{PIXELS, Scratch, ceed, unit_square};
 use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
-use mesh::MeshError;
+use mesh::{Mesh, MeshError};
 use pde::{Inputs, PdeError, PointData, Problem, Terms, Transport};
 use petsc::{Petsc, Vector};
 
@@ -495,6 +495,69 @@ fn fixed_steps_keep_their_size_after_requested_times() {
     assert_eq!(problem.time_step(), 0.1);
 }
 
+/// The fixed steps of the tests of reuse: 20 steps of 0.25 to t = 5 (sums of binary fractions,
+/// exact), in two calls of `step_to` or one.
+const REUSE_DT: f64 = 0.25;
+const REUSE_HALF: f64 = 2.5;
+const REUSE_END: f64 = 5.0;
+
+/// The problem of the tests of reuse, on refinement 2 of the unit square (three levels of
+/// multigrid), at t = 0 with the initial condition `phi`.
+fn reuse_problem(mesh: &Mesh) -> Problem {
+    let mut problem = Problem::new(
+        mesh,
+        &field(D, K),
+        &fixed(REUSE_END, REUSE_DT),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem
+}
+
+/// A problem keeps its operators and multigrid between steps and between calls of `step_to`:
+/// 20 steps in two calls build the operator of each level once.
+#[test]
+fn operators_are_built_once() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let levels = mesh.levels().len();
+    assert_eq!(levels, 3);
+    let mut problem = reuse_problem(&mesh);
+    assert_eq!(problem.operator_builds(), levels);
+    problem.step_to(REUSE_HALF).unwrap();
+    problem.step_to(REUSE_END).unwrap();
+    assert_eq!(problem.steps().unwrap(), 20);
+    assert_eq!(problem.operator_builds(), levels);
+}
+
+/// Steps in two calls of `step_to`, with the operators and the multigrid of the first call,
+/// reach the solution of a fresh problem stepped in one call.
+#[test]
+fn same_result_with_reuse() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let reused = {
+        let mut problem = reuse_problem(&mesh);
+        problem.step_to(REUSE_HALF).unwrap();
+        problem.step_to(REUSE_END).unwrap();
+        problem.l2_norm().unwrap()
+    };
+    // One problem per field id at a time: the first is dropped.
+    let fresh = {
+        let mut problem = reuse_problem(&mesh);
+        problem.step_to(REUSE_END).unwrap();
+        assert_eq!(problem.steps().unwrap(), 20);
+        problem.l2_norm().unwrap()
+    };
+    assert!(
+        (reused - fresh).abs() <= 1e-12 * fresh.abs(),
+        "{reused} with reuse, {fresh} fresh"
+    );
+}
+
 #[test]
 fn adaptive_steps_keep_the_choice_of_the_adaptor() {
     let p = Petsc::init(&[]).unwrap();
@@ -791,12 +854,14 @@ fn spatial_order_variable_coefficients_on_refinements_1_and_2() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 10] = [
+const PARALLEL_TESTS: [&str; 12] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",
     "fixed_steps_keep_their_size_after_requested_times",
+    "operators_are_built_once",
+    "same_result_with_reuse",
     "spatial_order_p1_on_refinements_2_and_3",
     "spatial_order_variable_coefficients_on_refinements_1_and_2",
     "table_of_a_missing_map_is_error",

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use test_support::{Mpiexec, Run, run_with_timeout};
@@ -323,6 +323,34 @@ fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
         .collect();
     assert!(near.len() > 10, "{}", near.len());
     near.iter().sum::<f64>() / near.len() as f64
+}
+
+/// The phases of a run in `summary.json`, the wall time of process 0 in each: together the time
+/// of the run.
+#[test]
+fn summary_has_phases() {
+    let out = scratch("summary_has_phases");
+    let start = Instant::now();
+    let run = slidesim(&args(&lobule_study(), &out, &[]));
+    let wall = start.elapsed().as_secs_f64();
+    assert_success(&run);
+    let summary = summary_json(&out);
+    let phases = summary["phases"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no phases in {summary}"));
+    let mut sum = 0.0;
+    for name in ["setup", "pressure", "transport", "output"] {
+        let seconds = phases
+            .get(name)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("no phase {name} in {phases:?}"));
+        assert!(seconds >= 0.0, "{name}: {seconds}");
+        sum += seconds;
+    }
+    assert!(
+        (sum - wall).abs() <= 0.1 * wall,
+        "phases {phases:?} sum to {sum} s, the run took {wall} s"
+    );
 }
 
 #[test]

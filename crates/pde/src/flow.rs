@@ -70,8 +70,8 @@ const VELOCITY_UNIT: &str = "um/s";
 /// to zero, the flux through each edge of a wall without pressure condition is zero, and the
 /// fluxes through the edges of each pressure tag add up to its flow ([`Flow::tag_flows`]). It
 /// converges at the order of the primal velocity, 1. (A point where the boundary touches itself
-/// is two vertices of the mesh, one per side, see [`Mesh::load`]: no flow passes there.) Both are at the quadrature points, not
-/// projected onto a finite element space.
+/// is two vertices of the mesh, one per side, see [`Mesh::load`]: no flow passes there.) Both
+/// are at the quadrature points, not projected onto a finite element space.
 ///
 /// Discretization: P1 on every level of the mesh, with the pressure tags essential, and the
 /// operator `-div(D grad p)`, `D = K / mu`, of [`Transport`] ([`Terms::Steady`]). The pressure
@@ -80,17 +80,17 @@ const VELOCITY_UNIT: &str = "um/s";
 /// with its own mesh (for the operators of the coarser levels of a multigrid preconditioner of
 /// a transport equation carried by the flow).
 ///
-/// Solver: CG on the shell operator of the level, preconditioned by geometric multigrid over
-/// the levels up to it ([`configure_multigrid`]; level 0 by its coarse solver, algebraic
-/// multigrid, alone), with one step of iterative refinement (the residual solved for once
-/// more): the fluxes conserve mass in each cell up to the residual at the free dofs, which the
-/// refinement takes from about `1e-11` of the largest flow through a node to rounding. PETSc options: the solvers have the options prefix `perfusion_`, and
-/// read, lowest precedence first: the defaults `-ksp_error_if_not_converged -ksp_rtol 1e-12`
-/// (a tighter tolerance than that of [`crate::Problem`], for the flows through the tags); the
-/// options of the caller (`petsc_options` of [`Flow::solve`], written without the prefix);
-/// options under the prefix already in the global options database (the command line, for
-/// example `-perfusion_ksp_monitor`). The solves of every level read them. The options are set
-/// while the solve runs only ([`OptionsScope`]).
+/// Solver: CG on the shell operator of the level, preconditioned by geometric multigrid over the
+/// levels up to it ([`configure_multigrid`]; level 0 by its coarse solver, algebraic multigrid,
+/// alone), with one step of iterative refinement (the residual solved for once more): the fluxes
+/// conserve mass in each cell up to the residual at the free dofs, which the refinement takes from
+/// about `1e-11` of the largest flow through a node to rounding. PETSc options: the solvers have
+/// the options prefix `perfusion_`, and read, lowest precedence first: the defaults
+/// `-ksp_error_if_not_converged -ksp_rtol 1e-12` (a tighter tolerance than that of
+/// [`crate::Problem`], for the flows through the tags); the options of the caller (`petsc_options`
+/// of [`Flow::solve`], written without the prefix); options under the prefix already in the global
+/// options database (the command line, for example `-perfusion_ksp_monitor`). The solves of every
+/// level read them. The options are set while the solve runs only ([`OptionsScope`]).
 ///
 /// Boundary flows ([`Flow::tag_flows`]): the net flow into the domain through each pressure
 /// tag (um^2/s in 2D, positive for inflow), from the residual of the full discrete equation at

@@ -10,7 +10,8 @@ use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
 use mesh::Mesh;
 use petsc::{
-    ExactFinalTime, Implicit, OptionsScope, Point, ProblemType, Ts, VecMut, VecRef, Vector, sys,
+    ExactFinalTime, Implicit, Matrix, OptionsScope, Point, ProblemType, Ts, VecMut, VecRef, Vector,
+    sys,
 };
 
 use crate::balance::{self, Parts};
@@ -70,9 +71,9 @@ pub struct Inputs<'a> {
 /// test function `v + tau w . grad v` instead of `v` (streamline upwind Petrov-Galerkin, `tau`
 /// per point from [`PointData::stabilized`]; see [`Terms`]). The velocity of a flow is its
 /// conservative velocity, with `div w = 0` in each cell and a continuous normal component
-/// (Darcy without sources), so the advective form equals the conservative one. The coefficients are numbers or
-/// tables over maps ([`Coefficient`]), evaluated at the quadrature points of every level of the
-/// mesh ([`coefficient_values`]), with the velocity of the flow on that level
+/// (Darcy without sources), so the advective form equals the conservative one. The coefficients
+/// are numbers or tables over maps ([`Coefficient`]), evaluated at the quadrature points of every
+/// level of the mesh ([`coefficient_values`]), with the velocity of the flow on that level
 /// ([`Flow::velocity`], solved on every level): the coarser levels of the multigrid
 /// preconditioner discretize the same equation again.
 ///
@@ -84,8 +85,9 @@ pub struct Inputs<'a> {
 /// needs a Dirichlet condition ([`PdeError::Inflow`] otherwise); where the flow leaves, without
 /// a condition, the outflow is free: the advective form needs no boundary term, and the
 /// diffusive flux is zero. The flow may come back in locally through a tag of net outflow (the
-/// conservative velocity has no normal component on walls without flow); at each Gauss point of an edge of
-/// the boundary without Dirichlet condition where `w . n < 0`, the term `int (w . n)^- u v`
+/// conservative velocity has no normal component on walls without flow); at each Gauss point of
+/// an edge of the boundary without Dirichlet condition where `w . n < 0`, the term
+/// `int (w . n)^- u v`
 /// (`(w . n)^- = max(0, -w . n)`) keeps the advective flux from entering
 /// ([`PointData::with_backflow`], with the velocity at the edge, [`Flow::edge_velocity`]), in
 /// the residual, the Jacobian and the operators of every multigrid level.
@@ -98,13 +100,20 @@ pub struct Inputs<'a> {
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
 /// step is one linear solve (`SNESKSPONLY`) with the Jacobian
-/// `shift M_phi + A_w + K_(phi d) + M_(phi k)` as a matrix-free shell operator ([`Transport`]):
-/// CG without advection (the Jacobian is symmetric positive definite), GMRES with it;
-/// preconditioned by geometric multigrid over the levels of the mesh ([`configure_multigrid`]; a
-/// mesh without refinements is solved by its coarse solver, algebraic multigrid, alone). The
-/// operators are built once; a step changes the shift only, on every level, and when the shift
-/// changes the preconditioner is rebuilt (the smoothers set up again, the coarse operator
-/// assembled again).
+/// `shift M_phi + A_w + K_(phi d) + M_(phi k)`: CG without advection (the Jacobian is symmetric
+/// positive definite), GMRES with it; preconditioned by geometric multigrid over the levels of
+/// the mesh ([`configure_multigrid`]; a mesh without refinements is solved by its coarse solver,
+/// algebraic multigrid, alone). The operators of libCEED ([`Transport`]) are built once and
+/// assembled into sparse matrices, which the steps apply: an assembled matrix is several times
+/// cheaper to apply than its operator, and equals it up to rounding. The Jacobian is the
+/// assembled operator of the finest level of the multigrid ([`Multigrid::finest`]); if the
+/// options replace the multigrid preconditioner, the matrix-free operator. The residual applies
+/// the assembled steady terms and mass matrix, with the steady terms of the Dirichlet values
+/// computed once, and the source integrated matrix-free when it changed
+/// ([`Problem::source_mut`]). A step changes the shift only, on every level; when the shift changes
+/// the operators of the levels are assembled again and the preconditioner is rebuilt (the
+/// smoothers and the coarse solver set up again). The operators, their matrices and the
+/// multigrid are kept from step to step and from one [`Problem::step_to`] to the next.
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
@@ -156,6 +165,8 @@ pub struct Problem {
     /// without advection).
     edge_velocity: Vec<(Point, [[f64; 2]; 2])>,
     values: PointValues,
+    /// The operators of the levels of the Jacobian built, for tests of their reuse.
+    operator_builds: usize,
     /// Dropped after the `TS`, which may read options until it is destroyed.
     _options: OptionsScope,
 }
@@ -306,20 +317,27 @@ impl Problem {
             })
             .chain(std::iter::once(Ok(SharedOperator(Rc::clone(&jacobian)))))
             .collect::<Result<Vec<_>>>()?;
+        // The only operators of the levels the problem builds.
+        let operator_builds = level_operators.len();
+        let steady = Transport::new(&disc, Rc::clone(&data), Terms::Steady)?;
+        let mut lift = disc.global_vector()?;
+        steady.apply_local(&local_with_dirichlet(&disc, &dirichlet)?, &mut lift)?;
         let equation = Equation {
-            steady: Transport::new(&disc, Rc::clone(&data), Terms::Steady)?,
-            mass: Transport::new(&disc, Rc::clone(&data), Terms::Mass)?,
+            steady: steady.assemble()?,
+            lift,
+            mass: Transport::new(&disc, Rc::clone(&data), Terms::Mass)?.assemble()?,
+            data: Rc::clone(&data),
             jacobian,
             multigrid: None,
             source: SourceField::stabilized(&disc, data)?,
             f: fine.source,
             porosity: fine.porosity,
             load,
-            u_local: local_with_dirichlet(&disc, &dirichlet)?,
+            forcing: disc.global_vector()?,
+            forcing_stale: true,
             work: disc.global_vector()?,
             rate: disc.global_vector()?,
             rate_shift: None,
-            disc: disc.clone(),
         };
 
         let mut ts = Ts::implicit(&disc.dm().comm(), equation, &shell, &shell)?;
@@ -340,6 +358,7 @@ impl Problem {
         ts.set_from_options()?;
         // Unless the options replaced it.
         if ksp.pc()?.type_name()? == "mg" {
+            ts.set_jacobian_matrices(multigrid.finest(), multigrid.finest())?;
             ts.context_mut().multigrid = Some(multigrid);
         }
 
@@ -360,6 +379,7 @@ impl Problem {
             conditions,
             edge_tags,
             edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
+            operator_builds,
             _options: options,
         })
     }
@@ -383,7 +403,10 @@ impl Problem {
     /// [`Discretization::quadrature_points`], for writing: the steps use the values it holds,
     /// integrated with the porosity (`int phi f v`). Initially the values of `FieldSpec::source`.
     pub fn source_mut(&mut self) -> &mut [f64] {
-        &mut self.ts.context_mut().f
+        let equation = self.ts.context_mut();
+        // Integrated again at the next residual.
+        equation.forcing_stale = true;
+        &mut equation.f
     }
 
     /// Steps to the time `t` (in s), the last steps shortened to end there (`TSAdapt` may split
@@ -485,6 +508,14 @@ impl Problem {
         Ok(self.ts.linear_iterations()?)
     }
 
+    /// The number of operators of the levels of the Jacobian the problem built (one per level of
+    /// the mesh): built once, they are kept, with the multigrid preconditioner over them, for
+    /// every step. For tests.
+    #[doc(hidden)]
+    pub fn operator_builds(&self) -> usize {
+        self.operator_builds
+    }
+
     /// The size of the next step (in s), before it is shortened to end at a requested time: the
     /// fixed `TimeSpec::dt`, or the latest choice of the adaptor.
     pub fn time_step(&self) -> f64 {
@@ -573,7 +604,7 @@ impl Problem {
         balance::mass_balance(&Parts {
             disc: &self.disc,
             free: &self.free,
-            data: equation.steady.data(),
+            data: &equation.data,
             f: &equation.f,
             porosity: &equation.porosity,
             c: &c,
@@ -714,11 +745,15 @@ struct Advection<'a> {
 /// (with SUPG test functions for advection, see [`Problem`]).
 #[derive(Debug)]
 struct Equation {
-    disc: Discretization,
-    /// `A_w + K_(phi d) + M_(phi k)`.
-    steady: Transport,
-    /// `M_phi`.
-    mass: Transport,
+    /// `A_w + K_(phi d) + M_(phi k)` assembled, on the dofs without the essential ones.
+    steady: Matrix,
+    /// The steady terms of the Dirichlet values: [`Transport::apply_local`] of the steady
+    /// terms to the local vector of the Dirichlet values and zeros.
+    lift: Vector,
+    /// `M_phi` assembled.
+    mass: Matrix,
+    /// The coefficients of the finest level.
+    data: Rc<PointData>,
     /// The Jacobian `shift M_phi + A_w + K_(phi d) + M_(phi k)`, shared with its shell matrix.
     jacobian: Rc<RefCell<Transport>>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
@@ -731,8 +766,11 @@ struct Equation {
     porosity: Vec<f64>,
     /// The load of the boundary fluxes, if any.
     load: Option<Vector>,
-    /// The solution with its Dirichlet values, which stay.
-    u_local: Vector,
+    /// The forcing of the equation, `int phi f v + int_Gamma q v`: the source integrated, and
+    /// the load. Integrated again only when the source changed.
+    forcing: Vector,
+    /// Whether the source changed since the forcing was integrated.
+    forcing_stale: bool,
     work: Vector,
     /// `u_t - shift u` of the last Jacobian: the time derivative of an implicit step of `TS` is
     /// affine in the solution (`u_t = shift u + rate` within a step, for `TSBDF` the
@@ -746,25 +784,30 @@ struct Equation {
 
 impl Equation {
     fn residual(&mut self, u: &VecRef<'_>, u_t: &VecRef<'_>, f: &mut VecMut<'_>) -> Result<()> {
-        self.disc.dm().global_to_local(u, &mut self.u_local)?;
-        self.steady.apply_local(&self.u_local, f)?;
+        // The steady terms of u with its Dirichlet values: of the dofs u holds, and of the
+        // Dirichlet values.
+        self.steady.mult(u, f)?;
+        f.axpy(1.0, &self.lift)?;
         // The essential dofs are constant: u_t holds the others.
-        self.mass.mult_global(u_t, &mut self.work)?;
+        self.mass.mult(u_t, &mut self.work)?;
         f.axpy(1.0, &self.work)?;
-        for ((s, f), phi) in self
-            .source
-            .values_mut()
-            .iter_mut()
-            .zip(&self.f)
-            .zip(&self.porosity)
-        {
-            *s = phi * f;
+        if self.forcing_stale {
+            for ((s, f), phi) in self
+                .source
+                .values_mut()
+                .iter_mut()
+                .zip(&self.f)
+                .zip(&self.porosity)
+            {
+                *s = phi * f;
+            }
+            self.source.apply(&mut self.forcing)?;
+            if let Some(load) = &self.load {
+                self.forcing.axpy(1.0, load)?;
+            }
+            self.forcing_stale = false;
         }
-        self.source.apply(&mut self.work)?;
-        f.axpy(-1.0, &self.work)?;
-        if let Some(load) = &self.load {
-            f.axpy(-1.0, load)?;
-        }
+        f.axpy(-1.0, &self.forcing)?;
         Ok(())
     }
 }
