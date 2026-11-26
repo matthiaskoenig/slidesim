@@ -9,6 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fca89247609239eeb6915e6991111866b92d7b31025e69302bbf430cc4d2c38"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "getrandom 0.4.3",
  "once_cell",
  "serde",
@@ -148,7 +149,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1299,12 +1300,12 @@ dependencies = [
 
 [[package]]
 name = "prettyplease"
-version = "0.3.0"
+version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1503,8 +1504,8 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-abi"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "serde",
  "thiserror",
@@ -1512,8 +1513,8 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-c"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "libloading",
  "sbmlsim-abi",
@@ -1527,8 +1528,8 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-codegen"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "sbmlsim-abi",
  "sbmlsim-ir",
@@ -1537,16 +1538,16 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-csolvers"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "sbmlsim-engine"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "rand_pcg",
  "sbmlsim-abi",
@@ -1555,8 +1556,8 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-ir"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "sbmlsim-abi",
  "sbmlsim-mathlib",
@@ -1566,16 +1567,16 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-mathlib"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "sbmlsim-sbml"
-version = "0.30.0"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9#7b63dcd33ca5afb1835ce6ac7d8f72b4012c97c9"
+version = "0.31.1"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
 dependencies = [
  "roxmltree",
  "thiserror",
