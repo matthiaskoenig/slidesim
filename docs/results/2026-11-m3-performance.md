@@ -261,3 +261,96 @@ works as long as its slowest cell needs.
 **Results.** The two paths agree: at 24 h the largest difference of a cell's `necrosis` is
 3.8e-6 (mean 1.6e-9), of `S` 2.3e-5 mM (of 5 mM), of `P` 1.5e-6 mM, of `T` 1.1e-6 mM; the total
 masses of the fields differ by 1.6e-8 relative, the amounts in the cells by at most 2.2e-7.
+
+## Coupled runs faster: restarts, the interval balance, the batched cells
+
+Task 13a, before the runs on the dosed slides. The machine was shared with another session
+(load average 1 to 5 before a run, 7 to 9 during an 8-process run); runs of one binary differed by
+up to 15 % in a phase. The tables give the times, the text the counts, which do not depend on
+the load.
+
+**Profile before** (72b51f6, 2 h of the 281 mg/kg slide, batched, 8 processes): transport 38.3 s,
+cells 21.5 s, exchange 2.8 s. Of the transport, `KSPSolve` 31.2 s (33,900 preconditioner
+applications, 20 GMRES iterations per solve to `-ksp_rtol 1e-10` at `dt` = 10 s; 722
+preconditioner setups, 2.4 s), Jacobian evaluations 2.1 s, residuals 1.2 s, and 1.6 s in the
+steps outside the solver (the integral of the mass balance). Each give-back restarted BDF2: 1,680
+solves for 1,440 steps (+17 %), and each of the three shifts of a start of BDF2 assembled every
+level and set the preconditioner up again. The cells: 14.5 % of the step attempts rejected.
+
+Changes:
+
+1. **The interval balance allocates nothing per stage** (`crates/pde/src/integral.rs`). The
+   integral of the source at a history point is `b + s f + r g` (`f` the current source, `b` and
+   `g` vectors fixed when the source changes, `s` and `r` numbers of the point), which the BDF
+   recurrence keeps, so a stage updates two numbers instead of collecting a vector at the
+   quadrature points; the vectors of history points no longer needed are taken again. The steps
+   outside the solver: 1.6 s -> 0.15 s (2 h).
+2. **The multigrid preconditioner is kept across changes of the shift within a factor of 2**
+   (`crates/pde/src/problem.rs`). The Krylov method applies its own assembled Jacobian at the
+   shift of the step, the multigrid preconditions it at the shift it was built at, and is built
+   again beyond a factor of 2 either way or at a shift two steps in a row have. A restart (shifts
+   2/dt, 3/dt, 1.5/dt) builds none. The time integration is unchanged; the alternatives which
+   would remove the extra solve of a restart are not second order (the report of task 13a:
+   shifting the BDF history by the change makes the splitting first order, measured: orders 0.16
+   and 0.71 at split steps of 1 to 0.25 s). 24 h: `PCSetUp` 8,642 -> 6, preconditioner applications
+   403,757 -> 415,416 (+2.9 %: the two restart solves of each split step use the preconditioner of
+   1.5/dt). With adaptive steps the preconditioner follows the step: 114 -> 20 setups in the
+   transport benchmark.
+3. **The batched cells advance in one application of their operator** (sbmlsim-core c48b44b:
+   the QFunction makes up to `attempts` step attempts per point and application;
+   `crates/cells/src/batched.rs`). Before, one application per attempt passed over every cell as
+   often as the slowest cell needed. Bitwise the same steps (564,076,825 in 24 h); the cells
+   phase about 10 % shorter (2 h: 21.5 -> 19.3 s; sbmlsim-core's `qfunction_performance` 9 % more
+   point-steps per second).
+4. **The time of each process in its cells** is in `summary.json` (`cells.seconds`, mean and
+   largest over the processes).
+
+Tried and left: starting every advance of the batched cells with the estimate of a first step
+(`h = 0`, HINIT) instead of the step kept from the advance before. The rejected attempts (14 %)
+are the kept step failing on the state the advance changed (the blood), about 3 times per
+advance in the first hours. The estimate removed 87 % of the rejections over 6 h (6 % fewer
+attempts) but grew the steps in the later hours, where the kept step is right: over 24 h 3.7 %
+more attempts (6.67e8 against 6.43e8) and the mean time of a process in its cells 77.2 s
+against 74.2 s.
+
+Transport benchmark (`scripts/bench/transport.sh`, seconds per step, the best of two runs
+interleaved in one session):
+
+| State | fixed, 1 | fixed, 4 | fixed, 8 | adaptive, 1 | adaptive, 4 | adaptive, 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before task 11 (4c594a1) | 0.0475 | 0.0133 | 0.0081 | 0.0745 | 0.0215 | 0.0147 |
+| Before this task (72b51f6) | 0.0494 | 0.0144 | 0.0094 | 0.0764 | 0.0227 | 0.0157 |
+| After (b35f7f2) | 0.0479 | 0.0134 | 0.0082 | 0.0679 | 0.0208 | 0.0137 |
+
+Task 11 had made the steps of runs without cells 4 % (1 process) to 16 % (8 processes) slower
+(the allocations of the interval balance); change 1 takes that back, change 2 makes adaptive
+steps 9 to 11 % faster than before task 11.
+
+**The 24 h run on 8 processes** (the 281 mg/kg slide as in tasks 11 and 12, `--out` under the plan
+workspace; before and after in one session, load average 6 to 9 during the runs, the before of
+task 12 on a quiet machine beside them; phases in s):
+
+| Phase | batched, task 12 (quiet) | batched, before | batched, after | engine, task 11 | engine, after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `setup` | 1.1 | 1.3 | 1.1 | 1.1 | 1.2 |
+| `pressure` | 0.6 | 0.7 | 0.6 | 0.6 | 0.6 |
+| `transport` | 442.6 | 462.5 | 428.5 | 464.9 | 428.7 |
+| `exchange` | 33.3 | 34.4 | 33.8 | 34.6 | 33.8 |
+| `cells` | 144.5 | 146.8 | 103.4 | 166.4 | 164.9 |
+| `output` | 5.3 | 5.5 | 5.3 | 5.6 | 5.5 |
+| wall time of the run | 628 | 651 | 573 | 673 | 635 |
+
+The batched path runs 24 h in 9.5 min on 8 processes on the shared machine: within the target of
+10 min, by 27 s. Transport: `PCSetUp` 8,642 -> 6, `TSJacobianEval` 20.4 -> 16.6 s, the steps
+outside the solver 16.0 -> 1.9 s, against 2.9 % more preconditioner applications; the solves
+themselves remain (20,164 `KSPSolve`, 398 s of the 428 s), 20 GMRES iterations each. The cells:
+the mean time of a process in its cells is 74.2 s, the largest 100.6 s (the engine path 119.8 and
+159.6 s): the phase is the slowest process, and the work of the cells is not balanced by the
+partition of the elements (1.06 of the mean over the first 2 h, 1.13 over 6 h, 1.36 over 24 h, as
+the necrosis spreads unevenly). Balancing it would move cells between processes (their states,
+the blood means and the changes given back) or weigh the partition by a work the cells do not
+know in advance; left for later, as is the number of iterations of the transport solves.
+
+The results stay: at 24 h the cells of the batched path differ from those of task 12 by at most
+3.2e-12 in `necrosis` and 5.0e-11 mM in `S` (the tolerance of the linear solves; the steps of the
+cells are the same), and the mass balances close within 1.1e-10 of their largest term.
