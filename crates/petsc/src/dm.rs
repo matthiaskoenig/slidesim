@@ -7,7 +7,7 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 
 use crate::{
-    AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, alive, c_string, chk, string_from, sys,
+    AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, Sf, alive, c_string, chk, string_from, sys,
     to_int,
 };
 
@@ -122,14 +122,90 @@ impl Dm {
         Ok(Dm { raw })
     }
 
+    /// An interpolated DMPlex (with edges, and faces in 3D) on `comm` named `name`, of
+    /// dimension `dim`, from the cells `cells` (`corners` vertices each, as indices of the
+    /// vertices) and the coordinates `coordinates` (`space_dim` per vertex)
+    /// (`DMPlexCreateFromCellListPetsc`). As for [`Dm::plex_from_file`], process 0 holds the
+    /// whole mesh: the input of the other processes is ignored. The points are numbered cells
+    /// first, in the order of `cells`, then the vertices, in the order of `coordinates`.
+    /// Collective.
+    ///
+    /// Errors if `cells` is not a multiple of `corners`, or `coordinates` of `space_dim`, or a
+    /// cell names a vertex which is not there.
+    pub fn plex_from_cells(
+        comm: &Comm,
+        name: &str,
+        dim: usize,
+        corners: usize,
+        cells: &[Point],
+        space_dim: usize,
+        coordinates: &[f64],
+    ) -> Result<Dm> {
+        let size = |what: &str| Error::new(sys::PETSC_ERR_ARG_SIZ, format!("a cell list: {what}"));
+        if corners == 0 || !cells.len().is_multiple_of(corners) {
+            return Err(size("cells of another number of corners"));
+        }
+        if space_dim == 0 || !coordinates.len().is_multiple_of(space_dim) {
+            return Err(size("coordinates of another dimension"));
+        }
+        let num_vertices = coordinates.len() / space_dim;
+        if cells.iter().any(|&v| v < 0 || v as usize >= num_vertices) {
+            return Err(size("a vertex which is not there"));
+        }
+        let name = c_string(name, "DM name")?;
+        let mut raw = null_mut();
+        // SAFETY: the arrays hold the sizes given (checked above); PETSc copies them, and `raw`
+        // receives a new DM.
+        chk!(unsafe {
+            sys::DMPlexCreateFromCellListPetsc(
+                comm.as_raw(),
+                to_int(dim, "dimension")?,
+                to_int(cells.len() / corners, "number of cells")?,
+                to_int(num_vertices, "number of vertices")?,
+                to_int(corners, "number of corners")?,
+                true,
+                cells.as_ptr(),
+                to_int(space_dim, "coordinate dimension")?,
+                coordinates.as_ptr(),
+                &mut raw,
+            )
+        });
+        let dm = Dm { raw };
+        // SAFETY: a valid DM and a NUL terminated name, which PETSc copies.
+        chk!(unsafe { sys::PetscObjectSetName(raw as sys::PetscObject, name.as_ptr()) });
+        Ok(dm)
+    }
+
+    /// Sets the label `name` (created if missing, `DMCreateLabel`) to `value` at `point`
+    /// (`DMSetLabelValue`).
+    pub fn set_label_value(
+        &mut self,
+        name: &str,
+        point: Point,
+        value: sys::PetscInt,
+    ) -> Result<()> {
+        let name = c_string(name, "label name")?;
+        chk!(unsafe { sys::DMCreateLabel(self.raw, name.as_ptr()) });
+        chk!(unsafe { sys::DMSetLabelValue(self.raw, name.as_ptr(), point, value) });
+        Ok(())
+    }
+
+    /// Creates the label `name` if the DM has none of that name (`DMCreateLabel`).
+    pub fn create_label(&mut self, name: &str) -> Result<()> {
+        let name = c_string(name, "label name")?;
+        chk!(unsafe { sys::DMCreateLabel(self.raw, name.as_ptr()) });
+        Ok(())
+    }
+
     /// `DMSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
         chk!(unsafe { sys::DMSetFromOptions(self.raw) });
         Ok(())
     }
 
-    /// The communicator of the DM (`PetscObjectGetComm`).
-    pub fn comm(&self) -> Comm {
+    /// The communicator of the DM (`PetscObjectGetComm`), borrowed from it: PETSc frees it with
+    /// the last object on it. [`Comm::duplicate`] keeps it beyond the DM.
+    pub fn comm(&self) -> Comm<'_> {
         let mut comm = unsafe { sys::petsc_sys_comm_self() };
         // Cannot fail on a valid object.
         unsafe { sys::PetscObjectGetComm(self.raw as sys::PetscObject, &mut comm) };
@@ -145,6 +221,32 @@ impl Dm {
         // SAFETY: `raw` receives a new DM, or stays null.
         chk!(unsafe { sys::DMPlexDistribute(self.raw, overlap, null_mut(), &mut raw) });
         Ok((!raw.is_null()).then_some(Dm { raw }))
+    }
+
+    /// The DM (distributed) with `overlap` more layers of cells shared with neighbouring
+    /// processes (`DMPlexDistributeOverlap`), with the star forest which migrated the points
+    /// of this DM (its roots) to those of the new one (its leaves): each point of the new DM is a
+    /// leaf of the point it is on its process. The new DM has its own numbering of the points;
+    /// the cones keep their order. Labels are distributed with it. With an overlap of one, the
+    /// cells of the new DM hold every cell which shares a vertex with a cell of this one (the
+    /// adjacency of finite elements, the default of a DMPlex). `None` on one process. Collective.
+    pub fn distribute_overlap(&self, overlap: usize) -> Result<Option<(Dm, Sf)>> {
+        let overlap = to_int(overlap, "overlap")?;
+        let (mut raw, mut sf) = (null_mut(), null_mut());
+        // SAFETY: `raw` and `sf` receive new objects, or stay null.
+        chk!(unsafe { sys::DMPlexDistributeOverlap(self.raw, overlap, &mut sf, &mut raw) });
+        // SAFETY: new references, given up here.
+        let sf = (!sf.is_null()).then(|| unsafe { Sf::from_raw(sf) });
+        Ok(match (raw.is_null(), sf) {
+            (false, Some(sf)) => Some((Dm { raw }, sf)),
+            (false, None) => {
+                return Err(Error::new(
+                    sys::PETSC_ERR_PLIB,
+                    "DMPlexDistributeOverlap gave a DM without its star forest".to_string(),
+                ));
+            }
+            (true, _) => None,
+        })
     }
 
     /// The graph partitioner [`Dm::distribute`] decides with which process owns which cell
@@ -345,6 +447,22 @@ impl Dm {
         // SAFETY: the IS (or null) is ours to destroy.
         chk!(unsafe { sys::DMGetStratumIS(self.raw, name.as_ptr(), value, &mut is) });
         take_is(is, true)
+    }
+
+    /// The points of the cone of `point`, one level down, in order (`DMPlexGetCone`): the edges
+    /// of a cell of a 2D mesh, or the two vertices of an edge.
+    pub fn cone(&self, point: Point) -> Result<Vec<Point>> {
+        let mut n = 0;
+        // SAFETY: as for `support`.
+        chk!(unsafe { sys::DMPlexGetConeSize(self.raw, point, &mut n) });
+        let mut cone: *const sys::PetscInt = null();
+        chk!(unsafe { sys::DMPlexGetCone(self.raw, point, &mut cone) });
+        if n == 0 || cone.is_null() {
+            return Ok(Vec::new());
+        }
+        // SAFETY: PETSc points `cone` into the DM's own storage, `n > 0` entries long, copied
+        // before the DM can change.
+        Ok(unsafe { std::slice::from_raw_parts(cone, n as usize) }.to_vec())
     }
 
     /// The local points whose closure holds `point`, one level up (`DMPlexGetSupport`): the
@@ -811,7 +929,7 @@ impl Clone for Dm {
 impl Drop for Dm {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::DMDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::DMDestroy(&mut self.raw) }, "DMDestroy");
         }
     }
 }

@@ -135,6 +135,32 @@ impl Operator {
         Ok(())
     }
 
+    /// Applies an operator whose fields are all passive (`CeedOperatorApply` with
+    /// `CEED_VECTOR_NONE` for both active vectors): it reads the vectors of its input fields and
+    /// writes those of its output fields, which libCEED sets to zero first. An operator with an
+    /// active field is refused.
+    pub fn apply_passive(&self) -> Result<()> {
+        let (mut n_in, mut n_out): (sys::CeedSize, sys::CeedSize) = (0, 0);
+        chk!(&self.ceed, unsafe {
+            sys::CeedOperatorGetActiveVectorLengths(self.raw, &mut n_in, &mut n_out)
+        });
+        if n_in >= 0 || n_out >= 0 {
+            return Err(Error::new(
+                sys::CEED_ERROR_INCOMPATIBLE,
+                "an operator with an active field applied without active vectors",
+            ));
+        }
+        chk!(&self.ceed, unsafe {
+            sys::CeedOperatorApply(
+                self.raw,
+                sys::CEED_VECTOR_NONE,
+                sys::CEED_VECTOR_NONE,
+                sys::CEED_REQUEST_IMMEDIATE,
+            )
+        });
+        Ok(())
+    }
+
     /// `output = A input` on arrays libCEED uses in place, without copies: vectors without
     /// arrays of their own view them (`CEED_USE_POINTER`) for the call, and give them back
     /// (`CeedVectorTakeArray`) before returning. libCEED only reads `input`.

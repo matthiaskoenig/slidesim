@@ -6,6 +6,10 @@ On this geometry, PDEs describe transport (diffusion, perfusion along the sinuso
 and every mesh element carries an SBML ODE network which supplies local sources and sinks and
 which changes coefficients of the PDEs. The results are explored in a web viewer.
 
+Documentation: https://matthiaskoenig.github.io/slidesim/ (built from `docs/` with Zensical:
+`uvx --from zensical==0.1.3 zensical build --clean --strict`), with the results of the milestones
+on real slides.
+
 ## Requirements
 
 - Rust: the toolchain of `rust-toolchain.toml` (rustup installs it on the first `cargo` call in
@@ -33,12 +37,13 @@ which changes coefficients of the PDEs. The results are explored in a web viewer
 ## Build
 
 Build the pinned native dependencies (PETSc with PT-Scotch and libCEED, versions and sha256 in
-`deps/versions.env`) into `deps/install/native-debug` (or `native-opt`, with `-O3 -march=native`
-and without PETSc's debugging), then slidesim against them:
+`deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging checks, for the tests and CI),
+`native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3 -march=native`, without PETSc's
+debugging), then slidesim against them:
 
 ```bash
-scripts/deps/build-native.sh debug   # or: opt
-. deps/install/native-debug/env.sh   # PETSC_DIR, CEED_DIR, PKG_CONFIG_PATH, LD_LIBRARY_PATH
+scripts/deps/build-native.sh check   # or: debug, opt
+. deps/install/native-check/env.sh   # PETSC_DIR, CEED_DIR, PKG_CONFIG_PATH, LD_LIBRARY_PATH
 cargo build --workspace              # with native-opt: cargo build --release
 ```
 
@@ -49,7 +54,7 @@ but not after `deps/install` is moved or removed.
 ## Test
 
 ```bash
-. deps/install/native-debug/env.sh
+. deps/install/native-check/env.sh
 cargo nextest run --workspace   # one process per test; some start mpiexec
 cargo test --doc --workspace    # doctests, among them compile_fail tests of the bindings
 ```
@@ -67,16 +72,35 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 `out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
 an earlier run there are removed first. `slidesim run --help` describes them.
 
-`summary.json` has, per field and output time, the mass balance of the last step
-(`mass_balance`: rate of change of the amount, sources, advective and diffusive inflow per
-boundary tag, and the `advection_defect` of the velocity).
+`summary.json` has, per field and output time, the mass balance over the interval since the
+output time before (`mass_balance`, each term its mean rate there: the rate of change of the
+amount, sources, advective and diffusive inflow per boundary tag, the `advection_defect` of the
+velocity, and with cells their `exchange` and the `resupply` of the Dirichlet tags); the terms
+add up to the change of the amount exactly, up to the residuals of the linear solves.
 
 A study with a `perfusion` section solves the Darcy flow first (maps named by the study are read
 from the scene) and also writes `pressure.vtu` and `velocity.vtu`; `summary.json` then has the flow
-through each pressure tag (`perfusion.tag_flows`). `testdata/studies/lobule_toy` is an example:
+through each pressure tag (`perfusion.tag_flows`). A part of the mesh which no pressure tag reaches
+(an island bounded by walls alone) has pressure 0 and no flow; `perfusion.pressure_islands` counts
+these parts and gives their area. `testdata/studies/lobule_toy` is an example:
 
 ```bash
 target/debug/slidesim run testdata/studies/lobule_toy/study.json --out out
+```
+
+A study with a `cells` section runs an SBML cell model on every coarse element of the mesh (the
+mesh before its refinements), coupled to the fields by Strang splitting: per split step
+`cells.split_step`, the cells over half of it, the fields over all of it, the cells over the
+other half; the linked species of the model exchange with the means of their fields over the
+element. The model is translated to C and compiled with `$CC` (or `cc`) at the start of the run,
+cached in `$SBMLSIM_C_CACHE` (default `$XDG_CACHE_HOME/sbmlsim/c` or `~/.cache/sbmlsim/c`). The
+run also writes `cells_<index>.vtu` (the states, the outputs and the parameters of every element
+as cell data), and `summary.json` gets the steps of the cells and the amounts they exchanged and
+hold (`cells`). `testdata/studies/cells_toy` has examples, a linear model (`cells.study.json`)
+and a larger one with two linked fields (`spt.study.json`):
+
+```bash
+target/debug/slidesim run testdata/studies/cells_toy/spt.study.json --out out
 ```
 
 PETSc options follow `--`. The solvers of a field take the prefix `<field id>_`, for example
@@ -106,3 +130,9 @@ The native dependencies are linked into slidesim (`deps/versions.env` pins their
 
 bison and flex are build tools of PT-Scotch only and are not linked. MPI, and the compression
 libraries Scotch uses, come from the system.
+
+The cell models run on [sbmlsim-core](https://github.com/matthiaskoenig/sbmlsim-core) (MIT),
+whose engine links SUNDIALS (BSD-3-Clause) and parts of SuiteSparse (KLU and BTF:
+LGPL-2.1-or-later; AMD and COLAMD: BSD-3-Clause); its
+[licenses page](https://matthiaskoenig.github.io/sbmlsim-core/licenses/) has the details.
+slidesim itself stays MIT.

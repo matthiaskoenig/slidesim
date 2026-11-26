@@ -1,0 +1,110 @@
+[project]
+site_name = "slidesim"
+site_url = "https://matthiaskoenig.github.io/slidesim/"
+site_description = "Spatial simulations on meshes from whole-slide images: Darcy perfusion, transport of species and SBML cell models per element, in Rust on PETSc and libCEED"
+site_author = "Matthias König"
+
+copyright = 'Copyright &copy; 2026 <a href="https://livermetabolism.com">Matthias König</a>'
+
+repo_url = "https://github.com/matthiaskoenig/slidesim"
+repo_name = "matthiaskoenig/slidesim"
+edit_uri = "edit/main/docs/"
+
+# `docs/superpowers` holds the design documents and plans of the milestones,
+# internal and no pages of the site
+exclude_docs = """
+/superpowers/
+"""
+
+# the tables and diagrams of the pages, see `docs/stylesheets/extra.css`
+extra_css = ["stylesheets/extra.css"]
+# the equations of the methods pages, typeset by MathJax (`docs/javascripts/mathjax.js`)
+extra_javascript = [
+  "javascripts/mathjax.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js",
+]
+
+nav = [
+  { "Overview" = "index.md" },
+  { "Installation" = "installation.md" },
+  { "Usage" = [
+    { "Running a study" = "usage.md" },
+    { "Contracts" = "contracts.md" },
+    { "Example studies" = "examples.md" },
+  ] },
+  { "Methods" = [
+    { "Overview" = "methods/index.md" },
+    { "Transport" = "methods/transport.md" },
+    { "Perfusion" = "methods/perfusion.md" },
+    { "Cell models" = "methods/cells.md" },
+    { "Perfusion parameters" = "parameters/m2-perfusion-mouse.md" },
+  ] },
+  { "Results" = [
+    { "Overview" = "results/index.md" },
+    { "M2: perfusion on a real slide" = "results/2026-11-m2-real-slide.md" },
+    { "M3: wall classes on dosed slides" = "results/2026-11-m3-wall-classes.md" },
+    { "M3: performance" = "results/2026-11-m3-performance.md" },
+    { "Cells on dosed slides (deferred)" = "results/m3-dosed-slides.md" },
+  ] },
+  { "Development" = "development.md" },
+  { "Licenses" = "licenses.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.action.edit",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "search.suggest",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/matthiaskoenig/slidesim"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.arithmatex = { generic = true }
+# units such as mM*um^2/s: an asterisk inside a word is no emphasis
+pymdownx.betterem = { smart_enable = "all" }
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true

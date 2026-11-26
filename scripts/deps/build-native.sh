@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build PETSc and libCEED (CPU backends) into deps/install/native-<mode>.
-# Usage: build-native.sh <debug|opt>
+# Usage: build-native.sh <debug|check|opt>
+# debug: -O0 -g with PETSc's debugging (gdb sessions); check: -O2 -g with PETSc's debugging checks, no
+# -march=native (portable, so CI can cache it): the tests; opt: -O3 -march=native without debugging.
 set -euo pipefail
 
 # Reproducible floating point: no FMA contraction, no fast-math (same numbers on every target).
@@ -8,8 +10,9 @@ FP="-ffp-contract=off -fno-fast-math"
 MODE="${1:-}"
 case "$MODE" in
   debug) DEBUGGING=1; FLAGS="-O0 -g $FP" ;;
+  check) DEBUGGING=1; FLAGS="-O2 -g $FP" ;;
   opt) DEBUGGING=0; FLAGS="-O3 -DNDEBUG -march=native $FP" ;;
-  *) echo "usage: $0 <debug|opt>" >&2; exit 2 ;;
+  *) echo "usage: $0 <debug|check|opt>" >&2; exit 2 ;;
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

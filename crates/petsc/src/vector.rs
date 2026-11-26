@@ -117,7 +117,7 @@ impl Vector {
 impl Drop for Vector {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::VecDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::VecDestroy(&mut self.raw) }, "VecDestroy");
         }
     }
 }
@@ -141,6 +141,16 @@ macro_rules! read_ops {
             let mut n = 0;
             chk!(unsafe { sys::VecGetLocalSize(self.raw, &mut n) });
             Ok(n as usize)
+        }
+
+        /// A new vector of the same layout with the same entries (`VecDuplicate`, `VecCopy`).
+        pub fn duplicate(&self) -> Result<Vector> {
+            let mut raw = null_mut();
+            chk!(unsafe { sys::VecDuplicate(self.raw, &mut raw) });
+            // Owned from here: destroyed if the copy fails.
+            let copy = Vector { raw };
+            chk!(unsafe { sys::VecCopy(self.raw, copy.raw) });
+            Ok(copy)
         }
 
         /// The 2-norm.

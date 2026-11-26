@@ -203,6 +203,74 @@ fn changed_shift_reaches_mult_and_diagonal() {
     assert!(distance(&disc, &diagonal, &diagonal_before) > 0.1 * expected.norm2().unwrap());
 }
 
+/// A Jacobian assembled again at a new shift, from its steady and mass terms, is the operator
+/// at that shift; the operator applies its own shift after the assembly.
+#[test]
+fn reassembly_follows_the_shift() {
+    let p = Petsc::init(&[]).unwrap();
+    let (disc, op) = tissue_operator(&p);
+    let op = Rc::new(RefCell::new(op));
+    let shell = disc.shell_matrix(SharedOperator(Rc::clone(&op))).unwrap();
+    let mut x = disc.global_vector().unwrap();
+    let rank = p.comm().rank();
+    x.with_array_mut(|a| {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = (i as f64 + 1000.0 * rank as f64).sin();
+        }
+    })
+    .unwrap();
+    let mut assembled = op.borrow().assemble().unwrap();
+    for shift in [10.0, 0.0, 2.5] {
+        op.borrow_mut().shift = shift;
+        op.borrow().reassemble(&mut assembled).unwrap();
+        let mut expected = disc.global_vector().unwrap();
+        assembled.mult(&x, &mut expected).unwrap();
+        let mut y = disc.global_vector().unwrap();
+        shell.mult(&x, &mut y).unwrap();
+        let error = distance(&disc, &y, &expected) / expected.norm2().unwrap();
+        assert!(
+            error < 1e-14,
+            "shift {shift}: relative |A x - A_coo x| = {error}"
+        );
+    }
+}
+
+/// The steady and mass terms of a Jacobian combine to the Jacobian at any shift; other terms
+/// have none.
+#[test]
+fn terms_of_the_jacobian_combine_to_it() {
+    let p = Petsc::init(&[]).unwrap();
+    let (disc, op) = tissue_operator(&p);
+    let [steady, mass] = op.assemble_terms().unwrap();
+    let mut x = disc.global_vector().unwrap();
+    let rank = p.comm().rank();
+    x.with_array_mut(|a| {
+        for (i, v) in a.iter_mut().enumerate() {
+            *v = (i as f64 + 1000.0 * rank as f64).cos();
+        }
+    })
+    .unwrap();
+    let op = Rc::new(RefCell::new(op));
+    let shell = disc.shell_matrix(SharedOperator(Rc::clone(&op))).unwrap();
+    for shift in [0.0, 2.0, 37.5] {
+        op.borrow_mut().shift = shift;
+        let mut expected = disc.global_vector().unwrap();
+        shell.mult(&x, &mut expected).unwrap();
+        let mut y = disc.global_vector().unwrap();
+        steady.mult(&x, &mut y).unwrap();
+        let mut m = disc.global_vector().unwrap();
+        mass.mult(&x, &mut m).unwrap();
+        y.axpy(shift, &m).unwrap();
+        let error = distance(&disc, &y, &expected) / expected.norm2().unwrap();
+        assert!(
+            error < 1e-14,
+            "shift {shift}: relative |(S + s M) x - A x| = {error}"
+        );
+    }
+    let steady = Transport::new(&disc, Rc::clone(op.borrow().data()), Terms::Steady).unwrap();
+    assert!(steady.assemble_terms().is_err());
+}
+
 #[test]
 fn essential_dofs_leave_global_vectors() {
     let p = Petsc::init(&[]).unwrap();

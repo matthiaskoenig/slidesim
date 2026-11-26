@@ -4,6 +4,7 @@
 use mesh::Mesh;
 use petsc::{Ksp, Matrix};
 
+use crate::discretization::Counts;
 use crate::{Discretization, PdeError, Result, SharedOperator};
 
 /// The iterations of a smoother, before and after the coarse correction each: a Chebyshev
@@ -30,51 +31,55 @@ const CHEBYSHEV_TRANSFORM_NONSYMMETRIC: [f64; 4] = [0.0, 0.5, 0.0, 1.2];
 /// them in step with the shift of the operator ([`Multigrid::set_shift`]).
 ///
 /// The preconditioner (PETSc's `PCMG`) holds references to what it needs; this handle shares
-/// the operators of the levels and holds the matrices whose changes it marks.
+/// the operators of the levels and holds their assembled matrices, which it assembles again
+/// when the shift changes.
 #[derive(Debug)]
 pub struct Multigrid {
     /// The operators of the levels, coarse first.
     levels: Vec<SharedOperator>,
-    /// The shell matrices of the levels between the coarse and the finest level.
-    intermediate: Vec<Matrix>,
-    /// The assembled operator of the coarse level.
-    coarse: Matrix,
+    /// The operators of the levels assembled, coarse first.
+    assembled: Vec<Matrix>,
 }
 
 /// Makes the preconditioner of `ksp` geometric multigrid (`PCMG`, V-cycles) over the levels of
 /// `mesh`, with the operators `levels`: one per level of the mesh, coarse first, on the
 /// discretizations of [`Discretization::hierarchy`] (each linked to the one before), each with
 /// the coefficients of its level (the same coefficient functions at its quadrature points) and
-/// the same terms and shift. The finest level is the operator of `ksp`, which should be the
-/// operator `levels` ends with (as a shell matrix). For a solve on a coarser level `l`,
-/// `levels` holds the operators of the levels `0..=l` only. `symmetric` says whether the
-/// operators are symmetric positive definite (diffusion and reaction), or not (with advection).
-/// Collective.
+/// the same terms and shift. The operator of `ksp` should be the operator `levels` ends with: as
+/// a shell matrix, or assembled, the matrix [`Multigrid::finest`] (or one of its pattern at a
+/// shift near the shift of the levels, which the multigrid then preconditions). For a solve on
+/// a coarser level `l`, `levels` holds the operators of the levels `0..=l` only. `symmetric` says
+/// whether the operators are symmetric positive definite (diffusion and reaction), or not (with
+/// advection). Collective.
 ///
 /// - Interpolation: `DMCreateInterpolation` from each level to the next, between the DMs of
 ///   the discretizations (nested P1 spaces; essential dofs are left out on both levels).
 ///   Restriction: its transpose.
-/// - Coarser levels: the operator discretized again on the level (a shell matrix of its
-///   [`SharedOperator`]), not the Galerkin product.
+/// - Coarser levels: the operator discretized again on the level (its [`SharedOperator`]), not
+///   the Galerkin product.
+/// - Every level works on the operator of the level assembled ([`crate::Transport::assemble`]),
+///   the finest included: the smoothers, the residuals of the levels and the coarse solver apply
+///   the assembled matrices, which are several times cheaper to apply than the operators of
+///   libCEED, and equal them up to rounding. The Krylov method of `ksp` applies the operator of
+///   `ksp`.
 /// - Smoothers, on every level but the coarse one: 2 iterations of Chebyshev, preconditioned
-///   by Jacobi (the diagonal of the shell operator), on `[0.1 emax, 1.1 emax]` for the largest
-///   eigenvalue `emax` estimated by 10 iterations of CG if `symmetric`, else on
+///   by Jacobi (the diagonal of the assembled operator), on `[0.1 emax, 1.1 emax]` for the
+///   largest eigenvalue `emax` estimated by 10 iterations of CG if `symmetric`, else on
 ///   `[0.5 emax, 1.2 emax]` estimated by GMRES (`KSPChebyshevEstEigSet`, with the estimator
-///   set explicitly: it only applies the shell operator and Jacobi). The estimates are renewed
-///   when the operator of the level changes. The shell matrices of the levels, and the assembled
-///   coarse operator, are marked symmetric positive definite if `symmetric`.
+///   set explicitly). The estimates are renewed when the operator of the level changes. The
+///   assembled operators are marked symmetric positive definite if `symmetric`.
 /// - Coarse level (level 0): one application of algebraic multigrid (`PCGAMG`, `preonly`) to
-///   the assembled operator ([`crate::Transport::assemble`]), which runs on any
-///   number of processes without external packages. A mesh of one level is solved this way
-///   alone.
+///   the assembled operator, which runs on any number of processes without external packages.
+///   A mesh of one level is solved this way alone.
 ///
 /// The options of the solver override these settings (`KSPSetFromOptions` after this call):
 /// under its prefix `<p>`, `-<p>pc_type`, `-<p>mg_levels_ksp_max_it`, `-<p>mg_coarse_pc_type`
 /// and the like (`-<p>mg_coarse_` is the coarse solver for a mesh of one level too).
 ///
-/// When the shift changes, [`Multigrid::set_shift`] changes it on every level, and the operator
-/// of `ksp` must be marked changed ([`Matrix::mark_changed`]; a `TS` does
-/// when [`petsc::Implicit::jacobian`] returns true) for the preconditioner to be rebuilt.
+/// When the shift changes, [`Multigrid::set_shift`] changes it on every level and assembles the
+/// levels again, and the operator of `ksp` must be marked changed ([`Matrix::mark_changed`]; a
+/// `TS` does when [`petsc::Implicit::jacobian`] returns true) for the preconditioner to be
+/// rebuilt.
 ///
 /// Errors (on every process): [`PdeError::NotHierarchy`] unless `levels` has one operator per
 /// level of `mesh` from level 0 up to a level of the mesh, each on the discretization linked to
@@ -129,11 +134,22 @@ pub fn configure_multigrid(
         }
     }
 
+    let counts = &discs[n - 1].shared().counts;
+    Counts::count(&counts.multigrids);
+    let assembled = levels
+        .iter()
+        .map(|op| {
+            let mut matrix = op.0.borrow().assemble()?;
+            if symmetric {
+                matrix.set_spd()?;
+            }
+            Ok(matrix)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut pc = ksp.pc()?;
     let prefix = pc.options_prefix()?;
     pc.set_type("mg")?;
     pc.mg_set_levels(n)?;
-    let mut intermediate = Vec::with_capacity(n.saturating_sub(2));
     for level in 1..n {
         let interpolation = discs[level - 1]
             .dm()
@@ -156,19 +172,11 @@ pub fn configure_multigrid(
             // The DMs of the levels: PCMG passes the state of a solver with a DM (a TS) down
             // through them (DMRestrict); without them it would create DMs which cannot.
             smoother.set_dm(discs[level].dm(), false)?;
-            let mut shell = discs[level].shell_matrix(levels[level].clone())?;
-            if symmetric {
-                shell.set_spd()?;
-            }
-            smoother.set_operators(&shell, &shell)?;
-            intermediate.push(shell);
         }
+        // On the finest level too, in place of the operators of `ksp` PCMG would take.
+        smoother.set_operators(&assembled[level], &assembled[level])?;
     }
 
-    let mut coarse = levels[0].0.borrow().assemble()?;
-    if symmetric {
-        coarse.set_spd()?;
-    }
     let mut coarse_solve = pc.mg_smoother(0)?;
     if n > 1 {
         coarse_solve.set_dm(discs[0].dm(), false)?;
@@ -177,30 +185,35 @@ pub fn configure_multigrid(
         // PCMG names a single level `mg_levels_0_`: the coarse solver all the same.
         coarse_solve.set_options_prefix(&format!("{prefix}mg_coarse_"))?;
     }
-    coarse_solve.set_operators(&coarse, &coarse)?;
+    coarse_solve.set_operators(&assembled[0], &assembled[0])?;
     coarse_solve.set_type("preonly")?;
     coarse_solve.set_pc_type("gamg")?;
     Ok(Multigrid {
         levels: levels.to_vec(),
-        intermediate,
-        coarse,
+        assembled,
     })
 }
 
 impl Multigrid {
+    /// The operator of the finest level assembled, in step with the shift
+    /// ([`Multigrid::set_shift`]): the matrix of the preconditioner of the solver, which its
+    /// Krylov method may apply too, or (with [`petsc::Matrix::duplicate`]) the pattern of the
+    /// operator the Krylov method applies.
+    pub fn finest(&self) -> &Matrix {
+        self.assembled.last().expect("a multigrid has a level")
+    }
+
     /// Sets the shift of the operators of every level (see [`crate::Transport`]) and assembles
-    /// the coarse operator again (its values; the pattern stays). The coefficients of the levels
-    /// stay as they are. The coarser levels are marked changed, so their smoothers are set up
-    /// again when the preconditioner is rebuilt next, which the caller triggers by marking the
-    /// operator of the solver changed (see [`configure_multigrid`]). Collective.
+    /// them again (their values; the patterns stay). The coefficients of the levels stay as they
+    /// are. The smoothers and the coarse solver are set up again when the preconditioner is
+    /// rebuilt next, which the caller triggers by marking the operator of the solver changed
+    /// (see [`configure_multigrid`]). Collective.
     pub fn set_shift(&mut self, shift: f64) -> Result<()> {
-        for op in &self.levels {
-            op.0.borrow_mut().shift = shift;
+        for (op, matrix) in self.levels.iter().zip(&mut self.assembled) {
+            let mut op = op.0.borrow_mut();
+            op.shift = shift;
+            op.reassemble(matrix)?;
         }
-        for shell in &mut self.intermediate {
-            shell.mark_changed()?;
-        }
-        self.levels[0].0.borrow().reassemble(&mut self.coarse)?;
         Ok(())
     }
 }

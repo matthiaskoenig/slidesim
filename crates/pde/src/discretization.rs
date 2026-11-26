@@ -1,15 +1,31 @@
 //! The P1 discretization of a mesh level: `PetscFE`, section, and libCEED restrictions, bases
 //! and quadrature geometry.
 
-use std::collections::BTreeSet;
+use std::cell::Cell;
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 use ceed::{Basis, CVector, Ceed, ElemRestriction, EvalMode, FieldVector, Operator, QFunction};
 use mesh::Mesh;
 use petsc::{AsVecMut, Dm, Fe, InsertMode, LocalOffsets, Matrix, ShellOperator, Vector, sys};
 
+use crate::components::components;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{PdeError, Result};
+
+/// The label of the DM of a pinned discretization which marks the cells of its floating
+/// components ([`Discretization::pinned_hierarchy`]).
+const FLOATING_LABEL: &str = "pde_floating";
+
+/// The connected components of the cells of a level of a mesh (cells joined through their edges)
+/// which no essential boundary reaches, which [`Discretization::pinned_hierarchy`] pins: their
+/// number and their area (um^2 in 2D). The same on every process and for any number of
+/// processes (the area up to rounding).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Floating {
+    pub count: usize,
+    pub area: f64,
+}
 
 /// The P1 discretization of one level of a [`Mesh`], shared by the operators built on it.
 ///
@@ -78,6 +94,8 @@ pub(crate) struct Shared {
     nodes: Vec<[f64; 2]>,
     /// The essential tags and the local dofs they constrain, in the order given.
     essential: Vec<(String, Vec<usize>)>,
+    /// The floating components pinned, see [`Discretization::pinned_hierarchy`].
+    floating: Floating,
     /// The area tags of the mesh (its tags of the dimension of the mesh), sorted by name: the
     /// same on every process.
     pub(crate) area_tags: Vec<String>,
@@ -85,6 +103,29 @@ pub(crate) struct Shared {
     cell_tags: Vec<Option<u32>>,
     /// The gradients of the basis functions on the reference cell (constant for P1).
     reference_gradients: Vec<[f64; 2]>,
+    /// Events on the discretization, for tests of the reuse of operators.
+    pub(crate) counts: Counts,
+}
+
+/// The number of times an event happened on a [`Discretization`], for tests of the reuse of
+/// operators.
+#[derive(Debug, Default)]
+pub(crate) struct Counts {
+    /// Jacobians built on it ([`crate::Transport::new`] of [`crate::Terms::Jacobian`]).
+    pub(crate) jacobians: Cell<usize>,
+    /// Multigrid preconditioners configured with it as their finest level
+    /// ([`crate::configure_multigrid`]).
+    pub(crate) multigrids: Cell<usize>,
+    /// Assemblies of a Jacobian on it into its matrix, at a shift
+    /// ([`crate::Transport::reassemble`], also by [`crate::Transport::assemble`]).
+    pub(crate) jacobian_assemblies: Cell<usize>,
+}
+
+impl Counts {
+    /// Counts one more `event`.
+    pub(crate) fn count(event: &Cell<usize>) {
+        event.set(event.get() + 1);
+    }
 }
 
 /// The quadrature degree of degree `degree` elements: mass matrices are integrated exactly.
@@ -115,7 +156,7 @@ impl Discretization {
         degree: u32,
         essential: &[&str],
     ) -> Result<Discretization> {
-        Discretization::build(mesh, level, ceed, degree, essential, None)
+        Discretization::build(mesh, level, ceed, degree, essential, None, false)
     }
 
     /// The discretizations of every level of `mesh`, coarse first, each as
@@ -128,17 +169,60 @@ impl Discretization {
         degree: u32,
         essential: &[&str],
     ) -> Result<Vec<Discretization>> {
+        Discretization::levels(mesh, ceed, degree, essential, false)
+    }
+
+    /// As [`Discretization::hierarchy`], with the floating components of each level pinned: the
+    /// connected components of its cells (cells joined through their edges, across processes)
+    /// without an essential dof, on which an operator of diffusion alone, with natural boundary
+    /// conditions, determines a solution up to a constant only. Every dof of a floating component
+    /// is essential, of value zero (a local vector holds zero there unless set otherwise), so
+    /// such a solution is zero there, exactly. [`Discretization::floating`] tells their number
+    /// and area. Collective.
+    ///
+    /// A component has an essential dof if a point of the closure of one of its cells is marked
+    /// by an essential tag. Where the boundary touches itself, [`Mesh::load`] splits the vertex,
+    /// so cells which share a vertex are always joined through edges.
+    ///
+    /// Errors also (on every process) [`PdeError::Unsupported`] if no component has an
+    /// essential dof: nothing would be left to solve for.
+    pub fn pinned_hierarchy(
+        mesh: &Mesh,
+        ceed: &Ceed,
+        degree: u32,
+        essential: &[&str],
+    ) -> Result<Vec<Discretization>> {
+        Discretization::levels(mesh, ceed, degree, essential, true)
+    }
+
+    /// The floating components of a discretization of [`Discretization::pinned_hierarchy`],
+    /// pinned to zero; none for other discretizations.
+    pub fn floating(&self) -> Floating {
+        self.shared.floating
+    }
+
+    /// The discretizations of [`Discretization::hierarchy`], with the floating components pinned
+    /// if `pin_floating` ([`Discretization::pinned_hierarchy`]).
+    fn levels(
+        mesh: &Mesh,
+        ceed: &Ceed,
+        degree: u32,
+        essential: &[&str],
+        pin_floating: bool,
+    ) -> Result<Vec<Discretization>> {
         let mut levels: Vec<Discretization> = Vec::with_capacity(mesh.levels().len());
         for level in 0..mesh.levels().len() {
             let coarse = levels.last().map(Discretization::dm);
-            let disc = Discretization::build(mesh, level, ceed, degree, essential, coarse)?;
+            let disc =
+                Discretization::build(mesh, level, ceed, degree, essential, coarse, pin_floating)?;
             levels.push(disc);
         }
         Ok(levels)
     }
 
     /// The discretization of [`Discretization::with_essential`], with the DM `coarse` as the
-    /// next coarser level of its DM, if given.
+    /// next coarser level of its DM, if given, and its floating components pinned if
+    /// `pin_floating` ([`Discretization::pinned_hierarchy`]).
     fn build(
         mesh: &Mesh,
         level: usize,
@@ -146,6 +230,7 @@ impl Discretization {
         degree: u32,
         essential: &[&str],
         coarse: Option<&Dm>,
+        pin_floating: bool,
     ) -> Result<Discretization> {
         if degree != 1 {
             return Err(PdeError::Unsupported(format!(
@@ -189,6 +274,11 @@ impl Discretization {
             let values = dm.label_values_global(&tag.name)?;
             dm.add_essential_boundary(&tag.name, &tag.name, &values, 0)?;
         }
+        let floating = if pin_floating {
+            pin_floating_components(source, &mut dm, essential)?
+        } else {
+            Floating::default()
+        };
         // The first vector creates the section (collective).
         let global = Vector::create_global(&dm)?;
         let global_sizes = (global.local_size()?, global.size()?);
@@ -345,9 +435,11 @@ impl Discretization {
                 weights,
                 nodes,
                 essential,
+                floating,
                 area_tags,
                 cell_tags,
                 reference_gradients,
+                counts: Counts::default(),
             }),
         })
     }
@@ -702,6 +794,12 @@ impl Discretization {
         Ok(sums)
     }
 
+    /// The essential tags, in the order given, with the entries of local vectors each
+    /// constrains (its dofs and those of its closure), sorted.
+    pub(crate) fn essential(&self) -> &[(String, Vec<usize>)] {
+        &self.shared.essential
+    }
+
     /// The entries of local vectors which the essential tag `tag` constrains (its dofs, and
     /// those of its closure), sorted. An error if `tag` is not one of the essential tags.
     pub(crate) fn essential_dofs(&self, tag: &str) -> Result<&[usize]> {
@@ -754,6 +852,70 @@ fn constrained_dofs(dm: &Dm, name: &str) -> Result<Vec<usize>> {
         }
     }
     Ok(dofs.into_iter().collect())
+}
+
+/// Makes every dof of the floating components of `dm` (a clone of the level `level`, with the
+/// essential boundaries of the tags `tags`, before its section exists) essential: the components
+/// of its cells without a point of the closure of a cell marked by one of `tags` (see
+/// [`Discretization::pinned_hierarchy`]). Their number and area. Collective.
+///
+/// Errors (on every process): [`PdeError::Unsupported`] if no component has an essential dof,
+/// or if the mesh has a tag of the name of the label which marks the floating cells.
+fn pin_floating_components(level: &Dm, dm: &mut Dm, tags: &[&str]) -> Result<Floating> {
+    let cells = level.height_stratum(0)?;
+    let mut marked_points = HashSet::new();
+    for &tag in tags {
+        for value in dm.label_values(tag)? {
+            marked_points.extend(dm.stratum_points(tag, value)?);
+        }
+    }
+    let marked = cells
+        .clone()
+        .map(|cell| Ok(dm.closure(cell)?.iter().any(|p| marked_points.contains(p))))
+        .collect::<Result<Vec<bool>>>()?;
+    let components = components(level, &marked)?;
+    let numbering = level.cell_numbering()?;
+    // Each component counted once, on the process of its cell of the smallest number.
+    let (mut count, mut floating_count, mut area) = (0, 0, 0.0);
+    for ((c, &(name, has_essential)), &number) in components.iter().enumerate().zip(&numbering) {
+        let first = name == i64::from(number);
+        count += usize::from(first);
+        if !has_essential {
+            floating_count += usize::from(first);
+            area += level.cell_volume(cells.start + c as petsc::Point)?;
+        }
+    }
+    let comm = level.comm();
+    let to_int = |n: usize| sys::PetscInt::try_from(n).unwrap_or(sys::PetscInt::MAX);
+    let count = comm.sum_int(to_int(count))?;
+    let floating_count = comm.sum_int(to_int(floating_count))?;
+    let area = comm.sum_real(area)?;
+    if floating_count == count {
+        return Err(PdeError::Unsupported(format!(
+            "no connected component of the mesh has a point of the essential tags ({}): the \
+             solution is determined up to a constant on each",
+            tags.join(", ")
+        )));
+    }
+    if floating_count > 0 {
+        if comm.max_int(dm.has_label(FLOATING_LABEL)?.into())? > 0 {
+            return Err(PdeError::Unsupported(format!(
+                "the mesh has a tag '{FLOATING_LABEL}', the name of the label of its floating \
+                 components"
+            )));
+        }
+        dm.create_label(FLOATING_LABEL)?;
+        for (c, &(_, has_essential)) in components.iter().enumerate() {
+            if !has_essential {
+                dm.set_label_value(FLOATING_LABEL, cells.start + c as petsc::Point, 1)?;
+            }
+        }
+        dm.add_essential_boundary(FLOATING_LABEL, FLOATING_LABEL, &[1], 0)?;
+    }
+    Ok(Floating {
+        count: floating_count as usize,
+        area,
+    })
 }
 
 /// The libCEED H1 basis of the scalar element `fe` with `num_comp` components: the `PetscFE`

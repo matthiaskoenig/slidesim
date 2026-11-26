@@ -9,6 +9,11 @@
 //! code is on the stack, so PETSc is not finalized but stays initialized (and usable through
 //! the wrappers) for the rest of the process.
 //!
+//! A solver whose solve failed ([`Ksp::solve`], [`Ts::solve`]) is leaked too when dropped: PETSc
+//! returns errors without restoring the state of the objects they passed through, and destroying
+//! them can free memory twice. If PETSc reports an error when a vector, matrix, mesh or solver is
+//! destroyed, the drop panics with it: the state of PETSc is corrupt.
+//!
 //! PETSc is not thread safe: no type here is `Send` or `Sync`.
 //!
 //! ```compile_fail
@@ -31,6 +36,7 @@ mod ksp;
 mod matrix;
 mod options;
 mod pc;
+mod sf;
 mod snes;
 mod ts;
 mod vector;
@@ -54,6 +60,7 @@ pub use ksp::{ConvergedReason, Ksp};
 pub use matrix::{Matrix, ShellOperator};
 pub use options::OptionsScope;
 pub use pc::Pc;
+pub use sf::{Leaf, Sf};
 pub use snes::Snes;
 pub use ts::{ExactFinalTime, Implicit, ProblemType, Ts};
 pub use vector::{AsVec, AsVecMut, VecMut, VecRef, Vector};
@@ -138,8 +145,8 @@ impl Petsc {
         Ok(petsc)
     }
 
-    /// `PETSC_COMM_WORLD`.
-    pub fn comm(&self) -> Comm {
+    /// `PETSC_COMM_WORLD`, borrowed from `self`: valid until PETSc is finalized.
+    pub fn comm(&self) -> Comm<'_> {
         Comm::new(unsafe { sys::PETSC_COMM_WORLD })
     }
 
@@ -153,18 +160,37 @@ impl Petsc {
     /// stdout unbuffered and Open MPI's `mpiexec` gives a terminal, other launchers need not).
     /// PETSc flushes after each of its own prints; other C code need not.
     pub fn abort_world(&self, code: i32) -> ! {
-        // Errors are ignored: the processes end either way.
-        let _ = std::io::stdout().flush();
-        // SAFETY: PetscFFlush(NULL) is fflush(NULL), which flushes every C output stream.
-        let _ = unsafe { sys::PetscFFlush(null_mut()) };
-        // SAFETY: MPI is initialized while `self` lives. MPI_Abort does not return; if an MPI
-        // implementation does, this process exits all the same.
-        unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
-        std::process::exit(code)
+        // MPI is initialized while `self` lives.
+        abort_world(code)
     }
 
-    /// `PETSC_COMM_SELF`: this process alone.
-    pub fn comm_self(&self) -> Comm {
+    /// Makes a panic on this process end every process of `MPI_COMM_WORLD` (as
+    /// [`Petsc::abort_world`] with the exit code `code`), after printing
+    /// `[rank <rank>] panic: <message> (at <location>)` to stderr, and the backtrace if
+    /// `RUST_BACKTRACE` asks for one. Without it, a panicking process would finalize PETSc and MPI
+    /// while unwinding (dropping `Petsc`) and wait there for the others, which wait for it in a
+    /// collective call: the run hangs. Replaces the panic hook of the process; a panic after
+    /// PETSc is finalized only prints.
+    pub fn abort_world_on_panic(&self, code: i32) {
+        let rank = self.comm().rank();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
+            let location = info
+                .location()
+                .map_or_else(|| "unknown location".to_string(), ToString::to_string);
+            eprintln!("[rank {rank}] panic: {message} (at {location})");
+            let backtrace = std::backtrace::Backtrace::capture();
+            if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                eprintln!("{backtrace}");
+            }
+            if alive() {
+                abort_world(code);
+            }
+        }));
+    }
+
+    /// `PETSC_COMM_SELF`: this process alone. Borrowed from `self`, as [`Petsc::comm`].
+    pub fn comm_self(&self) -> Comm<'_> {
         Comm::self_()
     }
 
@@ -246,19 +272,53 @@ impl Drop for Petsc {
     }
 }
 
-/// An MPI communicator. Valid while PETSc is initialized. Not `Send` or `Sync` (on every MPI:
-/// MPICH's handle is an integer).
-#[derive(Clone, Copy, Debug)]
-pub struct Comm(sys::MPI_Comm, PhantomData<*const ()>);
+/// Flushes the output of this process and ends every process of `MPI_COMM_WORLD` with the exit
+/// code `code`: [`Petsc::abort_world`], for a caller which ensures that MPI is initialized.
+fn abort_world(code: i32) -> ! {
+    // Errors are ignored: the processes end either way.
+    let _ = std::io::stdout().flush();
+    // SAFETY: PetscFFlush(NULL) is fflush(NULL), which flushes every C output stream.
+    let _ = unsafe { sys::PetscFFlush(null_mut()) };
+    // SAFETY: MPI is initialized (the caller's contract). MPI_Abort does not return; if an MPI
+    // implementation does, this process exits all the same.
+    unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
+    std::process::exit(code)
+}
 
-impl Comm {
-    fn new(raw: sys::MPI_Comm) -> Comm {
+/// An MPI communicator, borrowed for `'a` from what keeps it alive: [`Petsc`] for
+/// `PETSC_COMM_WORLD` and `PETSC_COMM_SELF`, a [`Dm`] for PETSc's communicator of the mesh (freed
+/// with the last object on it), an [`OwnedComm`]. To keep a communicator beyond its source, own
+/// a reference to it with [`Comm::duplicate`]. Not `Send` or `Sync` (on every MPI: MPICH's
+/// handle is an integer).
+///
+/// ```compile_fail
+/// let petsc = petsc::Petsc::init(&[]).unwrap();
+/// let comm = petsc.comm();
+/// drop(petsc);
+/// comm.rank();
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Comm<'a>(sys::MPI_Comm, PhantomData<(&'a (), *const ())>);
+
+impl<'a> Comm<'a> {
+    /// The communicator `raw`, valid for `'a` (the caller's contract).
+    fn new(raw: sys::MPI_Comm) -> Comm<'a> {
         Comm(raw, PhantomData)
     }
 
-    /// `PETSC_COMM_SELF`.
-    pub(crate) fn self_() -> Comm {
+    /// `PETSC_COMM_SELF`, for a call within this crate while PETSc is initialized.
+    pub(crate) fn self_() -> Comm<'static> {
         Comm::new(unsafe { sys::petsc_sys_comm_self() })
+    }
+
+    /// A reference of its own to PETSc's inner communicator of this one, valid until it is
+    /// dropped, whatever happens to the objects it came from (`PetscCommDuplicate`). Collective:
+    /// PETSc built with debugging waits for every process of the communicator here.
+    pub fn duplicate(&self) -> Result<OwnedComm> {
+        error::ensure_alive("PetscCommDuplicate")?;
+        let mut inner = self.0;
+        chk!(unsafe { sys::PetscCommDuplicate(self.0, &mut inner, null_mut()) });
+        Ok(OwnedComm(std::rc::Rc::new(Reference(inner))))
     }
 
     /// The rank of this process.
@@ -294,6 +354,71 @@ impl Comm {
     pub fn sum_real(&self, x: sys::PetscReal) -> Result<sys::PetscReal> {
         let op = unsafe { sys::petsc_sys_mpi_sum() };
         self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
+    }
+
+    /// The maximum of `x` over all processes (`MPI_Allreduce`).
+    pub fn max_real(&self, x: sys::PetscReal) -> Result<sys::PetscReal> {
+        let op = unsafe { sys::petsc_sys_mpi_max() };
+        self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
+    }
+
+    /// The bytes `data` of the process `root`, on every process (`MPI_Bcast`): the others'
+    /// `data` is replaced, whatever its length. For messages of errors which one process found,
+    /// so that every process reports the same.
+    pub fn broadcast_bytes(&self, root: usize, data: &mut Vec<u8>) -> Result<()> {
+        let root_rank = c_int::try_from(root)
+            .map_err(|_| Error::new(sys::PETSC_ERR_ARG_OUTOFRANGE, format!("rank {root}")))?;
+        let mut length = sys::PetscInt::try_from(data.len()).map_err(|_| {
+            Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                format!("{} bytes to broadcast", data.len()),
+            )
+        })?;
+        self.broadcast(
+            (&raw mut length).cast(),
+            1,
+            unsafe { sys::petsc_sys_mpiu_int() },
+            root_rank,
+        )?;
+        let length = usize::try_from(length).expect("a length is not negative");
+        data.resize(length, 0);
+        if length == 0 {
+            // MPICH refuses the dangling buffer of an empty vector.
+            return Ok(());
+        }
+        let count = c_int::try_from(length).map_err(|_| {
+            Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                format!("{length} bytes to broadcast"),
+            )
+        })?;
+        self.broadcast(
+            data.as_mut_ptr().cast(),
+            count,
+            unsafe { sys::petsc_sys_mpi_byte() },
+            root_rank,
+        )
+    }
+
+    /// `MPI_Bcast` of `count` values of `datatype` at `buffer` from `root`.
+    fn broadcast(
+        &self,
+        buffer: *mut std::ffi::c_void,
+        count: c_int,
+        datatype: sys::MPI_Datatype,
+        root: c_int,
+    ) -> Result<()> {
+        error::ensure_alive("MPI_Bcast")?;
+        // SAFETY: `buffer` holds `count` values of `datatype` (the caller's contract); MPI aborts
+        // on errors by default, and any other return is reported.
+        let ierr = unsafe { sys::MPI_Bcast(buffer, count, datatype, root, self.0) };
+        if ierr != 0 {
+            return Err(Error::new(
+                sys::PETSC_ERR_MPI,
+                format!("MPI_Bcast failed with MPI error {ierr}"),
+            ));
+        }
+        Ok(())
     }
 
     /// Waits until every process has called it (`MPI_Barrier`).
@@ -338,5 +463,36 @@ impl Comm {
 
     pub fn as_raw(&self) -> sys::MPI_Comm {
         self.0
+    }
+}
+
+/// A communicator owned for as long as it lives, from [`Comm::duplicate`]: a reference to
+/// PETSc's inner communicator, released when the last clone is dropped (`PetscCommDestroy`; MPI
+/// frees the communicator with its last reference). Clones share the reference, so that cloning
+/// is not collective. Not `Send` or `Sync`.
+#[derive(Clone, Debug)]
+pub struct OwnedComm(std::rc::Rc<Reference>);
+
+impl OwnedComm {
+    /// The communicator, borrowed from `self`.
+    pub fn comm(&self) -> Comm<'_> {
+        Comm::new(self.0.0)
+    }
+}
+
+/// One reference counted by PETSc to an inner communicator.
+#[derive(Debug)]
+struct Reference(sys::MPI_Comm);
+
+impl Drop for Reference {
+    fn drop(&mut self) {
+        if !alive() {
+            // MPI is finalized and its communicators with it.
+            return;
+        }
+        crate::error::destroyed(
+            unsafe { sys::PetscCommDestroy(&mut self.0) },
+            "PetscCommDestroy",
+        );
     }
 }

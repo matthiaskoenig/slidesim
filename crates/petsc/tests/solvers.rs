@@ -259,3 +259,59 @@ fn two_level_multigrid() {
         assert!((u - x * (1.0 - x) / 2.0).abs() < 1e-8, "{i}: {u}");
     }
 }
+
+/// A solve of a multigrid preconditioned solver whose coarse solver diverges in the middle of a
+/// V-cycle, with the solver to error if not converged: an error from inside `PCMG`, which leaves
+/// the preconditioner holding the vector of its application without a reference. The solver is
+/// failed: it cannot be changed or run again, tells why it stopped, and is leaked when dropped
+/// (destroying it would free a vector of the Krylov method twice, `Object already free`).
+#[test]
+fn failed_solve_leaves_the_solver_failed() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let m = 31;
+    let n = 2 * m + 1;
+    let fine = laplacian(&comm, n, (n + 1) as f64);
+    let coarse = laplacian(&comm, m, (n + 1) as f64 / 2.0);
+    let mut ksp = Ksp::create(&comm).unwrap();
+    ksp.set_options_prefix("failing_").unwrap();
+    ksp.set_operators(&fine, &fine).unwrap();
+    ksp.set_type("cg").unwrap();
+    let mut pc = ksp.pc().unwrap();
+    pc.set_type("mg").unwrap();
+    pc.mg_set_levels(2).unwrap();
+    pc.mg_set_interpolation(1, &interpolation_1d(&comm, m))
+        .unwrap();
+    pc.mg_smoother(0)
+        .unwrap()
+        .set_operators(&coarse, &coarse)
+        .unwrap();
+    drop(pc);
+    for (name, value) in [
+        ("-failing_ksp_error_if_not_converged", None),
+        ("-failing_mg_coarse_ksp_type", Some("richardson")),
+        ("-failing_mg_coarse_ksp_richardson_scale", Some("1000")),
+        ("-failing_mg_coarse_ksp_divtol", Some("10")),
+        ("-failing_mg_coarse_ksp_max_it", Some("5")),
+        ("-failing_mg_coarse_pc_type", Some("none")),
+    ] {
+        p.set_option(name, value).unwrap();
+    }
+    ksp.set_from_options().unwrap();
+    let b = rhs(&p, n);
+    let mut x = Vector::create_seq(&p, n).unwrap();
+    let e = ksp.solve(&b, &mut x).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_NOT_CONVERGED, "{e}");
+    assert!(e.message.contains("inner solve"), "{e}");
+    assert!(e.message.contains("PCMGMCycle_Private"), "{e}");
+    // Queries still work; changes and solves are errors.
+    ksp.converged_reason().unwrap();
+    ksp.iterations().unwrap();
+    let e = ksp.set_type("gmres").unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONGSTATE, "{e}");
+    assert!(e.message.contains("failed in an earlier solve"), "{e}");
+    let e = ksp.solve(&b, &mut x).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_WRONGSTATE, "{e}");
+    // Leaked, not destroyed: no `Object already free`.
+    drop(ksp);
+}

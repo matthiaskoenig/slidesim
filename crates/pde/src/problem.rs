@@ -2,7 +2,7 @@
 //! level, with the coefficients of the field at the quadrature points, and advection by the
 //! velocity of a [`Flow`] stabilized by SUPG.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use ceed::Ceed;
@@ -10,14 +10,16 @@ use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
 use mesh::Mesh;
 use petsc::{
-    ExactFinalTime, Implicit, OptionsScope, Point, ProblemType, Ts, VecMut, VecRef, Vector, sys,
+    ExactFinalTime, Implicit, Matrix, OptionsScope, Point, ProblemType, Ts, VecMut, VecRef, Vector,
+    sys,
 };
 
-use crate::balance::{self, Parts};
+use crate::balance::{Balance, Setup, State};
+use crate::integral::Integral;
 use crate::operators::PointValues;
 use crate::{
-    Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result, SharedOperator,
-    SourceField, Terms, Transport, coefficient_values, configure_multigrid,
+    BoundaryInflow, Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result,
+    SharedOperator, SourceField, Terms, Transport, coefficient_values, configure_multigrid,
 };
 
 /// The options every problem sets before those of the caller, who may override them: a solver
@@ -36,10 +38,32 @@ const TOLERANCE: &str = "-ksp_rtol 1e-10";
 /// viewers.
 const CONCENTRATION_UNIT: &str = "mM";
 
-/// A change of the shift of the Jacobian, relative to the shift, beyond which the
-/// preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a fixed step computes
-/// shifts which differ in the last bits).
+/// A change of the shift of the Jacobian, relative to the shift, beyond which its matrix is
+/// assembled again (and without multigrid, its preconditioner rebuilt). Smaller changes are
+/// rounding (BDF2 with a fixed step computes shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
+
+/// The factor by which the shift of the Jacobian may differ from the shift the multigrid
+/// preconditioner was built at, either way, for a Jacobian whose shift the step before did not
+/// have: the preconditioner is kept for it. The multigrid of the shift `s_b` preconditions the
+/// Jacobian of `s` nearly as well while `s / s_b` is within a factor of 2 (for symmetric
+/// operators the eigenvalues of `J(s_b)^-1 J(s)` lie between 1 and `s / s_b`). The factor spans
+/// the three shifts of a start of BDF2 with the step `dt` (`2 / dt` for the half step, `3 / dt`,
+/// then `1.5 / dt`), so that a restart of the time integration ([`Problem::modify`]) builds no
+/// preconditioner, and adaptive steps, whose shift changes at most steps, build one only when
+/// the step drifted by a factor of 2. A shift which two Jacobians in a row have (fixed steps)
+/// gets its own preconditioner. The factor 2 lies exactly between `3 / dt` and `1.5 / dt`, so
+/// the range is wider by [`PRECONDITIONER_ROUNDING`].
+const PRECONDITIONER_RANGE: f64 = 2.0;
+
+/// How much wider than [`PRECONDITIONER_RANGE`], relatively, the range of the shifts is in which
+/// the preconditioner is kept: the shifts of `TSBDF` are computed from the times of its steps
+/// (`1 / (t - t1) + 1 / (t - t2)`), whose differences carry the rounding of the times (at
+/// `t` = 1.3 s and `dt` = 0.1 s, 3/dt and 1.5/dt are a factor of 2 apart up to a few 1e-16
+/// either way, beyond 2 in 12 of 20 restarts), and a restart should build no preconditioner
+/// whatever the times. Far above the rounding of the times of a run (1e-16 relative to the
+/// step for times up to about 1e6 steps), far below any change of the step.
+const PRECONDITIONER_ROUNDING: f64 = 1e-8;
 
 /// The net flow through a tag, relative to the largest net flow through a tag, above which the
 /// tag has inflow ([`PdeError::Inflow`]).
@@ -56,6 +80,18 @@ pub struct Inputs<'a> {
     pub flow: Option<&'a Flow>,
 }
 
+/// What a change of the solution between steps ([`Problem::modify`]) exchanged with what is
+/// outside the field, for the mass balance over an interval ([`Problem::interval_balance`]):
+/// amounts in mM*um^2, positive into the field. The change of `int phi u`
+/// ([`Problem::total_mass`]) is `exchange` plus the sum of `resupply`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exchanged {
+    /// What cell models gave to the field ([`MassBalance::exchange`]).
+    pub exchange: f64,
+    /// What the Dirichlet values of each tag resupplied ([`BoundaryInflow::resupply`]).
+    pub resupply: Vec<(String, f64)>,
+}
+
 /// The field `u` of a [`FieldSpec`] on a [`Mesh`], stepped in time:
 ///
 /// `phi u_t + w . grad u = div(phi d grad u) - phi k u + phi f`, with `phi` the porosity
@@ -68,10 +104,11 @@ pub struct Inputs<'a> {
 /// `M_c` the mass matrix weighted with `c`, `A_w` advection (`int (w . grad u) v`) and `K_c` the
 /// stiffness matrix of `c`; with advection, every term but diffusion is tested with the SUPG
 /// test function `v + tau w . grad v` instead of `v` (streamline upwind Petrov-Galerkin, `tau`
-/// per point from [`PointData::stabilized`]; see [`Terms`]). With `div w = 0` (Darcy without
-/// sources) the advective form equals the conservative one. The coefficients are numbers or
-/// tables over maps ([`Coefficient`]), evaluated at the quadrature points of every level of the
-/// mesh ([`coefficient_values`]), with the velocity of the flow on that level
+/// per point from [`PointData::stabilized`]; see [`Terms`]). The velocity of a flow is its
+/// conservative velocity, with `div w = 0` in each cell and a continuous normal component
+/// (Darcy without sources), so the advective form equals the conservative one. The coefficients
+/// are numbers or tables over maps ([`Coefficient`]), evaluated at the quadrature points of every
+/// level of the mesh ([`coefficient_values`]), with the velocity of the flow on that level
 /// ([`Flow::velocity`], solved on every level): the coarser levels of the multigrid
 /// preconditioner discretize the same equation again.
 ///
@@ -82,9 +119,10 @@ pub struct Inputs<'a> {
 /// advection, every tag through which the flow enters the domain (positive [`Flow::tag_flows`])
 /// needs a Dirichlet condition ([`PdeError::Inflow`] otherwise); where the flow leaves, without
 /// a condition, the outflow is free: the advective form needs no boundary term, and the
-/// diffusive flux is zero. The P1 Darcy velocity has a normal component on walls without flow
-/// and may come back in locally through a tag of net outflow; at each Gauss point of an edge of
-/// the boundary without Dirichlet condition where `w . n < 0`, the term `int (w . n)^- u v`
+/// diffusive flux is zero. The flow may come back in locally through a tag of net outflow (the
+/// conservative velocity has no normal component on walls without flow); at each Gauss point of
+/// an edge of the boundary without Dirichlet condition where `w . n < 0`, the term
+/// `int (w . n)^- u v`
 /// (`(w . n)^- = max(0, -w . n)`) keeps the advective flux from entering
 /// ([`PointData::with_backflow`], with the velocity at the edge, [`Flow::edge_velocity`]), in
 /// the residual, the Jacobian and the operators of every multigrid level.
@@ -92,18 +130,32 @@ pub struct Inputs<'a> {
 /// Conservation: [`Problem::total_mass`] is the amount of substance `int phi u`, and
 /// [`Problem::mass_balance`] its balance at the end of a step from the discrete equations (the
 /// consistent fluxes at the Dirichlet tags, the advective outflow at the others, and the
-/// non-conservation of the P1 Darcy velocity, see [`MassBalance`]).
+/// advection defect, zero to rounding for the conservative velocity, see [`MassBalance`]).
+/// [`Problem::interval_balance`] is the balance over the steps since a time
+/// ([`Problem::start_interval`]), the changes of [`Problem::modify`] included, each term its
+/// mean rate: the terms integrated by the weights of the BDF steps (`Integral`), so that they
+/// add up to the change of the amount exactly (up to the residuals of the linear solves).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
 /// step is one linear solve (`SNESKSPONLY`) with the Jacobian
-/// `shift M_phi + A_w + K_(phi d) + M_(phi k)` as a matrix-free shell operator ([`Transport`]):
-/// CG without advection (the Jacobian is symmetric positive definite), GMRES with it;
-/// preconditioned by geometric multigrid over the levels of the mesh ([`configure_multigrid`]; a
-/// mesh without refinements is solved by its coarse solver, algebraic multigrid, alone). The
-/// operators are built once; a step changes the shift only, on every level, and when the shift
-/// changes the preconditioner is rebuilt (the smoothers set up again, the coarse operator
-/// assembled again).
+/// `shift M_phi + A_w + K_(phi d) + M_(phi k)`: CG without advection (the Jacobian is symmetric
+/// positive definite), GMRES with it; preconditioned by geometric multigrid over the levels of
+/// the mesh ([`configure_multigrid`]; a mesh without refinements is solved by its coarse solver,
+/// algebraic multigrid, alone). The operators of libCEED ([`Transport`]) are built once and
+/// assembled into sparse matrices, which the steps apply: an assembled matrix is several times
+/// cheaper to apply than its operator, and equals it up to rounding. The Jacobian is the
+/// assembled operator of the finest level, at the shift of the step, in the pattern of the
+/// finest level of the multigrid ([`Multigrid::finest`]); if the options replace the multigrid
+/// preconditioner, the matrix-free operator. The residual applies the assembled steady terms and
+/// mass matrix, with the steady terms of the Dirichlet values computed once, and the source
+/// integrated matrix-free when it changed ([`Problem::source_mut`]). A step changes the shift only:
+/// when it changes, the Jacobian is assembled again; the multigrid preconditioner stays as it was
+/// built while the shift is within a factor of 2 of its shift, and is built again at the new shift
+/// beyond, and at a shift two steps in a row have (the operators of the levels assembled again,
+/// the smoothers and the coarse solver set up again). The operators, their
+/// matrices and the multigrid are kept from step to step and from one [`Problem::step_to`] to the
+/// next.
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
@@ -118,7 +170,10 @@ pub struct Inputs<'a> {
 /// prefix while it lives ([`OptionsScope`]), and removes them when dropped; it leaves those of
 /// 3 as they are. The options override the multigrid preconditioner too: for example
 /// `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
-/// `-mg_coarse_pc_type lu` its coarse solver (on one process).
+/// `-mg_coarse_pc_type lu` its coarse solver (on one process). Options which change the time
+/// integration (`-ts_type cn`, `-ts_bdf_order 1`) are followed, without
+/// [`Problem::interval_balance`], which follows the steps of BDF2
+/// ([`Problem::without_interval_balance`] says why).
 ///
 /// Processes: the solution depends on the number of processes up to the tolerance of the linear
 /// solves, since the preconditioner does (algebraic multigrid aggregates the coarse level by
@@ -155,6 +210,15 @@ pub struct Problem {
     /// without advection).
     edge_velocity: Vec<(Point, [[f64; 2]; 2])>,
     values: PointValues,
+    /// The operators of the mass balance, built at its first computation.
+    balance: OnceCell<Balance>,
+    /// The start of the interval of [`Problem::interval_balance`].
+    mark: Mark,
+    /// Why there is no [`Problem::interval_balance`]: the options chose a time integration other
+    /// than `TSBDF` of order 2.
+    without_interval_balance: Option<String>,
+    /// The discretizations of the levels, coarse first, for tests of the reuse of operators.
+    levels: Vec<Discretization>,
     /// Dropped after the `TS`, which may read options until it is destroyed.
     _options: OptionsScope,
 }
@@ -305,20 +369,34 @@ impl Problem {
             })
             .chain(std::iter::once(Ok(SharedOperator(Rc::clone(&jacobian)))))
             .collect::<Result<Vec<_>>>()?;
+        // The steady terms and the mass term from the Jacobian, whose shift is still 0: there it
+        // is the steady terms.
+        let [steady, mass] = jacobian.borrow().assemble_terms()?;
+        let mut lift = disc.global_vector()?;
+        jacobian
+            .borrow()
+            .apply_local(&local_with_dirichlet(&disc, &dirichlet)?, &mut lift)?;
         let equation = Equation {
-            steady: Transport::new(&disc, Rc::clone(&data), Terms::Steady)?,
-            mass: Transport::new(&disc, Rc::clone(&data), Terms::Mass)?,
+            steady,
+            lift,
+            mass,
+            data: Rc::clone(&data),
             jacobian,
+            built_shift: 0.0,
+            preconditioner_builds: 0,
+            shifts: Vec::new(),
             multigrid: None,
+            krylov: None,
             source: SourceField::stabilized(&disc, data)?,
             f: fine.source,
             porosity: fine.porosity,
             load,
-            u_local: local_with_dirichlet(&disc, &dirichlet)?,
+            forcing: disc.global_vector()?,
+            forcing_stale: true,
             work: disc.global_vector()?,
             rate: disc.global_vector()?,
             rate_shift: None,
-            disc: disc.clone(),
+            integral: Integral::new(0.0, zeros(&disc)?, disc.num_quadrature_points()),
         };
 
         let mut ts = Ts::implicit(&disc.dm().comm(), equation, &shell, &shell)?;
@@ -337,14 +415,37 @@ impl Problem {
         ksp.set_operators(&shell, &shell)?;
         let multigrid = configure_multigrid(&mut ksp, mesh, &level_operators, symmetric)?;
         ts.set_from_options()?;
+        let without_interval_balance = match ts.type_name()?.as_str() {
+            "bdf" => match ts.bdf_order()? {
+                2 => None,
+                order => Some(format!("the options chose BDF of order {order}")),
+            },
+            other => Some(format!("the options chose the TS type '{other}'")),
+        };
         // Unless the options replaced it.
         if ksp.pc()?.type_name()? == "mg" {
-            ts.context_mut().multigrid = Some(multigrid);
+            // The Jacobian at the shift of the step, of the pattern of the finest level of the
+            // multigrid, which preconditions it at its own shift.
+            let krylov = multigrid.finest().duplicate()?;
+            ts.set_jacobian_matrices(&krylov, multigrid.finest())?;
+            let equation = ts.context_mut();
+            equation.multigrid = Some(multigrid);
+            equation.krylov = Some((krylov, None));
         }
 
         let mut u = disc.global_vector()?;
         u.set(field.initial)?;
-        Ok(Problem {
+        let integral = &ts.context().integral;
+        let mark = Mark {
+            t: 0.0,
+            integral: integral.current().c.duplicate()?,
+            source: integral.current_source(&ts.context().f),
+            c: u.duplicate()?,
+            mass: 0.0,
+            jumps: zeros(&disc)?,
+            exchanged: Exchanged::default(),
+        };
+        let mut problem = Problem {
             ts,
             u,
             t: 0.0,
@@ -359,30 +460,92 @@ impl Problem {
             conditions,
             edge_tags,
             edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
+            balance: OnceCell::new(),
+            mark,
+            without_interval_balance,
+            levels,
             _options: options,
-        })
+        };
+        problem.mark.mass = problem.total_mass()?;
+        Ok(problem)
     }
 
     /// Sets the solution to the interpolant of `f` (its values at the nodes), as the initial
     /// condition instead of the uniform `FieldSpec::initial`. The Dirichlet values stay on their
     /// boundaries. Set later, it is the solution at the current time, from which the time
-    /// integration starts afresh. Collective.
+    /// integration starts afresh, and the interval of [`Problem::interval_balance`] starts
+    /// there. Collective.
     ///
     /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
     pub fn set_initial_condition(&mut self, f: impl Fn([f64; 2]) -> f64) -> Result<()> {
         self.ensure_usable()?;
-        self.disc.interpolate(f, &mut self.u)?;
-        self.ts.restart_step()?;
-        // The rate of change is unknown until the next step.
-        self.ts.context_mut().rate_shift = None;
+        let set = self.disc.interpolate(f, &mut self.u);
+        self.restart()?;
+        set?;
+        self.start_interval()
+    }
+
+    /// Changes the solution between two steps: `f` changes the global vector of the solution
+    /// ([`Problem::solution`], without the essential dofs) in place, at the current time, and the
+    /// time integration starts afresh from it, as after [`Problem::set_initial_condition`]: BDF2
+    /// starts again with its first step, without the history of the steps before, and the rate of
+    /// change is unknown until the next step ([`Problem::mass_balance`]). The operators, their
+    /// matrices and the multigrid do not depend on the solution and are kept. The change is
+    /// booked in the balance over the interval ([`Problem::interval_balance`]) as what
+    /// `exchanged` says it exchanged: its amount, `int phi` of the change, is `exchanged.exchange`
+    /// plus the resupply, which the caller makes sure of. Collective if `f` is.
+    ///
+    /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`] (then `f` is not
+    /// called), and the error of `f` (the solution may be changed in part, and the time
+    /// integration starts afresh from it all the same, but nothing is booked: the balance over
+    /// the interval is then off by the change).
+    pub fn modify(
+        &mut self,
+        f: impl FnOnce(&mut Vector) -> Result<()>,
+        exchanged: &Exchanged,
+    ) -> Result<()> {
+        self.ensure_usable()?;
+        self.mark.jumps.axpy(-1.0, &self.u)?;
+        let changed = f(&mut self.u);
+        self.mark.jumps.axpy(1.0, &self.u)?;
+        self.restart()?;
+        changed?;
+        let booked = &mut self.mark.exchanged;
+        booked.exchange += exchanged.exchange;
+        for (tag, amount) in &exchanged.resupply {
+            match booked.resupply.iter_mut().find(|(t, _)| t == tag) {
+                Some((_, sum)) => *sum += amount,
+                None => booked.resupply.push((tag.clone(), *amount)),
+            }
+        }
         Ok(())
+    }
+
+    /// Starts the time integration afresh from the solution: without the history of the steps
+    /// before, and with the rate of change unknown until the next step.
+    fn restart(&mut self) -> Result<()> {
+        self.ts.restart_step()?;
+        let equation = self.ts.context_mut();
+        equation.rate_shift = None;
+        equation.integral.restart();
+        Ok(())
+    }
+
+    /// The porosity of the field at the quadrature points of the local cells, in the layout of
+    /// [`Discretization::quadrature_points`].
+    pub(crate) fn porosity(&self) -> &[f64] {
+        &self.ts.context().porosity
     }
 
     /// The source `f` (mM/s) at the quadrature points of the local cells, in the layout of
     /// [`Discretization::quadrature_points`], for writing: the steps use the values it holds,
     /// integrated with the porosity (`int phi f v`). Initially the values of `FieldSpec::source`.
     pub fn source_mut(&mut self) -> &mut [f64] {
-        &mut self.ts.context_mut().f
+        let equation = self.ts.context_mut();
+        // Integrated again at the next residual.
+        equation.forcing_stale = true;
+        equation.integral.source_changes(&equation.f);
+        &mut equation.f
     }
 
     /// Steps to the time `t` (in s), the last steps shortened to end there (`TSAdapt` may split
@@ -484,6 +647,48 @@ impl Problem {
         Ok(self.ts.linear_iterations()?)
     }
 
+    /// The number of Jacobians built on the levels of the problem: one per level of the mesh,
+    /// built once and kept for every step. For tests.
+    #[doc(hidden)]
+    pub fn operator_builds(&self) -> usize {
+        self.levels
+            .iter()
+            .map(|level| level.shared().counts.jacobians.get())
+            .sum()
+    }
+
+    /// The number of multigrid preconditioners configured over the levels of the problem: one,
+    /// kept for every step (none if the options replace it). For tests.
+    #[doc(hidden)]
+    pub fn multigrid_builds(&self) -> usize {
+        self.disc.shared().counts.multigrids.get()
+    }
+
+    /// The number of assemblies of the Jacobian of the finest level into a matrix: one when the
+    /// multigrid is configured (its finest level, at shift 0), then one per change of the shift
+    /// ([`Problem::jacobian_shifts`]), and one per build of the multigrid preconditioner at a
+    /// new shift ([`Problem::preconditioner_builds`]). For tests.
+    #[doc(hidden)]
+    pub fn jacobian_assemblies(&self) -> usize {
+        self.disc.shared().counts.jacobian_assemblies.get()
+    }
+
+    /// The number of times the preconditioner was built at a new shift: with multigrid, when the
+    /// shift left the factor 2 either way around the shift it was built at
+    /// (including the first Jacobian, as the multigrid is configured at shift 0), or two
+    /// Jacobians in a row had a shift other than it; without, at every change of the shift. For
+    /// tests.
+    #[doc(hidden)]
+    pub fn preconditioner_builds(&self) -> usize {
+        self.ts.context().preconditioner_builds
+    }
+
+    /// The shifts the time integration evaluated the Jacobian at, in order. For tests.
+    #[doc(hidden)]
+    pub fn jacobian_shifts(&self) -> &[f64] {
+        &self.ts.context().shifts
+    }
+
     /// The size of the next step (in s), before it is shortened to end at a requested time: the
     /// fixed `TimeSpec::dt`, or the latest choice of the adaptor.
     pub fn time_step(&self) -> f64 {
@@ -546,7 +751,8 @@ impl Problem {
 
     /// The mass balance at the end of the last step, from the discrete equations: the rate of
     /// change of [`Problem::total_mass`], the sources, the inflow through each tag of the
-    /// boundary and the defect of the advecting velocity (see [`MassBalance`]). Collective.
+    /// boundary and the defect of the advecting velocity (see [`MassBalance`]). Its operators and
+    /// the edges of the boundary by tag are built at the first call and kept. Collective.
     ///
     /// Errors: [`PdeError::NotStepped`] before the first step, and before the first step after
     /// [`Problem::set_initial_condition`]; [`PdeError::Poisoned`] after a failed
@@ -567,22 +773,151 @@ impl Problem {
         c_t.set(0.0)?;
         self.disc.dm().global_to_local(&rate, &mut c_t)?;
         let c = self.local_solution()?;
-        let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
-        let fluxes: Vec<(&str, f64)> = self.fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
-        balance::mass_balance(&Parts {
-            disc: &self.disc,
-            free: &self.free,
-            data: equation.steady.data(),
+        self.balance()?.compute(&State {
             f: &equation.f,
             porosity: &equation.porosity,
             c: &c,
             c_t: &c_t,
-            conditions: &self.conditions,
-            dirichlet: &dirichlet,
-            fluxes: &fluxes,
-            edge_tags: &self.edge_tags,
-            edge_velocity: &self.edge_velocity,
+            values: &self.values,
+            duration: 1.0,
         })
+    }
+
+    /// The time the interval of [`Problem::interval_balance`] starts at (s).
+    pub fn interval_start(&self) -> f64 {
+        self.mark.t
+    }
+
+    /// Starts the interval of [`Problem::interval_balance`] at the current time. Collective.
+    ///
+    /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
+    pub fn start_interval(&mut self) -> Result<()> {
+        self.ensure_usable()?;
+        let mass = self.total_mass()?;
+        let jumps = zeros(&self.disc)?;
+        let equation = self.ts.context();
+        let now = equation.integral.current();
+        self.mark = Mark {
+            t: now.t,
+            integral: now.c.duplicate()?,
+            source: equation.integral.current_source(&equation.f),
+            c: self.u.duplicate()?,
+            mass,
+            jumps,
+            exchanged: Exchanged::default(),
+        };
+        Ok(())
+    }
+
+    /// Why the problem gives no [`Problem::interval_balance`] (the options chose a time
+    /// integration other than `TSBDF` of order 2, whose steps it follows), or `None`.
+    pub fn without_interval_balance(&self) -> Option<&str> {
+        self.without_interval_balance.as_deref()
+    }
+
+    /// The mass balance over the interval from [`Problem::interval_start`] to the current time,
+    /// each term its mean rate there (the amount over the length of the interval, in
+    /// mM*um^2/s): `storage_rate` the change of [`Problem::total_mass`]; `source`, the inflows
+    /// and `advection_defect` the terms of the steps, integrated by the weights of the BDF
+    /// steps (`Integral`); `exchange` and [`BoundaryInflow::resupply`] what the changes of
+    /// [`Problem::modify`] booked. The interval starts at t = 0, then at every
+    /// [`Problem::start_interval`] and [`Problem::set_initial_condition`]. Collective.
+    ///
+    /// Errors: [`PdeError::NotStepped`] for an interval of no length; [`PdeError::Poisoned`]
+    /// after a failed [`Problem::step_to`]; [`PdeError::Unsupported`] if the options chose
+    /// another time integration than `TSBDF` of order 2
+    /// ([`Problem::without_interval_balance`]), and if the steps were not as `Integral`
+    /// follows them.
+    pub fn interval_balance(&self) -> Result<MassBalance> {
+        self.ensure_usable()?;
+        if let Some(why) = &self.without_interval_balance {
+            return Err(PdeError::Unsupported(format!(
+                "no mass balance over an interval, which follows the steps of BDF of order 2: \
+                 {why}"
+            )));
+        }
+        let equation = self.ts.context();
+        equation.integral.check()?;
+        let now = equation.integral.current();
+        let duration = now.t - self.mark.t;
+        if duration <= 0.0 || duration.is_nan() {
+            return Err(PdeError::NotStepped { t: self.t });
+        }
+        // The integrals of the solution, the Dirichlet values included, and of the source.
+        let mut integral = now.c.duplicate()?;
+        integral.axpy(-1.0, &self.mark.integral)?;
+        let scaled: Vec<(String, f64)> = self
+            .dirichlet
+            .iter()
+            .map(|(tag, value)| (tag.clone(), value * duration))
+            .collect();
+        let mut c = local_with_dirichlet(&self.disc, &scaled)?;
+        self.disc.dm().global_to_local(&integral, &mut c)?;
+        let mut f = equation.integral.current_source(&equation.f);
+        for (f, start) in f.iter_mut().zip(&self.mark.source) {
+            *f -= start;
+        }
+        // The change of the steps: of the solution, but the changes between them.
+        let mut change = self.u.duplicate()?;
+        change.axpy(-1.0, &self.mark.c)?;
+        change.axpy(-1.0, &self.mark.jumps)?;
+        let mut c_t = self.disc.local_vector()?;
+        c_t.set(0.0)?;
+        self.disc.dm().global_to_local(&change, &mut c_t)?;
+        let mut balance = self.balance()?.compute(&State {
+            f: &f,
+            porosity: &equation.porosity,
+            c: &c,
+            c_t: &c_t,
+            values: &self.values,
+            duration,
+        })?;
+        balance.storage_rate = self.total_mass()? - self.mark.mass;
+        balance.exchange = self.mark.exchanged.exchange;
+        for (tag, amount) in &self.mark.exchanged.resupply {
+            match balance.boundary.iter_mut().find(|b| &b.tag == tag) {
+                Some(inflow) => inflow.resupply += amount,
+                None => balance.boundary.push(BoundaryInflow {
+                    tag: tag.clone(),
+                    advective: 0.0,
+                    diffusive: 0.0,
+                    resupply: *amount,
+                }),
+            }
+        }
+        balance.storage_rate /= duration;
+        balance.source /= duration;
+        balance.advection_defect /= duration;
+        balance.exchange /= duration;
+        for inflow in &mut balance.boundary {
+            inflow.advective /= duration;
+            inflow.diffusive /= duration;
+            inflow.resupply /= duration;
+        }
+        Ok(balance)
+    }
+
+    /// The operators of the mass balance, built at the first call and kept. Collective at the
+    /// first call.
+    fn balance(&self) -> Result<&Balance> {
+        let equation = self.ts.context();
+        if self.balance.get().is_none() {
+            let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
+            let fluxes: Vec<(&str, f64)> =
+                self.fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
+            let balance = Balance::new(&Setup {
+                disc: &self.disc,
+                free: &self.free,
+                data: &equation.data,
+                conditions: &self.conditions,
+                dirichlet: &dirichlet,
+                fluxes: &fluxes,
+                edge_tags: &self.edge_tags,
+                edge_velocity: &self.edge_velocity,
+            })?;
+            self.balance.get_or_init(|| balance);
+        }
+        Ok(self.balance.get().expect("built above"))
     }
 
     /// The solution at the quadrature points of the local cells, Dirichlet values included.
@@ -617,6 +952,13 @@ fn options_prefix(id: &str) -> Result<String> {
              an ASCII letter and has ASCII letters, digits and '_' only"
         )))
     }
+}
+
+/// A global vector of `disc` of zeros.
+fn zeros(disc: &Discretization) -> Result<Vector> {
+    let mut zeros = disc.global_vector()?;
+    zeros.set(0.0)?;
+    Ok(zeros)
 }
 
 /// A local vector of `disc` with the Dirichlet values `dirichlet` (in order) and zeros.
@@ -708,20 +1050,57 @@ struct Advection<'a> {
     dirichlet: &'a [&'a str],
 }
 
+/// The start of the interval of [`Problem::interval_balance`], and what changed the solution
+/// since then besides the steps.
+#[derive(Debug)]
+struct Mark {
+    /// The time of the start (s).
+    t: f64,
+    /// The integrals of the steps ([`Integral`]) at the start: of the solution (a global
+    /// vector), and of the source at the quadrature points.
+    integral: Vector,
+    source: Vec<f64>,
+    /// The solution at the start: a global vector.
+    c: Vector,
+    /// `int phi u` at the start.
+    mass: f64,
+    /// The sum of the changes of [`Problem::modify`] since the start: a global vector.
+    jumps: Vector,
+    /// What they exchanged, the resupply summed by tag.
+    exchanged: Exchanged,
+}
+
 /// The equation of a [`Problem`] for its `TS`:
 /// `F(u, u_t) = M_phi u_t + (A_w + K_(phi d) + M_(phi k)) u - int phi f v - int_Gamma q v`
 /// (with SUPG test functions for advection, see [`Problem`]).
 #[derive(Debug)]
 struct Equation {
-    disc: Discretization,
-    /// `A_w + K_(phi d) + M_(phi k)`.
-    steady: Transport,
-    /// `M_phi`.
-    mass: Transport,
+    /// `A_w + K_(phi d) + M_(phi k)` assembled, on the dofs without the essential ones.
+    steady: Matrix,
+    /// The steady terms of the Dirichlet values: [`Transport::apply_local`] of the steady
+    /// terms to the local vector of the Dirichlet values and zeros.
+    lift: Vector,
+    /// `M_phi` assembled.
+    mass: Matrix,
+    /// The coefficients of the finest level.
+    data: Rc<PointData>,
     /// The Jacobian `shift M_phi + A_w + K_(phi d) + M_(phi k)`, shared with its shell matrix.
     jacobian: Rc<RefCell<Transport>>,
+    /// The shift the preconditioner was built at, and with multigrid the matrices of the levels
+    /// assembled at: with multigrid within the factor [`PRECONDITIONER_RANGE`] of the shift of
+    /// the time integration, else within [`SHIFT_TOLERANCE`].
+    built_shift: f64,
+    /// The number of builds of the preconditioner at a new shift.
+    preconditioner_builds: usize,
+    /// The shifts of the Jacobians of the time integration, in order (see
+    /// [`Problem::jacobian_shifts`]).
+    shifts: Vec<f64>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
     multigrid: Option<Multigrid>,
+    /// With multigrid, the Jacobian assembled, which the Krylov method applies, and the shift
+    /// it was assembled at (none before the first): within [`SHIFT_TOLERANCE`] of the shift of
+    /// the time integration.
+    krylov: Option<(Matrix, Option<f64>)>,
     /// `phi f` at the points, integrated.
     source: SourceField,
     /// The source `f` at the points (see [`Problem::source_mut`]).
@@ -730,8 +1109,11 @@ struct Equation {
     porosity: Vec<f64>,
     /// The load of the boundary fluxes, if any.
     load: Option<Vector>,
-    /// The solution with its Dirichlet values, which stay.
-    u_local: Vector,
+    /// The forcing of the equation, `int phi f v + int_Gamma q v`: the source integrated, and
+    /// the load. Integrated again only when the source changed.
+    forcing: Vector,
+    /// Whether the source changed since the forcing was integrated.
+    forcing_stale: bool,
     work: Vector,
     /// `u_t - shift u` of the last Jacobian: the time derivative of an implicit step of `TS` is
     /// affine in the solution (`u_t = shift u + rate` within a step, for `TSBDF` the
@@ -741,29 +1123,36 @@ struct Equation {
     /// The shift of the last Jacobian; `None` before the first, and after a new initial
     /// condition.
     rate_shift: Option<f64>,
+    /// The integral of the solution and the source over the steps.
+    integral: Integral,
 }
 
 impl Equation {
     fn residual(&mut self, u: &VecRef<'_>, u_t: &VecRef<'_>, f: &mut VecMut<'_>) -> Result<()> {
-        self.disc.dm().global_to_local(u, &mut self.u_local)?;
-        self.steady.apply_local(&self.u_local, f)?;
+        // The steady terms of u with its Dirichlet values: of the dofs u holds, and of the
+        // Dirichlet values.
+        self.steady.mult(u, f)?;
+        f.axpy(1.0, &self.lift)?;
         // The essential dofs are constant: u_t holds the others.
-        self.mass.mult_global(u_t, &mut self.work)?;
+        self.mass.mult(u_t, &mut self.work)?;
         f.axpy(1.0, &self.work)?;
-        for ((s, f), phi) in self
-            .source
-            .values_mut()
-            .iter_mut()
-            .zip(&self.f)
-            .zip(&self.porosity)
-        {
-            *s = phi * f;
+        if self.forcing_stale {
+            for ((s, f), phi) in self
+                .source
+                .values_mut()
+                .iter_mut()
+                .zip(&self.f)
+                .zip(&self.porosity)
+            {
+                *s = phi * f;
+            }
+            self.source.apply(&mut self.forcing)?;
+            if let Some(load) = &self.load {
+                self.forcing.axpy(1.0, load)?;
+            }
+            self.forcing_stale = false;
         }
-        self.source.apply(&mut self.work)?;
-        f.axpy(-1.0, &self.work)?;
-        if let Some(load) = &self.load {
-            f.axpy(-1.0, load)?;
-        }
+        f.axpy(-1.0, &self.forcing)?;
         Ok(())
     }
 }
@@ -790,18 +1179,54 @@ impl Implicit for Equation {
         self.rate.axpy(1.0, u_t)?;
         self.rate.axpy(-shift, u)?;
         self.rate_shift = Some(shift);
-        let same = {
-            let mut jacobian = self.jacobian.borrow_mut();
-            // The operator applies the exact shift; the preconditioner follows changes beyond
-            // rounding.
-            let same = (shift - jacobian.shift).abs() <= SHIFT_TOLERANCE * shift.abs();
-            jacobian.shift = shift;
-            same
+        self.shifts.push(shift);
+        // The matrix-free operator applies the exact shift.
+        self.jacobian.borrow_mut().shift = shift;
+        // The changes are compared with the shift the matrices were built at, not with the shift
+        // of the last call, which would let small changes add up unseen.
+        let changed = |built: f64| (shift - built).abs() > SHIFT_TOLERANCE * shift.abs();
+        let rebuild = match (&mut self.multigrid, &mut self.krylov) {
+            (Some(multigrid), Some((krylov, assembled))) => {
+                if assembled.is_none_or(changed) {
+                    self.jacobian
+                        .borrow()
+                        .reassemble(krylov)
+                        .map_err(PdeError::into_petsc)?;
+                    *assembled = Some(shift);
+                }
+                let ratio = shift / self.built_shift;
+                let range = PRECONDITIONER_RANGE * (1.0 + PRECONDITIONER_ROUNDING);
+                let near = (1.0 / range..=range).contains(&ratio);
+                // The shift of the Jacobian before this one (pushed above).
+                let kept = (self.shifts.len() >= 2)
+                    .then(|| self.shifts[self.shifts.len() - 2])
+                    .is_some_and(|before| !changed(before));
+                let rebuild = !near || (kept && changed(self.built_shift));
+                if rebuild {
+                    multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
+                }
+                rebuild
+            }
+            // The preconditioner the options chose, of the matrix-free operator.
+            _ => changed(self.built_shift),
         };
-        if !same && let Some(multigrid) = &mut self.multigrid {
-            multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
+        if rebuild {
+            self.built_shift = shift;
+            self.preconditioner_builds += 1;
         }
-        Ok(!same)
+        Ok(rebuild)
+    }
+
+    fn post_stage(&mut self, t: f64, y: &VecRef<'_>) -> petsc::Result<()> {
+        let shift = self.rate_shift.unwrap_or(f64::NAN);
+        self.integral
+            .stage(t, y, shift)
+            .map_err(PdeError::into_petsc)
+    }
+
+    fn post_step(&mut self, t: f64, _u: &VecRef<'_>) -> petsc::Result<()> {
+        self.integral.step(t);
+        Ok(())
     }
 }
 

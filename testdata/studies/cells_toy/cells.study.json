@@ -1,0 +1,45 @@
+{
+  "version": "study/1",
+  "scene": "scene.json",
+  "fields": [
+    {
+      "id": "substrate",
+      "diffusion": 700.0,
+      "decay": 0.0,
+      "source": 0.0,
+      "porosity": 0.15,
+      "advection": true,
+      "initial": 0.0,
+      "boundaries": [
+        {"tag": "portal_wall", "dirichlet": 1.0}
+      ]
+    }
+  ],
+  "perfusion": {
+    "viscosity": 0.0024,
+    "k_along": 0.0156,
+    "k_across": 0.0175,
+    "direction": {"map": "zonation", "g0": 0.00043},
+    "boundaries": [
+      {"tag": "portal_wall", "pressure": 390.0},
+      {"tag": "central_wall", "pressure": 0.0}
+    ]
+  },
+  "cells": {
+    "model": "../../models/linear_uptake.xml",
+    "solver": "engine",
+    "time_unit_s": 1.0,
+    "species": [{"species": "A_ext", "field": "substrate"}],
+    "volumes": {"blood": "Vext", "cells": "Vli"},
+    "parameters": [
+      {"id": "k", "value": {"map": "zonation", "points": [[0, 0.05], [1, 0.2]]}},
+      {"id": "d", "value": 0.0}
+    ],
+    "split_step": 1.0,
+    "rtol": 1e-8,
+    "atol": 1e-12,
+    "outputs": ["uptake_rate"]
+  },
+  "time": {"end": 20.0, "dt": 0.25, "adaptive": false, "outputs": [0.0, 5.0, 10.0, 20.0]},
+  "mesh": {"refinements": 1}
+}

@@ -1,5 +1,6 @@
 //! Steady Darcy perfusion: the pressure of `-div(K grad p / mu) = 0` with fixed pressures on
-//! boundary tags, and the velocity `u = -K grad p / mu` at the quadrature points.
+//! boundary tags, the conservative velocity of its equilibrated edge fluxes and the primal
+//! velocity `u = -K grad p / mu` at the quadrature points.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,11 +12,12 @@ use mesh::Mesh;
 use petsc::{Fe, Ksp, OptionsScope, Point, Vector, sys};
 
 use crate::coefficients::{coefficient_values_at, map_gradients_at};
+use crate::fluxes::Fluxes;
 use crate::operators::PointValues;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{
-    Discretization, PdeError, PointData, Result, SharedOperator, SourceField, Terms, Transport,
-    configure_multigrid,
+    Discretization, Floating, PdeError, PointData, Result, SharedOperator, SourceField, Terms,
+    Transport, configure_multigrid,
 };
 
 /// The options prefix of the pressure solves.
@@ -58,8 +60,18 @@ const VELOCITY_UNIT: &str = "um/s";
 /// `g = 0`. `K` is symmetric positive definite for positive `k_along`, `k_across` (checked by
 /// the contracts).
 ///
-/// The velocity (um/s) is `u = -K grad p / mu` at the quadrature points
-/// ([`Flow::velocity`]), not projected onto a finite element space.
+/// Velocity (um/s): the primal velocity `u = -K grad p / mu` of the P1 pressure
+/// ([`Flow::primal_velocity`]) is not conservative: its normal component jumps between the
+/// cells, and does not vanish on walls without flow (the condition is natural, so weak). The
+/// velocity a transport is carried by ([`Flow::velocity`]) is conservative: the lowest-order
+/// Raviart-Thomas field of the fluxes through the edges ([`Flow::edge_fluxes`]), equilibrated
+/// from the residual of the discrete equations vertex patch by vertex patch (as Ladeveze, and
+/// Ainsworth and Oden; Larson and Niklasson 2004), so that the fluxes out of every cell add up
+/// to zero, the flux through each edge of a wall without pressure condition is zero, and the
+/// fluxes through the edges of each pressure tag add up to its flow ([`Flow::tag_flows`]). It
+/// converges at the order of the primal velocity, 1. (A point where the boundary touches itself
+/// is two vertices of the mesh, one per side, see [`Mesh::load`]: no flow passes there.) Both
+/// are at the quadrature points, not projected onto a finite element space.
 ///
 /// Discretization: P1 on every level of the mesh, with the pressure tags essential, and the
 /// operator `-div(D grad p)`, `D = K / mu`, of [`Transport`] ([`Terms::Steady`]). The pressure
@@ -68,15 +80,17 @@ const VELOCITY_UNIT: &str = "um/s";
 /// with its own mesh (for the operators of the coarser levels of a multigrid preconditioner of
 /// a transport equation carried by the flow).
 ///
-/// Solver: CG on the shell operator of the level, preconditioned by geometric multigrid over
-/// the levels up to it ([`configure_multigrid`]; level 0 by its coarse solver, algebraic
-/// multigrid, alone). PETSc options: the solvers have the options prefix `perfusion_`, and
-/// read, lowest precedence first: the defaults `-ksp_error_if_not_converged -ksp_rtol 1e-12`
-/// (a tighter tolerance than that of [`crate::Problem`], for the flows through the tags); the
-/// options of the caller (`petsc_options` of [`Flow::solve`], written without the prefix);
-/// options under the prefix already in the global options database (the command line, for
-/// example `-perfusion_ksp_monitor`). The solves of every level read them. The options are set
-/// while the solve runs only ([`OptionsScope`]).
+/// Solver: CG on the shell operator of the level, preconditioned by geometric multigrid over the
+/// levels up to it ([`configure_multigrid`]; level 0 by its coarse solver, algebraic multigrid,
+/// alone), with one step of iterative refinement (the residual solved for once more): the fluxes
+/// conserve mass in each cell up to the residual at the free dofs, which the refinement takes from
+/// about `1e-11` of the largest flow through a node to rounding. PETSc options: the solvers have
+/// the options prefix `perfusion_`, and read, lowest precedence first: the defaults
+/// `-ksp_error_if_not_converged -ksp_rtol 1e-12` (a tighter tolerance than that of
+/// [`crate::Problem`], for the flows through the tags); the options of the caller (`petsc_options`
+/// of [`Flow::solve`], written without the prefix); options under the prefix already in the global
+/// options database (the command line, for example `-perfusion_ksp_monitor`). The solves of every
+/// level read them. The options are set while the solve runs only ([`OptionsScope`]).
 ///
 /// Boundary flows ([`Flow::tag_flows`]): the net flow into the domain through each pressure
 /// tag (um^2/s in 2D, positive for inflow), from the residual of the full discrete equation at
@@ -86,10 +100,17 @@ const VELOCITY_UNIT: &str = "um/s";
 /// listed last, whose pressure it has. The flows of the tags add up to the inflow through the
 /// whole boundary, `-int f` (zero for [`Flow::solve`]), to the tolerance of the solve.
 ///
+/// Islands: a connected component of the mesh (cells joined through their edges) which no
+/// pressure tag reaches, for example a part of the domain bounded by walls alone, has a pressure
+/// determined up to a constant only. Its pressure is 0, every dof of it essential
+/// ([`Discretization::pinned_hierarchy`]): no flow, a velocity and edge fluxes of exactly zero
+/// there, and the flow elsewhere as without it. [`Flow::islands`] tells their number and area.
+///
 /// Processes: as for [`crate::Problem`], the results depend on the number of processes up to
-/// the tolerance of the linear solves: with the defaults, L2 norms and flows through the tags
-/// on 1, 2 and 3 processes agree within about `2e-12` relative on the unit square. Every error
-/// is the same on every process.
+/// the tolerance of the linear solves: with the defaults, L2 norms, edge fluxes and flows
+/// through the tags on 1, 2 and 3 processes agree within about `2e-12` relative on the unit
+/// square. The patch of a vertex at the boundary of the part of a process is solved on the
+/// level distributed with an overlap of one cell. Every error is the same on every process.
 #[derive(Debug)]
 pub struct Flow {
     /// The finest level, with the pressure tags essential.
@@ -100,12 +121,18 @@ pub struct Flow {
     pressure: Vector,
     /// The pressure on the finest level with its Dirichlet values: a local vector of `disc`.
     pressure_local: Vector,
-    /// The velocity at the quadrature points of each level, coarse first.
+    /// The conservative velocity at the quadrature points of each level, coarse first.
     velocity: Vec<Vec<[f64; 2]>>,
-    /// The velocity at the Gauss points of the edges of the boundary of each level, coarse
-    /// first, sorted by edge.
+    /// The primal velocity at the quadrature points of each level, coarse first.
+    primal_velocity: Vec<Vec<[f64; 2]>>,
+    /// The flux through each local edge of each level, coarse first.
+    edge_fluxes: Vec<Vec<f64>>,
+    /// The conservative velocity at the Gauss points of the edges of the boundary of each
+    /// level, coarse first, sorted by edge.
     edge_velocity: Vec<Vec<(Point, [[f64; 2]; 2])>>,
     tag_flows: Vec<(String, f64)>,
+    /// The islands of the finest level.
+    islands: Floating,
     values: PointValues,
 }
 
@@ -126,8 +153,13 @@ impl Flow {
     /// `perfusion` is valid (`contracts::Study::validate`): positive viscosity, permeabilities
     /// and `g0`.
     ///
-    /// Errors: [`PdeError::Unsupported`] without pressure boundaries (the pressure is not
-    /// determined), or for a viscosity or `g0` which is not positive; [`PdeError::Mesh`] for a
+    /// Errors: [`PdeError::Unsupported`] without pressure boundaries, or (on every process) if
+    /// no connected component of the mesh has a point of a pressure tag (the pressure is not
+    /// determined), for a viscosity or `g0` which is not positive, or (on every process) for a
+    /// pressure tag whose flow cannot leave through edges of the boundary of the tag (a tag on
+    /// edges inside the domain, on cells or on vertices alone), naming the tag: the
+    /// equilibrated fluxes of the conservative velocity need it on edges of the boundary;
+    /// [`PdeError::Mesh`] for a
     /// pressure tag the mesh does not have, listing its tags; [`PdeError::Map`] (on every
     /// process) if a map cannot be evaluated at a quadrature point of a level, naming the
     /// coefficient (`k_along`, `k_across` or `direction`); [`PdeError::SolveFailed`] if a
@@ -197,7 +229,7 @@ impl Flow {
         let _options = OptionsScope::new(PREFIX, &[DEFAULTS, petsc_options])?;
 
         let essential: Vec<&str> = boundaries.iter().map(|(tag, _)| tag.as_str()).collect();
-        let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
+        let levels = Discretization::pinned_hierarchy(mesh, ceed, 1, &essential)?;
         let finest = levels.len() - 1;
         // The coefficients of the finest level first: a map error names a point of the level of
         // the pressure, where there is one.
@@ -217,13 +249,27 @@ impl Flow {
             .collect::<Result<Vec<_>>>()?;
 
         let mut velocity = Vec::with_capacity(levels.len());
-        let mut edges = Vec::with_capacity(levels.len());
+        let mut primal_velocity = Vec::with_capacity(levels.len());
+        let mut edge_fluxes = Vec::with_capacity(levels.len());
+        let mut edge_velocity = Vec::with_capacity(levels.len());
         let mut solution = None;
         for (l, disc) in levels.iter().enumerate() {
             let (pressure, local) =
                 solve_level(mesh, disc, &operators[..=l], &boundaries, manufactured)?;
-            velocity.push(point_velocity(disc, &data[l], &local)?);
-            edges.push(edge_velocity(disc, perfusion, maps, &local)?);
+            primal_velocity.push(point_velocity(disc, &data[l], &local)?);
+            let source: Vec<f64> = match manufactured {
+                None => vec![0.0; disc.num_quadrature_points()],
+                Some(Manufactured { source, .. }) => disc
+                    .quadrature_points()
+                    .iter()
+                    .map(|&x| source(x))
+                    .collect(),
+            };
+            let fluxes =
+                Fluxes::equilibrate(disc, data[l].diffusion(), &source, &local, &essential)?;
+            velocity.push(fluxes.velocity(disc));
+            edge_velocity.push(fluxes.edge_velocity(disc)?);
+            edge_fluxes.push(fluxes.edges().to_vec());
             solution = Some((pressure, local));
         }
         let (pressure, pressure_local) = solution.expect("a mesh has a level");
@@ -245,24 +291,52 @@ impl Flow {
         )?;
         Ok(Flow {
             values: PointValues::new(&disc)?,
+            islands: disc.floating(),
             disc,
             free,
             pressure,
             pressure_local,
             velocity,
-            edge_velocity: edges,
+            primal_velocity,
+            edge_fluxes,
+            edge_velocity,
             tag_flows,
         })
     }
 
-    /// The velocity `u = -K grad p / mu` (um/s) at the quadrature points of the local cells of
-    /// level `level` of the mesh (coarse first), in the layout of
-    /// [`Discretization::quadrature_points`] of any discretization of the level, from the
-    /// pressure solved on that level.
+    /// The conservative velocity (um/s) at the quadrature points of the local cells of level
+    /// `level` of the mesh (coarse first), in the layout of
+    /// [`Discretization::quadrature_points`] of any discretization of the level: the
+    /// lowest-order Raviart-Thomas field of the edge fluxes of the level
+    /// ([`Flow::edge_fluxes`]), from the pressure solved on that level (see [`Flow`]).
     ///
     /// Panics if the mesh has no level `level`.
     pub fn velocity(&self, level: usize) -> &[[f64; 2]] {
         &self.velocity[level]
+    }
+
+    /// The primal velocity `u = -K grad p / mu` (um/s) at the quadrature points of the local
+    /// cells of level `level` of the mesh (coarse first), in the layout of
+    /// [`Flow::velocity`]: not conservative, for output and comparison.
+    ///
+    /// Panics if the mesh has no level `level`.
+    pub fn primal_velocity(&self, level: usize) -> &[[f64; 2]] {
+        &self.primal_velocity[level]
+    }
+
+    /// The volume flux (um^2/s in 2D) through each local edge of level `level` of the mesh
+    /// (coarse first), in the order of the edges of the DM of the level (the same in every
+    /// discretization of it; the flux of edge point `e` at `e` minus the first edge point), in the
+    /// direction of the reference normal of the edge: the vector from its first vertex to its
+    /// second (in the order of its cone) turned by -90 degrees. The fluxes out of each cell add
+    /// up to zero, to rounding (with a source, as for [`Flow::solve_manufactured`], to its
+    /// integral over the cell); through an edge of a wall without pressure condition the flux is
+    /// zero; the fluxes through the edges of a pressure tag add up to its flow
+    /// ([`Flow::tag_flows`]). An edge on several processes has the same flux on each.
+    ///
+    /// Panics if the mesh has no level `level`.
+    pub fn edge_fluxes(&self, level: usize) -> &[f64] {
+        &self.edge_fluxes[level]
     }
 
     /// The net flow into the domain through each pressure tag (um^2/s in 2D, positive for
@@ -272,13 +346,21 @@ impl Flow {
         &self.tag_flows
     }
 
-    /// The velocity `u = -K grad p / mu` (um/s) at the two Gauss points of each edge of the
-    /// boundary of the domain on this process, on level `level` of the mesh (coarse first), by
-    /// edge (a point of the DM of the level, the same in every discretization of it), sorted:
-    /// `grad p` of the cell of the edge (constant for P1, as for [`Flow::velocity`]) and `K` at
-    /// the points. The Gauss points go from the first vertex of the edge to the second, in the
-    /// order of its closure, at `1/2 -+ 1/(2 sqrt 3)` of its length. For the advective boundary
-    /// term of a transport problem ([`PointData::with_backflow`]).
+    /// The islands of the mesh: its connected components which no pressure tag reaches, whose
+    /// pressure is 0 and which have no flow (see [`Flow`]); their number and area (um^2). The
+    /// same on every process.
+    pub fn islands(&self) -> Floating {
+        self.islands
+    }
+
+    /// The conservative velocity (um/s, see [`Flow::velocity`]) at the two Gauss points of each
+    /// edge of the boundary of the domain on this process, on level `level` of the mesh (coarse
+    /// first), by edge (a point of the DM of the level, the same in every discretization of it),
+    /// sorted: the Raviart-Thomas field of the cell of the edge, whose normal component is the
+    /// flux through the edge over its length (zero on a wall without pressure condition). The
+    /// Gauss points go from the first vertex of the edge to the second, in the order of its
+    /// closure, at `1/2 -+ 1/(2 sqrt 3)` of its length. For the advective boundary term of a
+    /// transport problem ([`PointData::with_backflow`]).
     ///
     /// Panics if the mesh has no level `level`.
     pub fn edge_velocity(&self, level: usize) -> &[(Point, [[f64; 2]; 2])] {
@@ -327,50 +409,61 @@ impl Flow {
         Ok(self.disc.dm().comm().sum_real(local)?.sqrt())
     }
 
-    /// The velocity of the finest level at the nodes, for output only: its lumped L2
-    /// projection, `u_i = int u v_i / int v_i` for the P1 function `v_i` of node `i`. A new local
-    /// vector (2 components per node, x then y) of a DM of the finest level with one P1 field
-    /// of 2 components, named `velocity`, each component after the unit, `um/s`; the vector has
-    /// an empty name, so that a VTK viewer writes the point vector `velocity`. Collective.
+    /// The velocities of the finest level at the nodes, for output only: the lumped L2
+    /// projection of the conservative velocity ([`Flow::velocity`]) and of the primal velocity
+    /// ([`Flow::primal_velocity`]), `u_i = int u v_i / int v_i` for the P1 function `v_i` of
+    /// node `i`. A new local vector of a DM of the finest level with two P1 fields of 2
+    /// components each (x then y), named `velocity` and `primal_velocity`, each component after
+    /// the unit, `um/s`; at each node the components of the first field, then of the second.
+    /// The vector has an empty name, so that a VTK viewer writes the point vectors `velocity`
+    /// and `primal_velocity`. Collective.
     pub fn nodal_velocity(&self) -> Result<Vector> {
         let free = &self.free;
-        let velocity = self.velocity.last().expect("a mesh has a level");
+        let finest = self.velocity.len() - 1;
+        let velocities = [&self.velocity[finest], &self.primal_velocity[finest]];
         let mut source = SourceField::new(free)?;
-        // int v_i, int u_x v_i, int u_y v_i at the entries of local vectors of `free`.
-        let mut integrals: [Vec<f64>; 3] = Default::default();
         let mut global = free.global_vector()?;
         let mut local = free.local_vector()?;
-        for (component, integral) in integrals.iter_mut().enumerate() {
-            for (s, u) in source.values_mut().iter_mut().zip(velocity) {
-                *s = if component == 0 {
-                    1.0
-                } else {
-                    u[component - 1]
-                };
+        let mut integral = |value: &dyn Fn(usize) -> f64| -> Result<Vec<f64>> {
+            for (i, s) in source.values_mut().iter_mut().enumerate() {
+                *s = value(i);
             }
             source.apply(&mut global)?;
             free.dm().global_to_local(&global, &mut local)?;
-            *integral = local.with_array(<[f64]>::to_vec)?;
+            Ok(local.with_array(<[f64]>::to_vec)?)
+        };
+        // int v_i, then int u_x v_i and int u_y v_i of each velocity, at the entries of local
+        // vectors of `free`.
+        let mass = integral(&|_| 1.0)?;
+        let mut moments = Vec::with_capacity(4);
+        for velocity in velocities {
+            for c in [0, 1] {
+                moments.push(integral(&|i| velocity[i][c])?);
+            }
         }
-        let [mass, ux, uy] = integrals;
 
         let mut dm = free.dm().clone_mesh()?;
         let dim = 2;
         let fe = Fe::lagrange(dim, dim, true, 1, 2)?;
         dm.add_field(&fe)?;
+        dm.add_field(&fe)?;
         dm.create_ds()?;
         dm.set_field_names(0, "velocity", &[VELOCITY_UNIT; 2])?;
+        dm.set_field_names(1, "primal_velocity", &[VELOCITY_UNIT; 2])?;
         let mut nodal = Vector::create_local(&dm)?;
         let mut entries = Vec::new();
         for point in free.dm().depth_stratum(0)? {
             let i = free.dm().local_dofs(point)?.start;
             let entry = dm.local_dofs(point)?.start;
-            entries.push((entry, [ux[i] / mass[i], uy[i] / mass[i]]));
+            entries.push((
+                entry,
+                moments.iter().map(|m| m[i] / mass[i]).collect::<Vec<_>>(),
+            ));
         }
         nodal.with_array_mut(|values| {
             values.fill(0.0);
             for (entry, u) in entries {
-                values[entry..entry + 2].copy_from_slice(&u);
+                values[entry..entry + u.len()].copy_from_slice(&u);
             }
         })?;
         nodal.set_name("")?;
@@ -428,66 +521,6 @@ fn tensors(
         .collect())
 }
 
-/// The velocity `-D grad p` at the Gauss points of each edge of the boundary of the domain on
-/// `disc` (see [`Flow::edge_velocity`]), for the pressure of the local vector `pressure` (with
-/// its Dirichlet values): `grad p` of the cell of the edge (constant for P1), `D` at the points.
-/// Collective.
-fn edge_velocity(
-    disc: &Discretization,
-    perfusion: &Perfusion,
-    maps: &Maps,
-    pressure: &Vector,
-) -> Result<Vec<(Point, [[f64; 2]; 2])>> {
-    let edges = disc.boundary_edges()?;
-    let dm = disc.dm();
-    let cells = dm.height_stratum(0)?;
-    let vertices = dm.depth_stratum(0)?;
-    let nodes = disc.node_coordinates();
-    let p = pressure.with_array(<[f64]>::to_vec)?;
-    let mut gradients = Vec::with_capacity(edges.len());
-    for edge in &edges {
-        let mut corners = Vec::with_capacity(3);
-        for point in dm.closure(cells.start + edge.cell as Point)? {
-            if vertices.contains(&point) {
-                corners.push(dm.local_dofs(point)?.start);
-            }
-        }
-        let &[a, b, c] = corners.as_slice() else {
-            return Err(PdeError::Unsupported(format!(
-                "a cell of {} vertices",
-                corners.len()
-            )));
-        };
-        // grad p . (x_b - x_a) = p_b - p_a, and for c.
-        let (xa, xb, xc) = (nodes[a], nodes[b], nodes[c]);
-        let [e0, e1] = [
-            [xb[0] - xa[0], xb[1] - xa[1]],
-            [xc[0] - xa[0], xc[1] - xa[1]],
-        ];
-        let [d0, d1] = [p[b] - p[a], p[c] - p[a]];
-        let det = e0[0] * e1[1] - e0[1] * e1[0];
-        gradients.push([
-            (d0 * e1[1] - d1 * e0[1]) / det,
-            (e0[0] * d1 - e1[0] * d0) / det,
-        ]);
-    }
-    let points: Vec<[f64; 2]> = edges.iter().flat_map(|e| e.points).collect();
-    let d = tensors(disc, &points, &|i| edges[i / 2].cell, perfusion, maps)?;
-    let mut velocity: Vec<(Point, [[f64; 2]; 2])> = edges
-        .iter()
-        .zip(&gradients)
-        .zip(d.as_chunks::<2>().0)
-        .map(|((edge, g), d)| {
-            let at = |[d00, d01, d11]: [f64; 3]| {
-                [-(d00 * g[0] + d01 * g[1]), -(d01 * g[0] + d11 * g[1])]
-            };
-            (edge.point, [at(d[0]), at(d[1])])
-        })
-        .collect();
-    velocity.sort_unstable_by_key(|(point, _)| *point);
-    Ok(velocity)
-}
-
 /// The pressure on the level of `disc`, the last of the levels of `operators` (the operators
 /// of the levels up to it): a global vector, and a local vector with the Dirichlet values
 /// (the pressures of `boundaries`, in order, or the manufactured values). Collective.
@@ -530,29 +563,45 @@ fn solve_level(
     ksp.set_type("cg")?;
     let _multigrid = configure_multigrid(&mut ksp, mesh, operators, true)?;
     ksp.set_from_options()?;
-    let mut pressure = disc.global_vector()?;
-    pressure.set(0.0)?;
     let diverged = |reason: String| PdeError::SolveFailed {
         solve: "perfusion".to_string(),
         reason: format!("{reason} (pressure on level {level})"),
     };
-    match ksp.solve(&rhs, &mut pressure) {
-        Err(e) if e.code == sys::PETSC_ERR_NOT_CONVERGED => {
-            let reason = ksp.converged_reason()?;
-            return Err(diverged(if reason.diverged() {
-                format!("KSP {reason}")
-            } else {
-                e.message.lines().next().unwrap_or_default().to_string()
-            }));
-        }
-        Err(e) => return Err(e.into()),
-        Ok(()) => {
-            let reason = ksp.converged_reason()?;
-            if reason.diverged() {
-                return Err(diverged(format!("KSP {reason}")));
+    let solve = |ksp: &mut Ksp, b: &Vector, x: &mut Vector| -> Result<()> {
+        x.set(0.0)?;
+        match ksp.solve(b, x) {
+            Err(e) if e.code == sys::PETSC_ERR_NOT_CONVERGED => {
+                let reason = ksp.converged_reason()?;
+                Err(diverged(if reason.diverged() {
+                    format!("KSP {reason}")
+                } else {
+                    e.message.lines().next().unwrap_or_default().to_string()
+                }))
+            }
+            Err(e) => Err(e.into()),
+            Ok(()) => {
+                let reason = ksp.converged_reason()?;
+                if reason.diverged() {
+                    return Err(diverged(format!("KSP {reason}")));
+                }
+                Ok(())
             }
         }
-    }
+    };
+    let mut pressure = disc.global_vector()?;
+    solve(&mut ksp, &rhs, &mut pressure)?;
+    // One step of iterative refinement: the residual left at the free dofs (with the defaults
+    // about 1e-11 of the largest flow through a node of a pressure tag) is solved for once more,
+    // which takes it to rounding. The equilibrated fluxes conserve mass in each cell up to it.
+    let mut product = disc.global_vector()?;
+    a.mult(&pressure, &mut product)?;
+    let mut residual = disc.global_vector()?;
+    residual.set(0.0)?;
+    residual.axpy(1.0, &rhs)?;
+    residual.axpy(-1.0, &product)?;
+    let mut correction = disc.global_vector()?;
+    solve(&mut ksp, &residual, &mut correction)?;
+    pressure.axpy(1.0, &correction)?;
     disc.dm().global_to_local(&pressure, &mut local)?;
     Ok((pressure, local))
 }

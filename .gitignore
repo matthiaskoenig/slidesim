@@ -3,3 +3,6 @@ target/
 deps/build/
 deps/install/
 deps/src/
+site/
+.claude/
+__pycache__/

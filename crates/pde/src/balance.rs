@@ -1,6 +1,7 @@
 //! The mass balance of a [`crate::Problem`] at the end of a time step, from its discrete
 //! equations.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -15,9 +16,11 @@ use crate::{Discretization, PointData, Result, SourceField, Terms, Transport};
 pub const UNTAGGED: &str = "(untagged)";
 
 /// The balance of the amount of substance `int phi c` of a field `c` (porosity `phi`) at the end
-/// of a time step, each term in mM*um^2/s, from the discrete equations of [`crate::Problem`]:
+/// of a time step ([`crate::Problem::mass_balance`]) or over an interval of steps, each term its
+/// mean rate there ([`crate::Problem::interval_balance`]), in mM*um^2/s, from the discrete
+/// equations of [`crate::Problem`]:
 ///
-/// `storage_rate = source + sum(boundary totals) - advection_defect`,
+/// `storage_rate = source + sum(boundary totals) + exchange - advection_defect`,
 ///
 /// up to the residuals of the linear solves.
 ///
@@ -42,11 +45,11 @@ pub const UNTAGGED: &str = "(untagged)";
 /// which defines `advection_defect`. On `Gamma_N` the backflow term cancels the inflowing part
 /// of `int (u . n) c`, which leaves the outflow `int_Gamma_N (u . n)^+ c`; on the Dirichlet
 /// edges `Gamma_D` the advective flux `int (u . n) c` is whole, in and out. For a velocity
-/// which conserves mass (`div u = 0` with a continuous normal component) it is zero; the Darcy
-/// velocity of P1 pressures has jumps of `u . n` between the cells (and within a cell a
-/// divergence where the permeability varies), and `advection_defect` is their effect,
-/// `sum_edges int [u . n] c`: the non-conservation of the primal velocity, reported, not
-/// corrected. Hence the terms:
+/// which conserves mass (`div u = 0` with a continuous normal component), as the conservative
+/// velocity of a [`crate::Flow`] ([`crate::Flow::velocity`]), it is zero up to rounding; for
+/// another velocity, as the primal Darcy velocity of P1 pressures with its jumps of `u . n`
+/// between the cells, `advection_defect` is their effect, `sum_edges int [u . n] c`, reported,
+/// not corrected. Hence the terms:
 ///
 /// - `storage_rate`: `int phi c_t`, with `c_t` the time derivative of the BDF formula at the end
 ///   of the step (Dirichlet values are constant);
@@ -58,60 +61,63 @@ pub const UNTAGGED: &str = "(untagged)";
 ///   marks it, else [`UNTAGGED`]. The entries: the tags of the conditions in the order listed,
 ///   then the other tags of edges of the mesh which mark edges of the boundary, in the order of
 ///   the mesh, then [`UNTAGGED`] if there are edges of the boundary without tag;
-/// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`.
+/// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`;
+/// - `exchange`: what cell models gave to the field (negative where they took it,
+///   [`crate::Exchange`]), between the steps ([`crate::Problem::modify`]); the substance the
+///   Dirichlet values resupplied at the same time counts as inflow through their tags
+///   ([`BoundaryInflow::resupply`]). Zero at the end of a step
+///   ([`crate::Problem::mass_balance`]); over an interval
+///   ([`crate::Problem::interval_balance`]) the amounts the changes booked:
+///
+/// `storage_rate = source + sum(boundary totals) + exchange - advection_defect`.
 ///
 /// The velocity on an edge of the boundary is that of the flow at its Gauss points
-/// ([`crate::Flow::edge_velocity`]): the pressure gradient of its cell with the permeability
-/// at the points. On an edge without Dirichlet condition where the flow has a normal component
-/// although the pressure equation has no flow there (a no-flow wall: the condition of the
-/// pressure is natural, so the P1 velocity meets it weakly only), the outflow of that component
-/// leaves the domain: the advective part of the tag of that edge shows it.
+/// ([`crate::Flow::edge_velocity`]): the conservative velocity of its cell, whose normal
+/// component is zero on a wall without flow, so no substance leaves there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassBalance {
     pub storage_rate: f64,
     pub source: f64,
     pub boundary: Vec<BoundaryInflow>,
     pub advection_defect: f64,
+    pub exchange: f64,
 }
 
 /// The inflow through the edges of the boundary one tag counts for (see [`MassBalance`]), in
-/// mM*um^2/s, positive into the domain, as two parts:
+/// mM*um^2/s, positive into the domain, as three parts:
 ///
 /// - `advective`: minus the advective flux by the Gauss points of the edges, `-int (u . n) c`
 ///   on an edge a Dirichlet tag marks (in and out), else `-int (u . n)^+ c` (the outflow; the
 ///   backflow term lets nothing in); zero without advection;
 /// - `diffusive`: at a Dirichlet tag the consistent flux `sum R_i` over its dofs (a dof of
 ///   several Dirichlet tags counts for the one listed last, as its value does); at a flux tag
-///   `int q` over its edges; zero elsewhere (free outflow: no diffusive flux).
+///   `int q` over its edges; zero elsewhere (free outflow: no diffusive flux);
+/// - `resupply`: at a Dirichlet tag, what its fixed values resupplied when cell models changed
+///   the field next to it (negative where they took substance away, see [`crate::Exchange`]);
+///   zero elsewhere, and at the end of a step.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundaryInflow {
     pub tag: String,
     pub advective: f64,
     pub diffusive: f64,
+    pub resupply: f64,
 }
 
 impl BoundaryInflow {
-    /// The inflow, `advective + diffusive`: the term of the balance.
+    /// The inflow, `advective + diffusive + resupply`: the term of the balance.
     pub fn total(&self) -> f64 {
-        self.advective + self.diffusive
+        self.advective + self.diffusive + self.resupply
     }
 }
 
-/// What the mass balance of a problem is computed from.
-pub(crate) struct Parts<'a> {
+/// What the mass balance of a problem is built for: the parts which stay from step to step.
+pub(crate) struct Setup<'a> {
     /// The finest level, with the Dirichlet tags essential.
     pub(crate) disc: &'a Discretization,
     /// The finest level without essential boundaries, with the local vectors of `disc`.
     pub(crate) free: &'a Discretization,
     /// The coefficients of the equation at the points of `disc`.
     pub(crate) data: &'a Rc<PointData>,
-    /// The source `f` and the porosity `phi` at the points.
-    pub(crate) f: &'a [f64],
-    pub(crate) porosity: &'a [f64],
-    /// The solution with its Dirichlet values: a local vector of `disc`.
-    pub(crate) c: &'a Vector,
-    /// Its time derivative, zero at the Dirichlet dofs: a local vector of `disc`.
-    pub(crate) c_t: &'a Vector,
     /// The tags of the conditions of the field, in the order listed.
     pub(crate) conditions: &'a [String],
     /// The Dirichlet tags, in the order listed.
@@ -125,114 +131,146 @@ pub(crate) struct Parts<'a> {
     pub(crate) edge_velocity: &'a [(Point, [[f64; 2]; 2])],
 }
 
-/// The mass balance of `parts` (see [`MassBalance`]). Collective.
-pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
-    let Parts {
-        disc,
-        free,
-        data,
-        f,
-        porosity,
-        c,
-        c_t,
-        conditions,
-        dirichlet,
-        fluxes,
-        edge_tags,
-        edge_velocity,
-    } = *parts;
-    let comm = disc.dm().comm();
-    let weights = disc.quadrature_weights();
-    let values = PointValues::new(disc)?;
-    let mut c_q = vec![0.0; disc.num_quadrature_points()];
-    values.apply(c, &mut c_q)?;
-    let mut c_t_q = vec![0.0; disc.num_quadrature_points()];
-    values.apply(c_t, &mut c_t_q)?;
+/// The state of a problem at the end of a step, of which [`Balance::compute`] computes the mass
+/// balance.
+pub(crate) struct State<'a> {
+    /// The source `f` and the porosity `phi` at the points.
+    pub(crate) f: &'a [f64],
+    pub(crate) porosity: &'a [f64],
+    /// The solution with its Dirichlet values: a local vector of the finest level.
+    pub(crate) c: &'a Vector,
+    /// Its time derivative, zero at the Dirichlet dofs: a local vector of the finest level.
+    pub(crate) c_t: &'a Vector,
+    /// The values of local vectors of the finest level at its quadrature points.
+    pub(crate) values: &'a PointValues,
+    /// The factor of the terms which do not depend on the state (the fluxes of the
+    /// conditions): 1 for the balance at an instant, the length of the interval (s) for the
+    /// integral over it, with `c`, `c_t` and `f` integrals over it too.
+    pub(crate) duration: f64,
+}
 
-    let storage: f64 = (weights.iter().zip(data.mass()).zip(&c_t_q))
-        .map(|((w, m), c_t)| w * m * c_t)
-        .sum();
-    let source: f64 = (weights.iter().zip(f).zip(porosity))
-        .zip(data.reaction().iter().zip(&c_q))
-        .map(|(((w, f), phi), (r, c))| w * (phi * f - r * c))
-        .sum();
+/// The mass balance of a problem (see [`MassBalance`]) with what stays from step to step built
+/// once: the operators on the finest level without essential boundaries, the loads of the flux
+/// conditions, and the edges of the boundary by entry of [`MassBalance::boundary`].
+#[derive(Debug)]
+pub(crate) struct Balance {
+    disc: Discretization,
+    free: Discretization,
+    data: Rc<PointData>,
+    /// The steady terms and the mass term on `free`.
+    steady: Transport,
+    mass: Transport,
+    /// `int u . grad c`: the advection of the Galerkin form, without the other terms.
+    advection: Transport,
+    /// `int phi f (v + SUPG)` on `free`.
+    sources: RefCell<SourceField>,
+    /// The load of the flux conditions on `free`, if any.
+    load: Option<Vector>,
+    /// The global vector of ones of `free`.
+    ones: Vector,
+    /// The Dirichlet tags, in the order listed.
+    dirichlet: Vec<String>,
+    /// The entries of [`MassBalance::boundary`]: the tags of the conditions, then the other
+    /// tags of edges of the mesh, then [`UNTAGGED`].
+    entries: Vec<String>,
+    /// The number of entries of the conditions.
+    num_conditions: usize,
+    /// Whether an entry after those of the conditions marks an edge of the boundary (on any
+    /// process).
+    marked: Vec<bool>,
+    /// The diffusive inflow of each flux condition, by entry.
+    flux_inflows: Vec<(usize, f64)>,
+    /// The edges of the boundary with a velocity (none without advection).
+    edges: Vec<EdgeFlux>,
+}
 
-    // The residual of the equations of every dof: R = S c + M c_t - int phi f (v + SUPG) - load.
-    let mut residual = free.global_vector()?;
-    let mut work = free.global_vector()?;
-    Transport::new(free, Rc::clone(data), Terms::Steady)?.apply_local(c, &mut residual)?;
-    Transport::new(free, Rc::clone(data), Terms::Mass)?.apply_local(c_t, &mut work)?;
-    residual.axpy(1.0, &work)?;
-    let mut sources = SourceField::stabilized(free, Rc::clone(data))?;
-    for ((s, f), phi) in sources.values_mut().iter_mut().zip(f).zip(porosity) {
-        *s = phi * f;
-    }
-    sources.apply(&mut work)?;
-    residual.axpy(-1.0, &work)?;
-    let mut ones = free.global_vector()?;
-    ones.set(1.0)?;
-    let mut flux_inflows = Vec::with_capacity(fluxes.len());
-    if !fluxes.is_empty() {
-        residual.axpy(-1.0, &free.boundary_load(fluxes)?)?;
+/// An edge of the boundary with the flow through it.
+#[derive(Debug)]
+struct EdgeFlux {
+    /// The entry of [`MassBalance::boundary`] the edge counts for.
+    entry: usize,
+    /// Whether a Dirichlet tag marks it: its advective flux counts in and out.
+    dirichlet: bool,
+    /// The entries of local vectors of its two vertices.
+    ends: [usize; 2],
+    /// The outward normal, of the length of the edge.
+    normal: [f64; 2],
+    /// The velocity at its two Gauss points.
+    velocity: [[f64; 2]; 2],
+}
+
+impl Balance {
+    /// The mass balance of the problem of `setup`. Collective.
+    pub(crate) fn new(setup: &Setup<'_>) -> Result<Balance> {
+        let Setup {
+            disc,
+            free,
+            data,
+            conditions,
+            dirichlet,
+            fluxes,
+            edge_tags,
+            edge_velocity,
+        } = *setup;
+        let comm = disc.dm().comm();
+        let mut ones = free.global_vector()?;
+        ones.set(1.0)?;
+        let load = if fluxes.is_empty() {
+            None
+        } else {
+            Some(free.boundary_load(fluxes)?)
+        };
+
+        let mut entries: Vec<String> = Vec::new();
+        for tag in conditions {
+            if !entries.contains(tag) {
+                entries.push(tag.clone());
+            }
+        }
+        let num_conditions = entries.len();
+        let mut flux_inflows = Vec::with_capacity(fluxes.len());
         for &flux in fluxes {
-            flux_inflows.push(free.boundary_load(&[flux])?.dot(&ones)?);
+            let entry = entries
+                .iter()
+                .position(|n| n == flux.0)
+                .expect("a condition");
+            flux_inflows.push((entry, free.boundary_load(&[flux])?.dot(&ones)?));
         }
-    }
-    let dirichlet_inflows = disc.essential_sums(free, &residual, dirichlet)?;
+        let others: Vec<&String> = edge_tags.iter().filter(|t| !entries.contains(t)).collect();
+        let num_others = others.len();
+        entries.extend(others.iter().map(|t| t.to_string()));
+        entries.push(UNTAGGED.to_string());
 
-    // int u . grad c: the advection of the Galerkin form, tested with v = 1.
-    let n = disc.num_quadrature_points();
-    let velocity = Rc::new(
-        PointData::new(vec![0.0; n], vec![0.0; n], vec![[0.0; 3]; n])
-            .with_velocity(data.velocity().to_vec()),
-    );
-    Transport::new(free, velocity, Terms::Steady)?.apply_local(c, &mut work)?;
-    let advection = work.dot(&ones)?;
-
-    // The advective outflow through each edge of the boundary, by entry.
-    let mut names: Vec<String> = Vec::new();
-    for tag in conditions {
-        if !names.contains(tag) {
-            names.push(tag.clone());
+        let dm = disc.dm();
+        let marked_points = |tag: &str| -> Result<BTreeSet<Point>> {
+            let mut points = BTreeSet::new();
+            for value in dm.label_values(tag)? {
+                points.extend(dm.stratum_points(tag, value)?);
+            }
+            Ok(points)
+        };
+        let condition_points = conditions
+            .iter()
+            .map(|tag| marked_points(tag))
+            .collect::<Result<Vec<_>>>()?;
+        let mut fixed = BTreeSet::new();
+        for tag in dirichlet {
+            fixed.extend(marked_points(tag)?);
         }
-    }
-    let edges = disc.boundary_edges()?;
-    let dm = disc.dm();
-    let marked = |tag: &str| -> Result<BTreeSet<Point>> {
-        let mut points = BTreeSet::new();
-        for value in dm.label_values(tag)? {
-            points.extend(dm.stratum_points(tag, value)?);
-        }
-        Ok(points)
-    };
-    let condition_points = conditions
-        .iter()
-        .map(|tag| marked(tag))
-        .collect::<Result<Vec<_>>>()?;
-    let mut fixed = BTreeSet::new();
-    for tag in dirichlet {
-        fixed.extend(marked(tag)?);
-    }
-    let others: Vec<&String> = edge_tags.iter().filter(|t| !names.contains(t)).collect();
-    let other_points = others
-        .iter()
-        .map(|tag| marked(tag))
-        .collect::<Result<Vec<_>>>()?;
-    // Entries: the conditions, then the other tags, then the untagged edges.
-    let (num_conditions, num_others) = (names.len(), others.len());
-    let mut outflow = vec![0.0; num_conditions + num_others + 1];
-    let mut marks = vec![0; num_others + 1];
-    // int_Gamma (u . n) c, in and out.
-    let mut through = 0.0;
-    c.with_array(|c| {
-        for edge in &edges {
+        let other_points = others
+            .iter()
+            .map(|tag| marked_points(tag))
+            .collect::<Result<Vec<_>>>()?;
+        let mut marks = vec![0; num_others + 1];
+        let mut edges = Vec::new();
+        for edge in disc.boundary_edges()? {
             let entry = match conditions
                 .iter()
                 .zip(&condition_points)
                 .rev()
                 .find(|(_, points)| points.contains(&edge.point))
             {
-                Some((tag, _)) => names.iter().position(|n| n == tag).expect("a condition"),
+                Some((tag, _)) => entries.iter().position(|n| n == tag).expect("a condition"),
                 None => {
                     let other = other_points
                         .iter()
@@ -242,67 +280,162 @@ pub(crate) fn mass_balance(parts: &Parts<'_>) -> Result<MassBalance> {
                     num_conditions + other
                 }
             };
-            let Ok(k) = edge_velocity.binary_search_by_key(&edge.point, |(p, _)| *p) else {
-                // Without advection.
-                continue;
-            };
-            let dirichlet = fixed.contains(&edge.point);
-            let [a, b] = edge.ends;
-            for (s, u) in EDGE_GAUSS.iter().zip(edge_velocity[k].1) {
-                // `normal` has the length of the edge, the Gauss weight is 1/2.
-                let u_n = u[0] * edge.normal[0] + u[1] * edge.normal[1];
-                let flux = 0.5 * u_n * ((1.0 - s) * c[a] + s * c[b]);
-                through += flux;
-                outflow[entry] += if dirichlet || u_n > 0.0 { flux } else { 0.0 };
+            // Without advection, no edge has a velocity.
+            if let Ok(k) = edge_velocity.binary_search_by_key(&edge.point, |(p, _)| *p) {
+                edges.push(EdgeFlux {
+                    entry,
+                    dirichlet: fixed.contains(&edge.point),
+                    ends: edge.ends,
+                    normal: edge.normal,
+                    velocity: edge_velocity[k].1,
+                });
             }
         }
-    })?;
+        let marked = marks
+            .iter()
+            .map(|&m| Ok(comm.max_int(m)? > 0))
+            .collect::<Result<Vec<_>>>()?;
 
-    let storage_rate = comm.sum_real(storage)?;
-    let source = comm.sum_real(source)?;
-    let outflow = outflow
-        .iter()
-        .map(|&o| comm.sum_real(o))
-        .collect::<petsc::Result<Vec<f64>>>()?;
-    let marks = marks
-        .iter()
-        .map(|&m| comm.max_int(m))
-        .collect::<petsc::Result<Vec<_>>>()?;
-    let mut boundary: Vec<BoundaryInflow> = names
-        .iter()
-        .zip(&outflow)
-        .map(|(tag, o)| BoundaryInflow {
-            tag: tag.clone(),
-            advective: -o,
-            diffusive: 0.0,
+        // The velocity alone, for the advection of the Galerkin form.
+        let n = disc.num_quadrature_points();
+        let velocity = Rc::new(
+            PointData::new(vec![0.0; n], vec![0.0; n], vec![[0.0; 3]; n])
+                .with_velocity(data.velocity().to_vec()),
+        );
+        Ok(Balance {
+            disc: disc.clone(),
+            free: free.clone(),
+            data: Rc::clone(data),
+            steady: Transport::new(free, Rc::clone(data), Terms::Steady)?,
+            mass: Transport::new(free, Rc::clone(data), Terms::Mass)?,
+            advection: Transport::new(free, velocity, Terms::Steady)?,
+            sources: RefCell::new(SourceField::stabilized(free, Rc::clone(data))?),
+            load,
+            ones,
+            dirichlet: dirichlet.iter().map(|t| t.to_string()).collect(),
+            entries,
+            num_conditions,
+            marked,
+            flux_inflows,
+            edges,
         })
-        .collect();
-    for ((tag, _), inflow) in fluxes.iter().zip(&flux_inflows) {
-        let entry = names.iter().position(|n| n == tag).expect("a condition");
-        boundary[entry].diffusive += inflow;
     }
-    for (tag, inflow) in dirichlet.iter().zip(&dirichlet_inflows) {
-        let entry = names.iter().position(|n| n == tag).expect("a condition");
-        boundary[entry].diffusive += inflow;
-    }
-    for (i, tag) in others
-        .iter()
-        .map(|t| t.as_str())
-        .chain([UNTAGGED])
-        .enumerate()
-    {
-        if marks[i] > 0 {
-            boundary.push(BoundaryInflow {
-                tag: tag.to_string(),
-                advective: -outflow[num_conditions + i],
-                diffusive: 0.0,
-            });
+
+    /// The mass balance at `state` (see [`MassBalance`]). Collective.
+    pub(crate) fn compute(&self, state: &State<'_>) -> Result<MassBalance> {
+        let State {
+            f,
+            porosity,
+            c,
+            c_t,
+            values,
+            duration,
+        } = *state;
+        let (disc, free, data) = (&self.disc, &self.free, &self.data);
+        let comm = disc.dm().comm();
+        let weights = disc.quadrature_weights();
+        let mut c_q = vec![0.0; disc.num_quadrature_points()];
+        values.apply(c, &mut c_q)?;
+        let mut c_t_q = vec![0.0; disc.num_quadrature_points()];
+        values.apply(c_t, &mut c_t_q)?;
+
+        let storage: f64 = (weights.iter().zip(data.mass()).zip(&c_t_q))
+            .map(|((w, m), c_t)| w * m * c_t)
+            .sum();
+        let source: f64 = (weights.iter().zip(f).zip(porosity))
+            .zip(data.reaction().iter().zip(&c_q))
+            .map(|(((w, f), phi), (r, c))| w * (phi * f - r * c))
+            .sum();
+
+        // The residual of the equations of every dof:
+        // R = S c + M c_t - int phi f (v + SUPG) - load.
+        let mut residual = free.global_vector()?;
+        let mut work = free.global_vector()?;
+        self.steady.apply_local(c, &mut residual)?;
+        self.mass.apply_local(c_t, &mut work)?;
+        residual.axpy(1.0, &work)?;
+        {
+            let mut sources = self.sources.borrow_mut();
+            for ((s, f), phi) in sources.values_mut().iter_mut().zip(f).zip(porosity) {
+                *s = phi * f;
+            }
+            sources.apply(&mut work)?;
         }
+        residual.axpy(-1.0, &work)?;
+        if let Some(load) = &self.load {
+            residual.axpy(-duration, load)?;
+        }
+        let dirichlet: Vec<&str> = self.dirichlet.iter().map(String::as_str).collect();
+        let dirichlet_inflows = disc.essential_sums(free, &residual, &dirichlet)?;
+
+        // int u . grad c: the advection of the Galerkin form, tested with v = 1.
+        self.advection.apply_local(c, &mut work)?;
+        let advection = work.dot(&self.ones)?;
+
+        // The advective outflow through each edge of the boundary, by entry, and
+        // int_Gamma (u . n) c, in and out.
+        let mut outflow = vec![0.0; self.entries.len()];
+        let mut through = 0.0;
+        c.with_array(|c| {
+            for edge in &self.edges {
+                let [a, b] = edge.ends;
+                for (s, u) in EDGE_GAUSS.iter().zip(edge.velocity) {
+                    // `normal` has the length of the edge, the Gauss weight is 1/2.
+                    let u_n = u[0] * edge.normal[0] + u[1] * edge.normal[1];
+                    let flux = 0.5 * u_n * ((1.0 - s) * c[a] + s * c[b]);
+                    through += flux;
+                    outflow[edge.entry] += if edge.dirichlet || u_n > 0.0 {
+                        flux
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        })?;
+
+        let storage_rate = comm.sum_real(storage)?;
+        let source = comm.sum_real(source)?;
+        let outflow = outflow
+            .iter()
+            .map(|&o| comm.sum_real(o))
+            .collect::<petsc::Result<Vec<f64>>>()?;
+        let mut boundary: Vec<BoundaryInflow> = self.entries[..self.num_conditions]
+            .iter()
+            .zip(&outflow)
+            .map(|(tag, o)| BoundaryInflow {
+                tag: tag.clone(),
+                advective: -o,
+                diffusive: 0.0,
+                resupply: 0.0,
+            })
+            .collect();
+        for &(entry, inflow) in &self.flux_inflows {
+            boundary[entry].diffusive += duration * inflow;
+        }
+        for (tag, inflow) in self.dirichlet.iter().zip(&dirichlet_inflows) {
+            let entry = self
+                .entries
+                .iter()
+                .position(|n| n == tag)
+                .expect("a condition");
+            boundary[entry].diffusive += inflow;
+        }
+        for (entry, tag) in self.entries.iter().enumerate().skip(self.num_conditions) {
+            if self.marked[entry - self.num_conditions] {
+                boundary.push(BoundaryInflow {
+                    tag: tag.clone(),
+                    advective: -outflow[entry],
+                    diffusive: 0.0,
+                    resupply: 0.0,
+                });
+            }
+        }
+        Ok(MassBalance {
+            storage_rate,
+            source,
+            boundary,
+            advection_defect: advection - comm.sum_real(through)?,
+            exchange: 0.0,
+        })
     }
-    Ok(MassBalance {
-        storage_rate,
-        source,
-        boundary,
-        advection_defect: advection - comm.sum_real(through)?,
-    })
 }

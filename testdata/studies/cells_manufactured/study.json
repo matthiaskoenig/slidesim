@@ -1,0 +1,32 @@
+{
+  "version": "study/1",
+  "scene": "scene.json",
+  "fields": [
+    {
+      "id": "u",
+      "diffusion": 1.0,
+      "decay": 0.05,
+      "source": 0.0,
+      "porosity": 0.5,
+      "advection": false,
+      "initial": 1.0,
+      "boundaries": []
+    }
+  ],
+  "cells": {
+    "model": "../../models/linear_uptake.xml",
+    "solver": "engine",
+    "time_unit_s": 1.0,
+    "species": [{"species": "A_ext", "field": "u"}],
+    "volumes": {"blood": "Vext", "cells": "Vli"},
+    "parameters": [
+      {"id": "k", "value": 0.1},
+      {"id": "d", "value": 0.01}
+    ],
+    "split_step": 8.0,
+    "rtol": 1e-12,
+    "atol": 1e-14
+  },
+  "time": {"end": 32.0, "dt": 0.5, "adaptive": false, "outputs": [0.0, 16.0, 32.0]},
+  "mesh": {"refinements": 0}
+}

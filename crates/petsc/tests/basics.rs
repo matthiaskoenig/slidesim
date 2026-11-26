@@ -379,7 +379,9 @@ fn objects_outliving_petsc_are_safe() {
 #[test]
 fn use_after_finalize_is_error() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let mut v = Vector::create_seq(&p, 3).unwrap();
     drop(p);
     let e = v.set(1.0).unwrap_err();
@@ -414,7 +416,9 @@ impl ShellOperator for OwnsPetsc {
 #[test]
 fn petsc_dropped_by_matrix_destroy_stays_initialized() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let x = seq(&p, &[1.0, 2.0, 3.0]);
     let mut y = Vector::create_seq(&p, 3).unwrap();
     let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();
@@ -430,7 +434,9 @@ fn petsc_dropped_by_matrix_destroy_stays_initialized() {
 #[test]
 fn petsc_dropped_during_mult_stays_initialized() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let x = seq(&p, &[1.0, 2.0, 3.0]);
     let mut y = Vector::create_seq(&p, 3).unwrap();
     let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();
@@ -485,6 +491,50 @@ fn abort_ends_every_process() {
     for text in ["from Rust before the abort", "from C before the abort"] {
         assert!(run.stdout.contains(text), "{text:?} is lost:\n{output}");
     }
+}
+
+/// Set in the run of [`panic_ends_every_process`] under `mpiexec`.
+const PANIC_RUN: &str = "SLIDESIM_TEST_PANIC_RUN";
+
+/// With [`Petsc::abort_world_on_panic`], a panic on one process ends every process, the others
+/// waiting for it in a collective call: no hang in `PetscFinalize` while unwinding.
+#[test]
+fn panic_ends_every_process() {
+    if std::env::var_os(PANIC_RUN).is_some() {
+        let p = Petsc::init(&[]).unwrap();
+        p.abort_world_on_panic(4);
+        let comm = p.comm();
+        if comm.rank() == 1 {
+            panic!("a bug on one process");
+        }
+        comm.sum_real(1.0).unwrap();
+        println!("process {} left the collective call", comm.rank());
+        return;
+    }
+    let Some(mpiexec) = test_support::Mpiexec::find() else {
+        eprintln!("skipped: no mpiexec");
+        return;
+    };
+    let mut cmd = mpiexec.command(2, std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "panic_ends_every_process",
+        "--test-threads",
+        "1",
+        "--nocapture",
+    ])
+    .env(PANIC_RUN, "1")
+    .env(test_support::MPI_RANKS, "2");
+    let run = test_support::run_with_timeout(cmd, std::time::Duration::from_secs(60));
+    let output = format!("{}\n{}", run.stdout, run.stderr);
+    let status = run.status.unwrap_or_else(|| panic!("hangs:\n{output}"));
+    assert!(!status.success(), "{output}");
+    assert!(!output.contains("left the collective call"), "{output}");
+    assert!(
+        run.stderr
+            .contains("[rank 1] panic: a bug on one process (at crates/petsc/tests/basics.rs:"),
+        "{output}"
+    );
 }
 
 unsafe extern "C" {

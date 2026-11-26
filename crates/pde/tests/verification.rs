@@ -17,7 +17,7 @@ use std::rc::Rc;
 use common::{PIXELS, Scratch, ceed, unit_square};
 use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, TimeSpec};
 use maps::Maps;
-use mesh::MeshError;
+use mesh::{Mesh, MeshError};
 use pde::{Inputs, PdeError, PointData, Problem, Terms, Transport};
 use petsc::{Petsc, Vector};
 
@@ -495,6 +495,179 @@ fn fixed_steps_keep_their_size_after_requested_times() {
     assert_eq!(problem.time_step(), 0.1);
 }
 
+/// The fixed steps of the tests of reuse: 20 steps of 0.25 to t = 5 (sums of binary fractions,
+/// exact), in two calls of `step_to` or one.
+const REUSE_DT: f64 = 0.25;
+const REUSE_HALF: f64 = 2.5;
+const REUSE_END: f64 = 5.0;
+
+/// The problem of the tests of reuse, on refinement 2 of the unit square (three levels of
+/// multigrid), at t = 0 with the initial condition `phi`.
+fn reuse_problem(mesh: &Mesh) -> Problem {
+    let mut problem = Problem::new(
+        mesh,
+        &field(D, K),
+        &fixed(REUSE_END, REUSE_DT),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem
+}
+
+/// The assemblies of the Jacobian of the finest level which the shifts of a time integration
+/// call for, and the builds of the multigrid preconditioner at a new shift: the multigrid is
+/// configured at shift 0 (its finest level assembled); the Jacobian is assembled at each shift
+/// which differs from the last one assembled by more than rounding (`1e-12` relative); the
+/// preconditioner is built again (its finest level assembled too) at each shift beyond a factor
+/// of 2 (and 1e-8 for rounding) either way from the shift it was built at, and at a shift other
+/// than it which the shift before has too.
+fn assemblies_for(shifts: &[f64]) -> (usize, usize) {
+    let differ = |a: f64, b: f64| (a - b).abs() > 1e-12 * a.abs();
+    let (mut assembled, mut built) = (None, 0.0);
+    let (mut assemblies, mut builds) = (1, 0);
+    for (k, &shift) in shifts.iter().enumerate() {
+        if assembled.is_none_or(|a: f64| differ(shift, a)) {
+            assembled = Some(shift);
+            assemblies += 1;
+        }
+        let kept = k > 0 && !differ(shift, shifts[k - 1]);
+        let range = 2.0 * (1.0 + 1e-8);
+        if !(1.0 / range..=range).contains(&(shift / built)) || (kept && differ(shift, built)) {
+            built = shift;
+            builds += 1;
+            assemblies += 1;
+        }
+    }
+    (assemblies, builds)
+}
+
+/// The assemblies of the Jacobian and the builds of the preconditioner of `problem`.
+fn assemblies(problem: &Problem) -> (usize, usize) {
+    (
+        problem.jacobian_assemblies(),
+        problem.preconditioner_builds(),
+    )
+}
+
+/// A problem keeps its operators and multigrid between steps and between calls of `step_to`:
+/// 20 steps in two calls build the Jacobian of each level and the multigrid once, and assemble
+/// the Jacobian again only where BDF changes the shift: at its start (a half step of BDF1, then
+/// the first step of BDF2 on the uneven history, then BDF2 with the fixed step), not at the
+/// second call of `step_to`. The preconditioner is built at the first shift, which the second
+/// is within a factor of 2 of, and again at the shift of BDF2, which the steps keep.
+#[test]
+fn operators_are_built_once() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let levels = mesh.levels().len();
+    assert_eq!(levels, 3);
+    let mut problem = reuse_problem(&mesh);
+    assert_eq!(problem.operator_builds(), levels);
+    assert_eq!(problem.multigrid_builds(), 1);
+    assert_eq!(assemblies(&problem), (1, 0));
+    problem.step_to(REUSE_HALF).unwrap();
+    let half = assemblies(&problem);
+    problem.step_to(REUSE_END).unwrap();
+    assert_eq!(problem.steps().unwrap(), 20);
+    assert_eq!(problem.operator_builds(), levels);
+    assert_eq!(problem.multigrid_builds(), 1);
+    // The start of BDF2 solves once more (the half step); then BDF2 with a fixed step, the
+    // shift 1.5 / dt from the second step on.
+    let shifts = problem.jacobian_shifts();
+    assert_eq!(shifts.len(), 21, "{shifts:?}");
+    for shift in &shifts[2..] {
+        assert!(
+            (shift - 1.5 / REUSE_DT).abs() <= 1e-12 / REUSE_DT,
+            "{shifts:?}"
+        );
+    }
+    assert_eq!(assemblies(&problem), assemblies_for(shifts));
+    assert_eq!(assemblies(&problem), (6, 2), "{shifts:?}");
+    assert_eq!(assemblies(&problem), half, "{shifts:?}");
+}
+
+/// Fixed steps shortened to end at the requested times assemble the Jacobian again for each
+/// change of the shift, and only then: at the shortened steps and the steps after them. The
+/// preconditioner is built again where a shortened step changes the shift by more than a
+/// factor of 2.
+#[test]
+fn fixed_steps_reassemble_at_shortened_steps() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let mut problem = reuse_problem(&mesh);
+    // 0.25 does not divide 0.6 or 1.9: the last step to each is shortened.
+    for t in [0.6, 1.9, REUSE_END] {
+        problem.step_to(t).unwrap();
+    }
+    let shifts = problem.jacobian_shifts();
+    let (assembled, builds) = assemblies(&problem);
+    assert_eq!((assembled, builds), assemblies_for(shifts), "{shifts:?}");
+    // More than at the start of BDF2, fewer than the steps: none while the step stays.
+    assert!(
+        assembled > 5 && assembled < shifts.len(),
+        "{assembled}: {shifts:?}"
+    );
+    assert!(builds < assembled / 2, "{builds}: {shifts:?}");
+    assert_eq!(problem.operator_builds(), mesh.levels().len());
+    assert_eq!(problem.multigrid_builds(), 1);
+}
+
+/// Adaptive steps assemble the Jacobian again once per distinct shift, and build the
+/// preconditioner again only where the shift drifted by more than a factor of 2.
+#[test]
+fn adaptive_steps_reassemble_once_per_shift() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let time = TimeSpec {
+        adaptive: true,
+        ..fixed(2.0, 0.01)
+    };
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem.step_to(1.0).unwrap();
+    problem.step_to(2.0).unwrap();
+    let shifts = problem.jacobian_shifts();
+    let (assembled, builds) = assemblies(&problem);
+    assert_eq!((assembled, builds), assemblies_for(shifts), "{shifts:?}");
+    // The adaptor changes the step, and with it the shift, at most steps.
+    assert!(assembled > shifts.len() / 2, "{assembled}: {shifts:?}");
+    assert!(
+        builds >= 2 && builds < assembled / 4,
+        "{builds}: {shifts:?}"
+    );
+    assert_eq!(problem.operator_builds(), mesh.levels().len());
+    assert_eq!(problem.multigrid_builds(), 1);
+}
+
+/// Steps in two calls of `step_to`, with the operators and the multigrid of the first call,
+/// reach the solution of a fresh problem stepped in one call.
+#[test]
+fn same_result_with_reuse() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let reused = {
+        let mut problem = reuse_problem(&mesh);
+        problem.step_to(REUSE_HALF).unwrap();
+        problem.step_to(REUSE_END).unwrap();
+        problem.l2_norm().unwrap()
+    };
+    // One problem per field id at a time: the first is dropped.
+    let fresh = {
+        let mut problem = reuse_problem(&mesh);
+        problem.step_to(REUSE_END).unwrap();
+        assert_eq!(problem.steps().unwrap(), 20);
+        problem.l2_norm().unwrap()
+    };
+    assert!(
+        (reused - fresh).abs() <= 1e-12 * fresh.abs(),
+        "{reused} with reuse, {fresh} fresh"
+    );
+}
+
 #[test]
 fn adaptive_steps_keep_the_choice_of_the_adaptor() {
     let p = Petsc::init(&[]).unwrap();
@@ -791,12 +964,16 @@ fn spatial_order_variable_coefficients_on_refinements_1_and_2() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 10] = [
+const PARALLEL_TESTS: [&str; 14] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",
     "fixed_steps_keep_their_size_after_requested_times",
+    "operators_are_built_once",
+    "fixed_steps_reassemble_at_shortened_steps",
+    "adaptive_steps_reassemble_once_per_shift",
+    "same_result_with_reuse",
     "spatial_order_p1_on_refinements_2_and_3",
     "spatial_order_variable_coefficients_on_refinements_1_and_2",
     "table_of_a_missing_map_is_error",

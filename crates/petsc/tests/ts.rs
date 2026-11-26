@@ -395,14 +395,25 @@ fn options_already_set_survive_the_scope_and_its_drop() {
     assert_eq!(p.option("-s_ksp_monitor_short").unwrap(), None);
 }
 
+/// The method and the BDF order as set, then as the options change them.
+#[test]
+fn type_and_bdf_order_follow_the_options() {
+    let p = Petsc::init(&[]).unwrap();
+    let (ts, _, _) = decay(&p, 0.1, None);
+    assert_eq!(ts.type_name().unwrap(), "bdf");
+    assert_eq!(ts.bdf_order().unwrap(), 2);
+    let _scope = OptionsScope::new("decay_", &["-ts_bdf_order 3"]).unwrap();
+    let (ts, _, _) = decay(&p, 0.1, None);
+    assert_eq!(ts.bdf_order().unwrap(), 3);
+}
+
 #[test]
 fn options_scope_reaches_the_solvers_of_its_prefix() {
     let p = Petsc::init(&[]).unwrap();
     let _scope = OptionsScope::new("decay_", &["-ksp_type gmres -ts_type beuler"]).unwrap();
     let (ts, _, _) = decay(&p, 0.1, None);
-    let mut name: sys::TSType = std::ptr::null();
-    assert_eq!(unsafe { sys::TSGetType(ts.as_raw(), &mut name) }, 0);
-    assert_eq!(unsafe { std::ffi::CStr::from_ptr(name) }, c"beuler");
+    assert_eq!(ts.type_name().unwrap(), "beuler");
+    assert!(ts.bdf_order().is_err());
     let ksp = ts.snes().unwrap().ksp().unwrap();
     let mut name: sys::KSPType = std::ptr::null();
     assert_eq!(unsafe { sys::KSPGetType(ksp.as_raw(), &mut name) }, 0);

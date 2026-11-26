@@ -1,8 +1,9 @@
 //! Tests of the steady Darcy perfusion [`Flow`] on the unit square: a uniform flow, which P1
-//! represents exactly; convergence orders of pressure and velocity against manufactured
-//! solutions, with isotropic and anisotropic permeability, and on the tagged mesh with holes
-//! `lobule_toy.msh` with a permeability which varies over the mesh; the permeability where the
-//! direction map has no gradient; and errors. nextest runs each test in its own process, so
+//! represents exactly; convergence orders of pressure and velocity (primal and conservative)
+//! against manufactured solutions, with isotropic and anisotropic permeability, and on the tagged
+//! mesh with holes `lobule_toy.msh` with a permeability which varies over the mesh; the
+//! conservation of the edge fluxes; the permeability where the direction map has no gradient;
+//! and errors. nextest runs each test in its own process, so
 //! every test initializes PETSc once. `parallel_on_2_processes` and `parallel_on_3_processes`
 //! run some of them again under `mpiexec`, and compare the results with those of one process.
 //!
@@ -11,13 +12,14 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use common::{PIXELS, Scratch, ceed, read_maps, unit_square};
 use contracts::{Coefficient, Direction, Perfusion, PressureBoundary};
 use mesh::{Mesh, MeshError};
 use pde::{Discretization, Flow, PdeError};
-use petsc::Petsc;
+use petsc::{Petsc, Point};
 
 /// The four sides of `unit_square.msh`.
 const SIDES: [&str; 4] = ["left", "right", "top", "bottom"];
@@ -91,25 +93,150 @@ fn velocity_l2_error(
     disc.dm().comm().sum_real(local).unwrap().sqrt()
 }
 
-/// Asserts that the velocity of `flow` is `expected` at every quadrature point of every level
-/// of `mesh`, within `1e-10`.
+/// Asserts that the velocity of `flow`, conservative and primal, is `expected` at every
+/// quadrature point of every level of `mesh`, within `1e-10`.
 fn assert_uniform_velocity(mesh: &Mesh, flow: &Flow, expected: [f64; 2]) {
     for level in 0..mesh.levels().len() {
         let disc = Discretization::new(mesh, level, &ceed(), 1).unwrap();
-        let velocity = flow.velocity(level);
-        assert_eq!(
-            velocity.len(),
-            disc.num_quadrature_points(),
-            "level {level}"
-        );
-        for (u, x) in velocity.iter().zip(disc.quadrature_points()) {
-            for c in 0..2 {
-                assert!(
-                    (u[c] - expected[c]).abs() < 1e-10,
-                    "level {level} at {x:?}: {u:?}, expected {expected:?}"
-                );
+        for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
+            assert_eq!(
+                velocity.len(),
+                disc.num_quadrature_points(),
+                "level {level}"
+            );
+            for (u, x) in velocity.iter().zip(disc.quadrature_points()) {
+                for c in 0..2 {
+                    assert!(
+                        (u[c] - expected[c]).abs() < 1e-10,
+                        "level {level} at {x:?}: {u:?}, expected {expected:?}"
+                    );
+                }
             }
         }
+    }
+}
+
+/// The edges of one level of a mesh, to read the edge fluxes of a flow
+/// ([`Flow::edge_fluxes`]): each in the direction of the reference normal of its edge, the
+/// vector from its first vertex to its second (in the order of its cone) turned by -90 degrees.
+struct Edges {
+    disc: Discretization,
+    level: usize,
+}
+
+impl Edges {
+    fn new(mesh: &Mesh, level: usize) -> Edges {
+        Edges {
+            disc: Discretization::new(mesh, level, &ceed(), 1).unwrap(),
+            level,
+        }
+    }
+
+    fn at(&self, vertex: Point) -> [f64; 2] {
+        let dm = self.disc.dm();
+        self.disc.node_coordinates()[dm.local_dofs(vertex).unwrap().start]
+    }
+
+    /// 1 if the reference normal of `edge` points out of `cell`, else -1.
+    fn outward(&self, cell: Point, edge: Point) -> f64 {
+        let dm = self.disc.dm();
+        let vertices = dm.depth_stratum(0).unwrap();
+        let corners: Vec<[f64; 2]> = dm
+            .closure(cell)
+            .unwrap()
+            .into_iter()
+            .filter(|p| vertices.contains(p))
+            .map(|v| self.at(v))
+            .collect();
+        assert_eq!(corners.len(), 3);
+        let centroid = [0, 1].map(|c| corners.iter().map(|x| x[c]).sum::<f64>() / 3.0);
+        let &[a, b] = dm.cone(edge).unwrap().as_slice() else {
+            panic!("edge {edge}");
+        };
+        let ([xa, ya], [xb, yb]) = (self.at(a), self.at(b));
+        let normal = [yb - ya, xa - xb];
+        let middle = [0.5 * (xa + xb), 0.5 * (ya + yb)];
+        let out = normal[0] * (middle[0] - centroid[0]) + normal[1] * (middle[1] - centroid[1]);
+        if out > 0.0 { 1.0 } else { -1.0 }
+    }
+
+    /// The edge fluxes of `flow` on the level, checked to be one per local edge.
+    fn fluxes<'a>(&self, flow: &'a Flow) -> &'a [f64] {
+        let fluxes = flow.edge_fluxes(self.level);
+        let edges = self.disc.dm().depth_stratum(1).unwrap();
+        assert_eq!(fluxes.len(), edges.len(), "level {}", self.level);
+        fluxes
+    }
+
+    /// The fluxes of `flow` out of each local cell through its three edges.
+    fn cell_fluxes(&self, flow: &Flow) -> Vec<[f64; 3]> {
+        let fluxes = self.fluxes(flow);
+        let dm = self.disc.dm();
+        let edges = dm.depth_stratum(1).unwrap();
+        dm.height_stratum(0)
+            .unwrap()
+            .map(|cell| {
+                let cone = dm.cone(cell).unwrap();
+                assert_eq!(cone.len(), 3);
+                [0, 1, 2]
+                    .map(|i| self.outward(cell, cone[i]) * fluxes[(cone[i] - edges.start) as usize])
+            })
+            .collect()
+    }
+
+    /// The local edges the tag `tag` marks.
+    fn tagged(&self, tag: &str) -> Vec<Point> {
+        let dm = self.disc.dm();
+        let edges = dm.depth_stratum(1).unwrap();
+        let mut points = Vec::new();
+        for value in dm.label_values(tag).unwrap() {
+            points.extend(dm.stratum_points(tag, value).unwrap());
+        }
+        points.retain(|p| edges.contains(p));
+        assert!(
+            dm.comm()
+                .sum_int(points.len() as petsc::sys::PetscInt)
+                .unwrap()
+                > 0,
+            "{tag}"
+        );
+        points
+    }
+
+    /// The flow of `flow` into the domain through the edges of the tag `tag`, each edge counted
+    /// on the process which owns it. Collective.
+    fn inflow(&self, flow: &Flow, tag: &str) -> f64 {
+        let fluxes = self.fluxes(flow);
+        let dm = self.disc.dm();
+        let edges = dm.depth_stratum(1).unwrap();
+        let ghosts = dm.ghost_points().unwrap();
+        let local: f64 = self
+            .tagged(tag)
+            .into_iter()
+            .filter(|edge| ghosts.binary_search(edge).is_err())
+            .map(|edge| {
+                let &[cell] = dm.support(edge).unwrap().as_slice() else {
+                    panic!("edge {edge} of {tag} inside the domain");
+                };
+                -self.outward(cell, edge) * fluxes[(edge - edges.start) as usize]
+            })
+            .sum();
+        dm.comm().sum_real(local).unwrap()
+    }
+
+    /// The sum of the absolute edge fluxes of `flow` over the edges, each counted on the process
+    /// which owns it. Collective.
+    fn total(&self, flow: &Flow) -> f64 {
+        let fluxes = self.fluxes(flow);
+        let dm = self.disc.dm();
+        let edges = dm.depth_stratum(1).unwrap();
+        let ghosts = dm.ghost_points().unwrap();
+        let local: f64 = edges
+            .clone()
+            .filter(|edge| ghosts.binary_search(edge).is_err())
+            .map(|edge| fluxes[(edge - edges.start) as usize].abs())
+            .sum();
+        dm.comm().sum_real(local).unwrap()
     }
 }
 
@@ -150,11 +277,12 @@ fn uniform_flow() {
         .unwrap();
     assert!(flow.pressure_l2_error(|[x, _]| 1.0 - x).unwrap() < 1e-10);
 
-    // The velocity projected to the nodes: 2 components per node.
+    // The velocities projected to the nodes: 2 components of each of the conservative and the
+    // primal velocity per node.
     let velocity = flow.nodal_velocity().unwrap();
     velocity
         .with_array(|values| {
-            assert_eq!(values.len(), 2 * nodes.len());
+            assert_eq!(values.len(), 4 * nodes.len());
             for u in values.as_chunks::<2>().0 {
                 assert!((u[0] - 2.0).abs() < 1e-10 && u[1].abs() < 1e-10, "{u:?}");
             }
@@ -266,26 +394,33 @@ impl Manufactured {
         .unwrap()
     }
 
-    /// The L2 errors of pressure and velocity on the finest level at each of `REFINEMENTS`, and
-    /// the results which `parallel_on_*_processes` compares between process counts: the L2
-    /// norms of pressure and velocity, and the flows through the sides.
-    fn errors(&self, p: &Petsc, test: &str) -> (Vec<[f64; 2]>, Vec<f64>) {
+    /// The L2 errors of the pressure, the primal velocity and the conservative velocity on the
+    /// finest level at each of `REFINEMENTS`, and the results which `parallel_on_*_processes`
+    /// compares between process counts: the L2 norms of pressure and velocities, the flows
+    /// through the sides, and the sums of the edge fluxes (through each side, and of their
+    /// absolute values).
+    fn errors(&self, p: &Petsc, test: &str) -> (Vec<[f64; 3]>, Vec<f64>) {
         let mut errors = Vec::new();
         let mut results = Vec::new();
         for refinements in REFINEMENTS {
             let mesh = unit_square(p, refinements);
             let flow = self.solve(test, &mesh);
             let finest = mesh.levels().len() - 1;
-            let velocity = flow.velocity(finest);
+            let (primal, velocity) = (flow.primal_velocity(finest), flow.velocity(finest));
             errors.push([
                 flow.pressure_l2_error(self.pressure).unwrap(),
+                velocity_l2_error(&mesh, finest, primal, |x| self.velocity(x)),
                 velocity_l2_error(&mesh, finest, velocity, |x| self.velocity(x)),
             ]);
             results.push(flow.pressure_l2_error(|_| 0.0).unwrap());
+            results.push(velocity_l2_error(&mesh, finest, primal, |_| [0.0; 2]));
             results.push(velocity_l2_error(&mesh, finest, velocity, |_| [0.0; 2]));
             let flows: Vec<f64> = flow.tag_flows().iter().map(|&(_, q)| q).collect();
             self.assert_conserved(&flow, &flows);
             results.extend(flows);
+            let edges = Edges::new(&mesh, finest);
+            results.extend(SIDES.map(|side| edges.inflow(&flow, side)));
+            results.push(edges.total(&flow));
         }
         (errors, results)
     }
@@ -311,20 +446,40 @@ impl Manufactured {
     }
 }
 
-/// Asserts the orders of the pressure errors (`errors[i][0]`) and the velocity errors
-/// (`errors[i][1]`) between successive refinements are at least `2 - 0.1` and `1 - 0.1`.
-fn assert_orders(errors: &[[f64; 2]]) {
-    for pair in errors.windows(2) {
-        let order = |i: usize| (pair[0][i] / pair[1][i]).log2();
-        println!(
-            "errors {:?} -> {:?}: orders {:.3} (pressure), {:.3} (velocity)",
-            pair[0],
-            pair[1],
-            order(0),
-            order(1)
+/// The orders of the errors `errors` (of the pressure, the primal velocity and the conservative
+/// velocity, see [`Manufactured::errors`]) between successive refinements.
+fn orders(errors: &[[f64; 3]]) -> Vec<[f64; 3]> {
+    errors
+        .windows(2)
+        .map(|pair| {
+            let order = [0, 1, 2].map(|i| (pair[0][i] / pair[1][i]).log2());
+            println!(
+                "errors {:?} -> {:?}: orders {:.3} (pressure), {:.3} (primal velocity), {:.3} \
+                 (conservative velocity)",
+                pair[0], pair[1], order[0], order[1], order[2]
+            );
+            order
+        })
+        .collect()
+}
+
+/// Asserts the orders of the pressure errors and the primal velocity errors between successive
+/// refinements are at least `2 - 0.1` and `1 - 0.1`.
+fn assert_orders(errors: &[[f64; 3]]) {
+    for [pressure, primal, _] in orders(errors) {
+        assert!(pressure >= 1.9, "pressure order {pressure}");
+        assert!(primal >= 0.9, "primal velocity order {primal}");
+    }
+}
+
+/// Asserts the orders of the conservative velocity errors between successive refinements are at
+/// least `1 - 0.1`.
+fn assert_conservative_orders(errors: &[[f64; 3]]) {
+    for [_, _, conservative] in orders(errors) {
+        assert!(
+            conservative >= 0.9,
+            "conservative velocity order {conservative}"
         );
-        assert!(order(0) >= 1.9, "pressure order {}", order(0));
-        assert!(order(1) >= 0.9, "velocity order {}", order(1));
     }
 }
 
@@ -448,19 +603,15 @@ mod lobule {
     }
 }
 
-/// Darcy on a slideviz-like tagged mesh with holes (spec, verification item 2): pressure
-/// Dirichlet values on both holes and the outer boundary, a permeability which turns and changes
-/// its anisotropy over the mesh (see [`lobule`]): pressure O(h^2) and velocity O(h) on 4
-/// levels (h about 20, 10, 5, 2.5 um), and the flows through the tags balance the source.
-#[test]
-fn pressure_order_on_tagged_mesh() {
-    let p = Petsc::init(&[]).unwrap();
-    let test = "pressure_order_on_tagged_mesh";
+/// The errors of the manufactured flow of [`lobule`] on `lobule_toy.msh` at 0 to 3 refinements
+/// (as [`Manufactured::errors`]), with the pressure fixed on both holes and the outer boundary;
+/// asserts that the flows through the tags balance the source.
+fn tagged_mesh_errors(p: &Petsc, test: &str) -> Vec<[f64; 3]> {
     let boundaries: Vec<(&str, f64)> = LOBULE_TAGS.iter().map(|&tag| (tag, 0.0)).collect();
     let perfusion = perfusion(1.0, LOBULE_K, LOBULE_G0, &boundaries);
     let mut errors = Vec::new();
     for refinements in 0..4 {
-        let mesh = common::fixture_mesh(&p, "lobule_toy.msh", refinements);
+        let mesh = common::fixture_mesh(p, "lobule_toy.msh", refinements);
         let scratch = Scratch::new(test);
         // 2 um pixels over [-6, 410] um.
         let direction =
@@ -477,10 +628,15 @@ fn pressure_order_on_tagged_mesh() {
         )
         .unwrap();
         let finest = mesh.levels().len() - 1;
-        let velocity = flow.velocity(finest);
         errors.push([
             flow.pressure_l2_error(lobule::pressure).unwrap(),
-            velocity_l2_error(&mesh, finest, velocity, lobule::velocity),
+            velocity_l2_error(
+                &mesh,
+                finest,
+                flow.primal_velocity(finest),
+                lobule::velocity,
+            ),
+            velocity_l2_error(&mesh, finest, flow.velocity(finest), lobule::velocity),
         ]);
         // The flows through the three tags balance the source, `-int f`.
         let flows = flow.tag_flows();
@@ -501,7 +657,399 @@ fn pressure_order_on_tagged_mesh() {
             "inflow {inflow}, source {source}"
         );
     }
-    assert_orders(&errors);
+    errors
+}
+
+/// Darcy on a slideviz-like tagged mesh with holes (spec, verification item 2): pressure
+/// Dirichlet values on both holes and the outer boundary, a permeability which turns and changes
+/// its anisotropy over the mesh (see [`lobule`]): pressure O(h^2) and primal velocity O(h) on 4
+/// levels (h about 20, 10, 5, 2.5 um), and the flows through the tags balance the source.
+#[test]
+fn pressure_order_on_tagged_mesh() {
+    let p = Petsc::init(&[]).unwrap();
+    assert_orders(&tagged_mesh_errors(&p, "pressure_order_on_tagged_mesh"));
+}
+
+/// The conservative velocity converges at order 1 as the primal one, on the manufactured flows
+/// of the `pressure_order_*` tests.
+#[test]
+fn conservative_velocity_order() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "conservative_velocity_order";
+    for manufactured in [Manufactured::isotropic(), Manufactured::anisotropic()] {
+        assert_conservative_orders(&manufactured.errors(&p, test).0);
+    }
+    assert_conservative_orders(&tagged_mesh_errors(&p, test));
+}
+
+/// The pressures of the perfusion through `lobule_toy.msh` (Pa): from the portal wall to the
+/// central wall, no flow through the section edge.
+const LOBULE_PRESSURES: [(&str, f64); 2] = [("portal_wall", 390.0), ("central_wall", 0.0)];
+
+/// The flow through `lobule_toy.msh` refined `refinements` times, from the portal wall to the
+/// central wall ([`LOBULE_PRESSURES`]), with the permeability of [`lobule`] (`mu = 1`): no
+/// flow through the section edge.
+fn lobule_flow(p: &Petsc, test: &str, refinements: u32) -> (Mesh, Flow) {
+    let mesh = common::fixture_mesh(p, "lobule_toy.msh", refinements);
+    let scratch = Scratch::new(test);
+    let direction = scratch.map_on_grid("direction", [209, 209], 2.0, [-6.0, -6.0], lobule::map);
+    let maps = read_maps(&[direction], &mesh);
+    let perfusion = perfusion(1.0, LOBULE_K, LOBULE_G0, &LOBULE_PRESSURES);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+    (mesh, flow)
+}
+
+/// The anisotropic flow from `left` to `right` on the unit square refined twice, whose axes are
+/// oblique to the sides: not uniform, no flow through `top` and `bottom`.
+fn oblique_flow(p: &Petsc, test: &str) -> (Mesh, Flow) {
+    let mesh = unit_square(p, 2);
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, &[("left", 1.0), ("right", 0.0)]);
+    let flow = solve(test, &mesh, &perfusion, |[x, y]| x + 0.5 * y).unwrap();
+    (mesh, flow)
+}
+
+/// The flows of the tests of the edge fluxes, with the tags without pressure condition (walls).
+fn conservation_cases(p: &Petsc, test: &str) -> Vec<(Mesh, Flow, Vec<&'static str>)> {
+    let (mesh, flow) = lobule_flow(p, test, 1);
+    let (square, oblique) = oblique_flow(p, test);
+    vec![
+        (mesh, flow, vec!["section_edge"]),
+        (square, oblique, vec!["top", "bottom"]),
+    ]
+}
+
+/// On every level, the fluxes through the three edges of each cell add up to zero (no sources
+/// in the Darcy problem), to rounding.
+#[test]
+fn element_fluxes_sum_to_zero() {
+    let p = Petsc::init(&[]).unwrap();
+    for (mesh, flow, _) in conservation_cases(&p, "element_fluxes_sum_to_zero") {
+        for level in 0..mesh.levels().len() {
+            let cells = Edges::new(&mesh, level).cell_fluxes(&flow);
+            let scale = cells.iter().flatten().fold(0.0_f64, |m, f| m.max(f.abs()));
+            assert!(scale > 0.0);
+            let worst = cells
+                .iter()
+                .map(|f| (f[0] + f[1] + f[2]).abs())
+                .fold(0.0, f64::max);
+            println!("level {level}: largest flux {scale:e}, largest cell sum {worst:e}");
+            assert!(
+                worst <= 1e-12 * scale,
+                "level {level}: {worst:e} of {scale:e}"
+            );
+        }
+    }
+}
+
+/// On every level, the flux through each edge of a tag without pressure condition is zero.
+#[test]
+fn no_flux_through_walls_without_pressure() {
+    let p = Petsc::init(&[]).unwrap();
+    for (mesh, flow, walls) in conservation_cases(&p, "no_flux_through_walls_without_pressure") {
+        for level in 0..mesh.levels().len() {
+            let edges = Edges::new(&mesh, level);
+            let fluxes = edges.fluxes(&flow);
+            let start = edges.disc.dm().depth_stratum(1).unwrap().start;
+            for wall in &walls {
+                for edge in edges.tagged(wall) {
+                    let flux = fluxes[(edge - start) as usize];
+                    assert_eq!(flux, 0.0, "level {level}, {wall}, edge {edge}");
+                }
+            }
+        }
+    }
+}
+
+/// The edge fluxes through each pressure tag add up to its flow from the residual
+/// ([`Flow::tag_flows`]): on the flows of [`conservation_cases`], and on the manufactured flow
+/// with a source, whose four sides meet at corners (a corner counts for the side listed last).
+#[test]
+fn tag_flows_equal_edge_flux_sums() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "tag_flows_equal_edge_flux_sums";
+    let mut cases: Vec<(Mesh, Flow)> = conservation_cases(&p, test)
+        .into_iter()
+        .map(|(mesh, flow, _)| (mesh, flow))
+        .collect();
+    let square = unit_square(&p, 2);
+    let manufactured = Manufactured::anisotropic().solve(test, &square);
+    cases.push((square, manufactured));
+    for (mesh, flow) in &cases {
+        let edges = Edges::new(mesh, mesh.levels().len() - 1);
+        for (tag, q) in flow.tag_flows() {
+            let sum = edges.inflow(flow, tag);
+            println!("{tag}: tag flow {q:e}, edge flux sum {sum:e}");
+            assert!(
+                (sum - q).abs() <= 1e-10 * q.abs(),
+                "{tag}: {sum} against {q}"
+            );
+        }
+    }
+}
+
+/// `pinched.msh` refined once: the rectangle [0, 4] x [0, 2] um with two triangular holes
+/// (`hole_wall`) which touch at (2, 1), where the boundary touches itself (two vertices there
+/// after `Mesh::load`, one per fan of cells). The anisotropic permeability of the oblique flow
+/// (map `x + 0.5 y`), with the pressures `pressures`.
+fn pinched_flow(
+    p: &Petsc,
+    test: &str,
+    pressures: &[(&str, f64)],
+) -> Result<(Mesh, Flow), PdeError> {
+    let mesh = common::fixture_mesh(p, "pinched.msh", 1);
+    let scratch = Scratch::new(test);
+    let direction = scratch.map_on_grid("direction", [45, 85], 0.05, [-0.1, -0.1], |[x, y]| {
+        x + 0.5 * y
+    });
+    let maps = read_maps(&[direction], &mesh);
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, pressures);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "")?;
+    Ok((mesh, flow))
+}
+
+/// The pressures of the flows of `pinched_boundary`: through the holes, and past them.
+const PINCHED_PRESSURES: [&[(&str, f64)]; 2] = [
+    &[("hole_wall", 1.0), ("left", 0.0), ("right", 0.0)],
+    &[("left", 1.0), ("right", 0.0)],
+];
+
+/// A vertex where the boundary touches itself (two holes touching): with a pressure condition
+/// on the holes, and with the holes as walls, on every level every cell conserves mass, the
+/// walls have no flux, and the edge fluxes of each pressure tag add up to its flow.
+#[test]
+fn pinched_boundary() {
+    let p = Petsc::init(&[]).unwrap();
+    for (pressures, walls) in PINCHED_PRESSURES
+        .iter()
+        .zip([&["rim"][..], &["rim", "hole_wall"]])
+    {
+        let (mesh, flow) = pinched_flow(&p, "pinched_boundary", pressures).unwrap();
+        for level in 0..mesh.levels().len() {
+            let edges = Edges::new(&mesh, level);
+            let fluxes = edges.fluxes(&flow);
+            let start = edges.disc.dm().depth_stratum(1).unwrap().start;
+            for wall in walls {
+                for edge in edges.tagged(wall) {
+                    assert_eq!(
+                        fluxes[(edge - start) as usize],
+                        0.0,
+                        "level {level}, {wall}"
+                    );
+                }
+            }
+            let cells = edges.cell_fluxes(&flow);
+            let scale = cells.iter().flatten().fold(0.0_f64, |m, f| m.max(f.abs()));
+            let worst = cells
+                .iter()
+                .map(|f| (f[0] + f[1] + f[2]).abs())
+                .fold(0.0, f64::max);
+            println!("{pressures:?}, level {level}: largest flux {scale:e}, cell sum {worst:e}");
+            assert!(
+                worst <= 1e-12 * scale,
+                "level {level}: {worst:e} of {scale:e}"
+            );
+        }
+        let edges = Edges::new(&mesh, mesh.levels().len() - 1);
+        for (tag, q) in flow.tag_flows() {
+            let sum = edges.inflow(&flow, tag);
+            assert!(
+                (sum - q).abs() <= 1e-10 * q.abs(),
+                "{tag}: {sum} against {q}"
+            );
+        }
+    }
+}
+
+/// A pressure tag inside the domain (here on edges embedded in the mesh) is an error, naming the
+/// tag: the equilibrated fluxes of the conservative velocity need the pressure tags on edges of
+/// the boundary.
+#[test]
+fn pressure_tag_inside_the_domain_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let pressures = [("left", 1.0), ("right", 0.0), ("inner_line", 0.5)];
+    let e = pinched_flow(&p, "pressure_tag_inside_the_domain_is_error", &pressures).unwrap_err();
+    let message = e.to_string();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{message}");
+    assert!(message.contains("'inner_line'"), "{message}");
+    assert!(message.contains("edges of the boundary"), "{message}");
+}
+
+/// The island of `island.msh`, um: the square [2.5, 3.5] x [1.5, 2.5], alone in a hole of the
+/// rest of the mesh ([2, 4] x [1, 3]), so every point of the mesh in it is of the island.
+const ISLAND: [[f64; 2]; 2] = [[2.5, 1.5], [3.5, 2.5]];
+
+fn on_island([x, y]: [f64; 2]) -> bool {
+    (ISLAND[0][0]..=ISLAND[1][0]).contains(&x) && (ISLAND[0][1]..=ISLAND[1][1]).contains(&y)
+}
+
+/// The anisotropic oblique flow (map `x + 0.5 y`) from `portal_wall` (1 Pa) to `central_wall`
+/// (0 Pa) through the mesh `file` (`island.msh` or `island_removed.msh`) refined once.
+fn island_flow(p: &Petsc, test: &str, file: &str) -> (Mesh, Flow) {
+    let mesh = common::fixture_mesh(p, file, 1);
+    let scratch = Scratch::new(test);
+    let direction = scratch.map_on_grid("direction", [45, 65], 0.1, [-0.2, -0.2], |[x, y]| {
+        x + 0.5 * y
+    });
+    let maps = read_maps(&[direction], &mesh);
+    let pressures = [("portal_wall", 1.0), ("central_wall", 0.0)];
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, &pressures);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+    (mesh, flow)
+}
+
+/// The values of `values` at the points `points`, by the bits of the coordinates of the point.
+fn by_point<T: Copy>(points: &[[f64; 2]], values: &[T]) -> HashMap<[u64; 2], T> {
+    assert_eq!(points.len(), values.len());
+    points
+        .iter()
+        .zip(values)
+        .map(|(x, &v)| (x.map(f64::to_bits), v))
+        .collect()
+}
+
+/// The flux through each local edge of level `level` of `mesh` with the edges `edges`, by the
+/// middle of the edge, in the direction of the normal of the edge from its lower left vertex to
+/// the other turned by -90 degrees (the same edge of two meshes has the same direction).
+fn edge_fluxes_by_middle(edges: &Edges, flow: &Flow) -> Vec<([f64; 2], f64)> {
+    let fluxes = edges.fluxes(flow);
+    let dm = edges.disc.dm();
+    let stratum = dm.depth_stratum(1).unwrap();
+    stratum
+        .clone()
+        .map(|edge| {
+            let &[a, b] = dm.cone(edge).unwrap().as_slice() else {
+                panic!("edge {edge}");
+            };
+            let (a, b) = (edges.at(a), edges.at(b));
+            let sign = if a <= b { 1.0 } else { -1.0 };
+            let middle = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+            (middle, sign * fluxes[(edge - stratum.start) as usize])
+        })
+        .collect()
+}
+
+/// A floating island, a connected component of the mesh which no pressure tag reaches (its
+/// boundary a wall without pressure), has pressure 0, and no flow: its velocities (conservative
+/// and primal) and edge fluxes are 0, on every level. The rest of the mesh has the flow of the
+/// mesh without the island, within 1e-12 (on one process: on several, the two meshes are
+/// partitioned differently). The flow reports the island: one, of 1 um^2.
+#[test]
+fn island_has_zero_flow() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "island_has_zero_flow";
+    let (mesh, flow) = island_flow(&p, test, "island.msh");
+    let islands = flow.islands();
+    assert_eq!(islands.count, 1, "{islands:?}");
+    assert!((islands.area - 1.0).abs() < 1e-12, "{islands:?}");
+    let disc = flow.discretization();
+    let nodes = disc.node_coordinates();
+    let pressure = flow.local_pressure().unwrap();
+    let pressure = pressure.with_array(<[f64]>::to_vec).unwrap();
+    let island_nodes = nodes.iter().filter(|&&x| on_island(x)).count();
+    let island_nodes = disc
+        .dm()
+        .comm()
+        .sum_int(island_nodes as petsc::sys::PetscInt)
+        .unwrap();
+    assert!(island_nodes > 0);
+    for (x, p) in nodes.iter().zip(&pressure) {
+        if on_island(*x) {
+            assert_eq!(*p, 0.0, "{x:?}");
+        }
+    }
+    for level in 0..mesh.levels().len() {
+        let points = Discretization::new(&mesh, level, &ceed(), 1).unwrap();
+        let points = points.quadrature_points();
+        for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
+            for (x, u) in points.iter().zip(velocity) {
+                if on_island(*x) {
+                    assert_eq!(*u, [0.0, 0.0], "level {level}, {x:?}");
+                }
+            }
+        }
+        let edges = Edges::new(&mesh, level);
+        for (middle, flux) in edge_fluxes_by_middle(&edges, &flow) {
+            if on_island(middle) {
+                assert_eq!(flux, 0.0, "level {level}, {middle:?}");
+            }
+        }
+    }
+    let flows = flow.tag_flows();
+    assert!(flows[0].1 > 0.0, "{flows:?}");
+
+    let (removed_mesh, removed) = island_flow(&p, test, "island_removed.msh");
+    assert_eq!(removed.islands().count, 0);
+    assert_eq!(removed.islands().area, 0.0);
+    if test_support::ranks() > 1 {
+        return;
+    }
+    let close = |a: f64, b: f64, scale: f64| (a - b).abs() <= 1e-12 * scale;
+    for ((tag, q), (other, q_removed)) in flows.iter().zip(removed.tag_flows()) {
+        assert_eq!(tag, other);
+        assert!(
+            close(*q, *q_removed, flows[0].1),
+            "{tag}: {q} against {q_removed}"
+        );
+    }
+    let rest = removed.discretization();
+    let rest_pressure = removed.local_pressure().unwrap();
+    let rest_pressure = by_point(
+        rest.node_coordinates(),
+        &rest_pressure.with_array(<[f64]>::to_vec).unwrap(),
+    );
+    for (x, p) in nodes.iter().zip(&pressure) {
+        if !on_island(*x) {
+            let other = rest_pressure[&x.map(f64::to_bits)];
+            assert!(close(*p, other, 1.0), "{x:?}: {p} against {other}");
+        }
+    }
+    for level in 0..mesh.levels().len() {
+        let points = Discretization::new(&mesh, level, &ceed(), 1).unwrap();
+        let rest_points = Discretization::new(&removed_mesh, level, &ceed(), 1).unwrap();
+        let rest_velocity = by_point(rest_points.quadrature_points(), removed.velocity(level));
+        let scale = rest_velocity
+            .values()
+            .fold(0.0_f64, |m, u| m.max(u[0].abs()).max(u[1].abs()));
+        for (x, u) in points.quadrature_points().iter().zip(flow.velocity(level)) {
+            if !on_island(*x) {
+                let other = rest_velocity[&x.map(f64::to_bits)];
+                for c in 0..2 {
+                    assert!(
+                        close(u[c], other[c], scale),
+                        "level {level}, {x:?}: {u:?}, {other:?}"
+                    );
+                }
+            }
+        }
+        let rest_edges = Edges::new(&removed_mesh, level);
+        let (points, fluxes): (Vec<_>, Vec<_>) = edge_fluxes_by_middle(&rest_edges, &removed)
+            .into_iter()
+            .unzip();
+        let rest_fluxes = by_point(&points, &fluxes);
+        let scale = fluxes.iter().fold(0.0_f64, |m, f| m.max(f.abs()));
+        for (middle, flux) in edge_fluxes_by_middle(&Edges::new(&mesh, level), &flow) {
+            if !on_island(middle) {
+                let other = rest_fluxes[&middle.map(f64::to_bits)];
+                assert!(
+                    close(flux, other, scale),
+                    "level {level}, {middle:?}: {flux}, {other}"
+                );
+            }
+        }
+    }
+}
+
+/// A pinned hierarchy ([`Discretization::pinned_hierarchy`]) of a mesh where no component has an
+/// essential dof (here no essential tag at all) is an error on every process: nothing would be
+/// left to solve for.
+#[test]
+fn nothing_but_floating_components_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = common::fixture_mesh(&p, "island.msh", 0);
+    let e = Discretization::pinned_hierarchy(&mesh, &ceed(), 1, &[]).unwrap_err();
+    let message = e.to_string();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{message}");
+    assert!(message.contains("no connected component"), "{message}");
 }
 
 /// The velocity of every level is at the quadrature points of that level, in the layout of any
@@ -590,6 +1138,38 @@ fn divergence_is_error() {
     Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
 }
 
+/// The options which make the coarse solver of the multigrid preconditioner diverge on its first
+/// application, in the middle of a V-cycle: Richardson without a preconditioner, scaled so that
+/// its residual grows, stopped when it has grown tenfold (`DIVERGED_DTOL`), with finite values.
+const DIVERGING_COARSE_SOLVER: &str = "-mg_coarse_ksp_type richardson \
+     -mg_coarse_ksp_richardson_scale 1000 -mg_coarse_ksp_divtol 10 -mg_coarse_ksp_max_it 5 \
+     -mg_coarse_pc_type none";
+
+/// A solver inside the multigrid preconditioner which fails in the middle of a V-cycle (here the
+/// coarse solver) makes the pressure solve fail: an error naming the inner solve, and the flow
+/// can be solved again. PETSc returns the error without restoring the state of the
+/// preconditioner, so the solver must not be destroyed: this ended in a segmentation fault when
+/// it was (`KSPDestroy`, `PCReset_MG`, `VecDestroy`).
+#[test]
+fn inner_solve_failure_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, &[("left", 1.0), ("right", 0.0)]);
+    let scratch = Scratch::new("inner_solve_failure_is_error");
+    let maps = read_maps(
+        &[scratch.map("direction", PIXELS, |[x, y]| x + 0.5 * y)],
+        &mesh,
+    );
+    let e = Flow::solve(&mesh, &perfusion, &maps, &ceed(), DIVERGING_COARSE_SOLVER).unwrap_err();
+    let PdeError::SolveFailed { solve, reason } = &e else {
+        panic!("expected a failed solve, got {e}");
+    };
+    assert_eq!(solve, "perfusion");
+    assert!(reason.contains("inner solve"), "{e}");
+    assert!(reason.contains("DIVERGED_DTOL"), "{e}");
+    Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+}
+
 #[test]
 fn unknown_pressure_tag_lists_tags() {
     let p = Petsc::init(&[]).unwrap();
@@ -612,21 +1192,40 @@ fn unknown_pressure_tag_lists_tags() {
     }
 }
 
-/// The results `parallel_on_*_processes` compares between process counts: of [`uniform`], the
-/// L2 norms of the pressure and of the velocity on every level, and the flows through the
-/// tags; and those of the anisotropic manufactured solution (see [`Manufactured::errors`]).
+/// The results `parallel_on_*_processes` compares between process counts: of [`uniform`], of
+/// the flow through `lobule_toy.msh` ([`lobule_flow`]), of the flows of `pinched_boundary`
+/// ([`pinched_flow`]) and of the flow through `island.msh` ([`island_flow`]), the islands (their
+/// number and area, each plus 1 for a relative comparison), the L2 norm of the pressure, the
+/// L2 norms of the velocity (conservative and primal) and the sum of the absolute edge fluxes
+/// on every level, the flows through the tags, and the sums of the edge fluxes through them on
+/// the finest level; and those of the anisotropic manufactured solution (see
+/// [`Manufactured::errors`]).
 fn parity_results(p: &Petsc) -> Vec<f64> {
-    let (mesh, flow) = uniform(p);
-    let mut results = vec![flow.pressure_l2_error(|_| 0.0).unwrap()];
-    for level in 0..mesh.levels().len() {
-        results.push(velocity_l2_error(
-            &mesh,
-            level,
-            flow.velocity(level),
-            |_| [0.0; 2],
-        ));
+    let mut results = Vec::new();
+    let pinched =
+        PINCHED_PRESSURES.map(|pressures| pinched_flow(p, "parity_pinched", pressures).unwrap());
+    let island = island_flow(p, "parity_island", "island.msh");
+    for (mesh, flow) in [uniform(p), lobule_flow(p, "parity_lobule", 1)]
+        .into_iter()
+        .chain(pinched)
+        .chain([island])
+    {
+        let islands = flow.islands();
+        results.push(islands.count as f64 + 1.0);
+        results.push(islands.area + 1.0);
+        results.push(flow.pressure_l2_error(|_| 0.0).unwrap());
+        for level in 0..mesh.levels().len() {
+            for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
+                results.push(velocity_l2_error(&mesh, level, velocity, |_| [0.0; 2]));
+            }
+            results.push(Edges::new(&mesh, level).total(&flow));
+        }
+        let edges = Edges::new(&mesh, mesh.levels().len() - 1);
+        for (tag, q) in flow.tag_flows() {
+            results.push(*q);
+            results.push(edges.inflow(&flow, tag));
+        }
     }
-    results.extend(flow.tag_flows().iter().map(|(_, q)| q));
     let (_, anisotropic) = Manufactured::anisotropic().errors(p, "parity_anisotropic");
     results.extend(anisotropic);
     results
@@ -651,6 +1250,13 @@ fn parity(ranks: usize, test: &str) {
                 ranks,
                 &[
                     "uniform_flow",
+                    "element_fluxes_sum_to_zero",
+                    "no_flux_through_walls_without_pressure",
+                    "tag_flows_equal_edge_flux_sums",
+                    "pinched_boundary",
+                    "pressure_tag_inside_the_domain_is_error",
+                    "island_has_zero_flow",
+                    "nothing_but_floating_components_is_error",
                     "velocity_of_every_level_at_its_points",
                     "isotropic_where_gradient_vanishes",
                     "divergence_is_error",

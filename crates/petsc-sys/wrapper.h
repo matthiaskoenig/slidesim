@@ -9,8 +9,12 @@ MPI_Comm petsc_sys_comm_world(void);
 /* MPI_Allreduce arguments: MPIU_INT, MPIU_REAL, MPI_SUM, MPI_MAX. */
 MPI_Datatype petsc_sys_mpiu_int(void);
 MPI_Datatype petsc_sys_mpiu_real(void);
+/* MPI_BYTE, for MPI_Bcast of bytes. */
+MPI_Datatype petsc_sys_mpi_byte(void);
 MPI_Op petsc_sys_mpi_sum(void);
 MPI_Op petsc_sys_mpi_max(void);
+/* MPI_REPLACE, for PetscSFBcast. */
+MPI_Op petsc_sys_mpi_replace(void);
 
 /* PetscFree of an array PETSc allocated for the caller. */
 PetscErrorCode petsc_sys_free(void *p);

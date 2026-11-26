@@ -1,7 +1,9 @@
 //! gmsh meshes as distributed DMPlex, with named tags and a uniform refinement hierarchy.
 //!
 //! [`Mesh::load`] reads the gmsh file of a [`Scene`] into a DMPlex whose labels carry the gmsh
-//! physical names (`-dm_plex_gmsh_use_regions`), distributes it over the processes
+//! physical names (`-dm_plex_gmsh_use_regions`), splits each vertex where the boundary of a 2D
+//! mesh touches itself into one vertex per fan of its cells (see [`Mesh::load`]), distributes
+//! it over the processes
 //! (`DMPlexDistribute`, no overlap) and refines it uniformly (`DMRefine`). The graph partitioner
 //! PT-Scotch decides which process owns which cell, if PETSc has it (see [`PARTITIONER`]). The
 //! levels, coarse first, are linked for multigrid (`DMSetCoarseDM`). The labels of the physical
@@ -17,6 +19,8 @@ use std::path::{Path, PathBuf};
 use contracts::{MeshFormat, Scene};
 use petsc::{Comm, Dm, Petsc, Point};
 
+mod split;
+
 /// Labels PETSc creates itself (gmsh's generic sets, topology, ghosts, output), which are not
 /// gmsh physical names.
 const PETSC_LABELS: [&str; 9] = [
@@ -30,6 +34,9 @@ const PETSC_LABELS: [&str; 9] = [
     "ghost",
     "vtk",
 ];
+
+/// The name of the DM of a mesh.
+const NAME: &str = "mesh";
 
 /// The PETSc option which names the labels of a gmsh mesh after its physical names.
 const USE_REGIONS: &str = "-dm_plex_gmsh_use_regions";
@@ -90,11 +97,20 @@ pub struct Mesh {
     tags: Vec<Tag>,
     /// See [`Mesh::local_bounds`].
     bounds: Option<[[f64; 2]; 2]>,
+    /// The topological dimension.
+    dim: usize,
 }
 
 impl Mesh {
     /// Reads the mesh of `scene`, distributes it over the processes of `petsc` and refines it
     /// uniformly `refinements` times. Collective.
+    ///
+    /// A vertex of a 2D mesh where the boundary touches itself (two holes, or a hole and the
+    /// outer boundary, meeting at one point) is split first into one vertex per fan of its
+    /// cells (cells joined by the edges at the vertex), at the same coordinates: a point contact
+    /// is an aperture of zero width, through which no field passes, so fields are discontinuous
+    /// there. Every cell and edge keeps its tags, the copies of a vertex the tags of the vertex.
+    /// A mesh without such a vertex is used as read.
     ///
     /// Errors (on every process): [`MeshError::NotFound`] if process 0 finds no file at
     /// `scene.mesh.path`, [`MeshError::Read`] if PETSc cannot read it, [`MeshError::Dimension`]
@@ -119,6 +135,11 @@ impl Mesh {
                 scene: scene.dimension,
             });
         }
+        if dim == 2
+            && let Some(split) = split::split_pinched_vertices(&coarse, &comm)?
+        {
+            coarse = split;
+        }
         select_partitioner(petsc, &coarse)?;
         if let Some(distributed) = coarse.distribute(0)? {
             coarse = distributed;
@@ -138,6 +159,7 @@ impl Mesh {
             levels,
             tags,
             bounds,
+            dim,
         })
     }
 
@@ -158,6 +180,24 @@ impl Mesh {
     /// of a raster this process needs (see `maps::Maps::read`).
     pub fn local_bounds(&self) -> Option<[[f64; 2]; 2]> {
         self.bounds
+    }
+
+    /// The local cell of the coarse level (level 0) which contains the local cell `cell` of the
+    /// level `level` (cells numbered from 0 in the order of the cells of the level).
+    ///
+    /// The regular refinement (`DMRefine`) splits each cell into `2^dim` children (4 triangles
+    /// in 2D), numbered consecutively in the order of their parents (the cells of a mesh of one
+    /// cell type), and keeps them on the process of their parent: the parent of cell `c` is cell
+    /// `c / 2^dim` of the level before. Not collective.
+    ///
+    /// Panics if the mesh has no level `level`.
+    pub fn coarse_cell(&self, level: usize, cell: usize) -> usize {
+        assert!(
+            level < self.levels.len(),
+            "mesh has no level {level} (it has {})",
+            self.levels.len()
+        );
+        cell >> (self.dim * level)
     }
 
     /// The tags, sorted by name.
@@ -203,7 +243,7 @@ fn local_bounds(levels: &[Dm]) -> petsc::Result<Option<[[f64; 2]; 2]>> {
 /// Process 0 reads the file and holds the whole mesh.
 fn read(petsc: &Petsc, comm: &Comm, path: &Path) -> petsc::Result<Dm> {
     petsc.with_option(USE_REGIONS, Some("true"), || {
-        Dm::plex_from_file(comm, path, "mesh", true)
+        Dm::plex_from_file(comm, path, NAME, true)
     })
 }
 

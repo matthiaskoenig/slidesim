@@ -545,3 +545,65 @@ fn strided_with_is_validated() {
     assert!(ElemRestriction::strided_with(&ceed, 2, 0, 1, 12, [1, 3, 6]).is_err());
     assert!(ElemRestriction::strided_with(&ceed, 2, 3, 1, 12, [usize::MAX, 3, 6]).is_err());
 }
+
+/// `out = 2 u + v` per point, of two inputs and one output of 2 components each.
+unsafe extern "C" fn axpy_qf(
+    _ctx: *mut c_void,
+    q: CeedInt,
+    input: *const *const CeedScalar,
+    output: *const *mut CeedScalar,
+) -> c_int {
+    let n = 2 * q as usize;
+    let (u, v, out) = unsafe {
+        (
+            slice::from_raw_parts(*input, n),
+            slice::from_raw_parts(*input.add(1), n),
+            slice::from_raw_parts_mut(*output, n),
+        )
+    };
+    for k in 0..n {
+        out[k] = 2.0 * u[k] + v[k];
+    }
+    0
+}
+
+/// An operator of passive fields only, one point per element in the layout of the caller (point
+/// by point): it reads its input vectors and overwrites its output vector, on every backend;
+/// an operator with an active field is refused.
+#[test]
+fn passive_operator_reads_and_writes_its_vectors() {
+    for resource in ["/cpu/self/ref/serial", DEFAULT_RESOURCE] {
+        let ceed = Ceed::new(resource).unwrap();
+        let n = 11;
+        let r = ElemRestriction::strided_with(&ceed, n, 1, 2, 2 * n, [1, 1, 2]).unwrap();
+        let mut qf =
+            unsafe { QFunction::interior(&ceed, 1, Some(axpy_qf), "axpy.h:axpy") }.unwrap();
+        qf.add_input("u", 2, EvalMode::None).unwrap();
+        qf.add_input("v", 2, EvalMode::None).unwrap();
+        qf.add_output("out", 2, EvalMode::None).unwrap();
+        let u_values: Vec<f64> = (0..2 * n).map(|k| k as f64).collect();
+        let u = CVector::from_slice(&ceed, &u_values).unwrap();
+        let v = CVector::from_slice(&ceed, &vec![1.0; 2 * n]).unwrap();
+        let out = CVector::from_slice(&ceed, &vec![7.0; 2 * n]).unwrap();
+        let mut op = Operator::new(&ceed, &qf).unwrap();
+        for (name, vector) in [("u", &u), ("v", &v), ("out", &out)] {
+            op.set_field(name, Some(&r), None, FieldVector::Passive(vector))
+                .unwrap();
+        }
+        op.apply_passive().unwrap();
+        let expected: Vec<f64> = u_values.iter().map(|x| 2.0 * x + 1.0).collect();
+        assert_eq!(out.to_vec().unwrap(), expected, "{resource}");
+
+        let mut active = Operator::new(&ceed, &qf).unwrap();
+        active
+            .set_field("u", Some(&r), None, FieldVector::Active)
+            .unwrap();
+        for (name, vector) in [("v", &v), ("out", &out)] {
+            active
+                .set_field(name, Some(&r), None, FieldVector::Passive(vector))
+                .unwrap();
+        }
+        let e = active.apply_passive().unwrap_err();
+        assert!(e.message.contains("active"), "{e}");
+    }
+}

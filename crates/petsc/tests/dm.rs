@@ -256,6 +256,127 @@ fn boundary_faces_and_supports() {
 }
 
 #[test]
+fn cones_of_cells_and_edges() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let edges = dm.depth_stratum(1).unwrap();
+    let vertices = dm.depth_stratum(0).unwrap();
+    for cell in dm.height_stratum(0).unwrap() {
+        let cone = dm.cone(cell).unwrap();
+        assert_eq!(cone.len(), 4, "{cone:?}");
+        // The cone is the closure after the cell, in order.
+        assert_eq!(cone, dm.closure(cell).unwrap()[1..5]);
+        for edge in cone {
+            assert!(edges.contains(&edge));
+            let ends = dm.cone(edge).unwrap();
+            assert_eq!(ends.len(), 2);
+            assert!(ends.iter().all(|v| vertices.contains(v)), "{ends:?}");
+        }
+    }
+    assert!(dm.cone(vertices.start).unwrap().is_empty());
+}
+
+/// The overlap of one cell: every cell which shares a vertex with a cell of the process, each
+/// cell a leaf of the cell it is on its process, whose data a broadcast brings.
+#[test]
+fn overlap_holds_the_cells_around_the_vertices_of_local_cells() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mut dm = box_mesh(&comm, [4, 4], [4.0, 4.0]);
+    if let Some(distributed) = dm.distribute(0).unwrap() {
+        dm = distributed;
+    }
+    let Some((overlap, sf)) = dm.distribute_overlap(1).unwrap() else {
+        assert_eq!(comm.size(), 1);
+        return;
+    };
+    let cells = dm.height_stratum(0).unwrap();
+    let chart = |dm: &Dm| {
+        (0..3)
+            .map(|d| dm.depth_stratum(d).unwrap().end)
+            .max()
+            .unwrap()
+    };
+    let (roots, graph) = sf.graph().unwrap();
+    assert_eq!(roots, chart(&dm) as usize);
+    // The global number of each cell, from the process of the cell.
+    let numbering = dm.cell_numbering().unwrap();
+    let mut root_data = vec![-1.0; roots];
+    for (c, &g) in cells.clone().zip(&numbering) {
+        root_data[c as usize] = g as f64;
+    }
+    let mut leaf_data = vec![f64::NAN; chart(&overlap) as usize];
+    sf.bcast(&root_data, &mut leaf_data).unwrap();
+    let overlap_cells = overlap.height_stratum(0).unwrap();
+    let mut numbers: Vec<i64> = overlap_cells
+        .clone()
+        .map(|c| leaf_data[c as usize] as i64)
+        .collect();
+    assert!(numbers.iter().all(|&g| (0..16).contains(&g)), "{numbers:?}");
+    numbers.sort_unstable();
+    numbers.dedup();
+    assert_eq!(numbers.len(), overlap_cells.len());
+    // The cells of this process are leaves of themselves.
+    let mine: Vec<sys::PetscInt> = graph
+        .iter()
+        .filter(|l| l.rank == comm.rank() && overlap_cells.contains(&l.leaf))
+        .map(|l| {
+            assert!(cells.contains(&l.root), "{l:?}");
+            assert_eq!(leaf_data[l.leaf as usize], root_data[l.root as usize]);
+            l.leaf
+        })
+        .collect();
+    assert_eq!(mine.len(), cells.len());
+    // Around each vertex of a cell of this process, all its cells: 4 inside, 2 on a side, 1 at
+    // a corner.
+    let coordinates = overlap.local_coordinates().unwrap();
+    let vertices = overlap.depth_stratum(0).unwrap();
+    for &cell in &mine {
+        for point in overlap.closure(cell).unwrap() {
+            if !vertices.contains(&point) {
+                continue;
+            }
+            let i = 2 * (point - vertices.start) as usize;
+            let inside = |x: f64| if x > 0.0 && x < 4.0 { 2 } else { 1 };
+            let expected = inside(coordinates[i]) * inside(coordinates[i + 1]);
+            let mut around = Vec::new();
+            for edge in overlap.support(point).unwrap() {
+                around.extend(overlap.support(edge).unwrap());
+            }
+            around.sort_unstable();
+            around.dedup();
+            assert_eq!(around.len(), expected, "vertex {point}: {around:?}");
+        }
+    }
+}
+
+/// A mesh from a cell list: cells first in the order given, then the vertices; interpolated,
+/// with labels set on its points.
+#[test]
+fn plex_from_cells_and_labels() {
+    let p = Petsc::init(&[]).unwrap();
+    // The unit square as two triangles, counterclockwise.
+    let cells = [0, 1, 2, 0, 2, 3];
+    let coordinates = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let mut dm = Dm::plex_from_cells(&p.comm(), "square", 2, 3, &cells, 2, &coordinates).unwrap();
+    assert_eq!(dm.height_stratum(0).unwrap(), 0..2);
+    assert_eq!(dm.depth_stratum(0).unwrap(), 2..6);
+    assert_eq!(dm.depth_stratum(1).unwrap().len(), 5);
+    assert_eq!(dm.local_coordinates().unwrap(), coordinates);
+    let total: f64 = (0..2).map(|c| dm.cell_volume(c).unwrap()).sum();
+    assert!((total - 1.0).abs() < 1e-14);
+    dm.create_label("empty").unwrap();
+    assert!(dm.has_label("empty").unwrap());
+    assert!(dm.label_values("empty").unwrap().is_empty());
+    dm.set_label_value("corner", 2, 7).unwrap();
+    assert_eq!(dm.label_values("corner").unwrap(), [7]);
+    assert_eq!(dm.stratum_points("corner", 7).unwrap(), [2]);
+    // A cell naming a vertex which is not there.
+    let e = Dm::plex_from_cells(&p.comm(), "bad", 2, 3, &[0, 1, 4], 2, &coordinates).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_SIZ);
+}
+
+#[test]
 fn partitioner_type_is_set_and_read_from_options() {
     let p = Petsc::init(&[]).unwrap();
     let dm = quad_box(&p.comm());
@@ -321,11 +442,13 @@ fn partitioner_random_reset_repeats_the_partition() {
 
 /// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
 /// partitions.
-const PARALLEL_TESTS: [&str; 5] = [
+const PARALLEL_TESTS: [&str; 7] = [
     "mpi_world_has_the_expected_size",
     "barrier_waits_for_every_process",
+    "broadcast_bytes_of_the_root",
     "ghost_points_of_a_distributed_mesh",
     "boundary_faces_and_supports",
+    "overlap_holds_the_cells_around_the_vertices_of_local_cells",
     "partitioner_random_reset_repeats_the_partition",
 ];
 
@@ -359,6 +482,29 @@ fn barrier_waits_for_every_process() {
         comm.rank()
     );
     comm.barrier().unwrap();
+}
+
+/// The bytes of the root replace those of every other process, whatever their length.
+#[test]
+fn broadcast_bytes_of_the_root() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let root = comm.size() - 1;
+    let mut data = if comm.rank() == root {
+        b"the message of the last process".to_vec()
+    } else {
+        vec![7; comm.rank() + 2]
+    };
+    comm.broadcast_bytes(root, &mut data).unwrap();
+    assert_eq!(data, b"the message of the last process");
+    // Nothing: the others' bytes are cleared.
+    let mut data = if comm.rank() == root {
+        Vec::new()
+    } else {
+        vec![1, 2, 3]
+    };
+    comm.broadcast_bytes(root, &mut data).unwrap();
+    assert!(data.is_empty());
 }
 
 #[test]

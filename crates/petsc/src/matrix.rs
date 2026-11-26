@@ -173,6 +173,20 @@ impl Matrix {
         Ok(())
     }
 
+    /// A new matrix of the layout and the nonzero pattern of this one, its values zero
+    /// (`MatDuplicate` with `MAT_DO_NOT_COPY_VALUES`). It shares the coordinate pattern of
+    /// [`Matrix::aij_coo`], so [`Matrix::set_values_coo`] sets its values in the same order.
+    /// Collective.
+    pub fn duplicate(&self) -> Result<Matrix> {
+        let mut raw = null_mut();
+        // SAFETY: a valid matrix; the new one is owned by the result.
+        chk!(unsafe { sys::MatDuplicate(self.raw, sys::MAT_DO_NOT_COPY_VALUES, &mut raw) });
+        Ok(Matrix {
+            raw,
+            coo_len: self.coo_len,
+        })
+    }
+
     /// Marks the matrix changed (`MatAssemblyBegin` and `MatAssemblyEnd`), for a change PETSc
     /// cannot see, as of the coefficients of a shell operator: preconditioners built from it
     /// are rebuilt at their next use. Collective.
@@ -199,7 +213,7 @@ impl Matrix {
 impl Drop for Matrix {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::MatDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::MatDestroy(&mut self.raw) }, "MatDestroy");
         }
     }
 }
