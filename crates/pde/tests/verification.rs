@@ -522,8 +522,8 @@ fn reuse_problem(mesh: &Mesh) -> Problem {
 /// configured at shift 0 (its finest level assembled); the Jacobian is assembled at each shift
 /// which differs from the last one assembled by more than rounding (`1e-12` relative); the
 /// preconditioner is built again (its finest level assembled too) at each shift beyond a factor
-/// of 2 either way from the shift it was built at, and at a shift other than it which the shift
-/// before has too.
+/// of 2 (and 1e-8 for rounding) either way from the shift it was built at, and at a shift other
+/// than it which the shift before has too.
 fn assemblies_for(shifts: &[f64]) -> (usize, usize) {
     let differ = |a: f64, b: f64| (a - b).abs() > 1e-12 * a.abs();
     let (mut assembled, mut built) = (None, 0.0);
@@ -534,7 +534,8 @@ fn assemblies_for(shifts: &[f64]) -> (usize, usize) {
             assemblies += 1;
         }
         let kept = k > 0 && !differ(shift, shifts[k - 1]);
-        if !(0.5..=2.0).contains(&(shift / built)) || (kept && differ(shift, built)) {
+        let range = 2.0 * (1.0 + 1e-8);
+        if !(1.0 / range..=range).contains(&(shift / built)) || (kept && differ(shift, built)) {
             built = shift;
             builds += 1;
             assemblies += 1;

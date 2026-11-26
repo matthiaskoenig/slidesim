@@ -296,6 +296,51 @@ fn modify_restarts_the_time_integration() {
     assert!(mass > uniform, "{mass} against {uniform}");
 }
 
+/// Restarts at times which are not exact in floating point (a step of 0.1 s from t = 1.3 s): the
+/// shifts of a start of BDF2 are 2/dt, 3/dt and 1.5/dt up to the rounding of the times, 3/dt
+/// a factor of 2 from 1.5/dt within rounding either way, and no restart builds a preconditioner.
+#[test]
+fn restarts_at_inexact_times_build_no_preconditioner() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let time = TimeSpec {
+        end: 10.0,
+        dt: 0.1,
+        adaptive: false,
+        outputs: Vec::new(),
+    };
+    let inputs = Inputs {
+        maps: &maps,
+        flow: None,
+    };
+    let mut problem = Problem::new(&mesh, &field(1.0, 1.0), &time, &ceed(), "", &inputs).unwrap();
+    problem.step_to(1.3).unwrap();
+    let builds = problem.preconditioner_builds();
+    let mut t = 1.3;
+    let mut beyond = 0;
+    for _ in 0..20 {
+        problem
+            .modify(
+                |u| {
+                    u.with_array_mut(|u| u.iter_mut().for_each(|u| *u *= 0.9))?;
+                    Ok(())
+                },
+                &Exchanged::default(),
+            )
+            .unwrap();
+        let before = problem.jacobian_shifts().len();
+        t += 0.3;
+        problem.step_to(t).unwrap();
+        let shifts = &problem.jacobian_shifts()[before..];
+        // The half step, the first step of BDF2, BDF2.
+        assert_eq!(shifts.len(), 4, "{shifts:?}");
+        beyond += usize::from(shifts[1] / shifts[3] > 2.0);
+    }
+    eprintln!("{beyond} of 20 restarts with 3/dt beyond twice 1.5/dt by rounding");
+    assert_eq!(problem.preconditioner_builds(), builds);
+}
+
 /// The residual of the balance `b`, `storage_rate - (source + inflows + exchange -
 /// advection_defect)`, and its largest term.
 fn closure(b: &MassBalance) -> (f64, f64) {
@@ -559,6 +604,7 @@ fn parallel_on_2_processes() {
             "steep_uptake_stays_nonnegative",
             "uniform_change_with_resupply",
             "modify_restarts_the_time_integration",
+            "restarts_at_inexact_times_build_no_preconditioner",
             "other_discretization_is_an_error",
             "wrong_length_on_one_process_is_an_error_everywhere",
         ],

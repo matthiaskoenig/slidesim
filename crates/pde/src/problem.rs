@@ -52,8 +52,18 @@ const SHIFT_TOLERANCE: f64 = 1e-12;
 /// then `1.5 / dt`), so that a restart of the time integration ([`Problem::modify`]) builds no
 /// preconditioner, and adaptive steps, whose shift changes at most steps, build one only when
 /// the step drifted by a factor of 2. A shift which two Jacobians in a row have (fixed steps)
-/// gets its own preconditioner.
+/// gets its own preconditioner. The factor 2 lies exactly between `3 / dt` and `1.5 / dt`, so
+/// the range is wider by [`PRECONDITIONER_ROUNDING`].
 const PRECONDITIONER_RANGE: f64 = 2.0;
+
+/// How much wider than [`PRECONDITIONER_RANGE`], relatively, the range of the shifts is in which
+/// the preconditioner is kept: the shifts of `TSBDF` are computed from the times of its steps
+/// (`1 / (t - t1) + 1 / (t - t2)`), whose differences carry the rounding of the times (at
+/// `t` = 1.3 s and `dt` = 0.1 s, 3/dt and 1.5/dt are a factor of 2 apart up to a few 1e-16
+/// either way, beyond 2 in 12 of 20 restarts), and a restart should build no preconditioner
+/// whatever the times. Far above the rounding of the times of a run (1e-16 relative to the
+/// step for times up to about 1e6 steps), far below any change of the step.
+const PRECONDITIONER_ROUNDING: f64 = 1e-8;
 
 /// The net flow through a tag, relative to the largest net flow through a tag, above which the
 /// tag has inflow ([`PdeError::Inflow`]).
@@ -1157,7 +1167,8 @@ impl Implicit for Equation {
                     *assembled = Some(shift);
                 }
                 let ratio = shift / self.built_shift;
-                let near = (1.0 / PRECONDITIONER_RANGE..=PRECONDITIONER_RANGE).contains(&ratio);
+                let range = PRECONDITIONER_RANGE * (1.0 + PRECONDITIONER_ROUNDING);
+                let near = (1.0 / range..=range).contains(&ratio);
                 // The shift of the Jacobian before this one (pushed above).
                 let kept = (self.shifts.len() >= 2)
                     .then(|| self.shifts[self.shifts.len() - 2])
