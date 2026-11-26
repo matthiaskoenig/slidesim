@@ -439,7 +439,7 @@ fn check_parameters(description: &ModelDescription, spec: &CellsSpec) -> Result<
                 "cells.parameters",
                 &p.id,
                 "settable entity",
-                description.parameters.iter().filter(|e| e.settable),
+                entities(),
             ));
         }
     }

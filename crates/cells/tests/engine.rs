@@ -394,6 +394,17 @@ fn study_start_checks() {
         let e = EngineCells::new(&setup, &spec, &sbml).unwrap_err();
         assert!(e.to_string().contains(named), "{named}: {e}");
     }
+    // The settable states are parameters of the cells too: the error lists them as available.
+    let spec = CellsSpec {
+        parameters: vec![parameter("kk", Coefficient::Constant(1.0))],
+        ..base.clone()
+    };
+    let setup = CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
+    let e = EngineCells::new(&setup, &spec, &sbml).unwrap_err();
+    let available = e.to_string();
+    let available = available.split("it has: ").nth(1).unwrap_or_default();
+    let ids: Vec<&str> = available.split(", ").collect();
+    assert!(ids.contains(&"k") && ids.contains(&"A"), "{e}");
 }
 
 /// The SPT model on 10 coarse elements of `lobule_toy`, the blood held fixed: each cell is the
