@@ -119,6 +119,31 @@ pub fn check(ierr: sys::PetscErrorCode, call: &str) -> Result<()> {
     })
 }
 
+/// Reports the return code `ierr` of `call`, which destroyed a PETSc object in `Drop`, where no
+/// caller takes an error. Destroying a vector, matrix, solver or mesh fails only if the state of
+/// PETSc is corrupt: with PETSc's debugging checks, an object freed twice is an error here
+/// (without them the process crashes instead). That is a bug, so this panics with the error,
+/// unless the thread is panicking already.
+pub(crate) fn destroyed(ierr: sys::PetscErrorCode, call: &str) {
+    if let Err(e) = check(ierr, call)
+        && !std::thread::panicking()
+    {
+        panic!("{e}");
+    }
+}
+
+/// The error of a call which would change or run a solver (`what`, for example `KSP`) whose solve
+/// failed earlier, which PETSc may have left in an inconsistent state (see [`crate::Ksp::solve`]).
+pub(crate) fn failed_solver(what: &str) -> Error {
+    Error::new(
+        sys::PETSC_ERR_ARG_WRONGSTATE,
+        format!(
+            "the {what} failed in an earlier solve, which may have left it inconsistent: it \
+             cannot be changed or run again"
+        ),
+    )
+}
+
 /// The error being raised: the message and the routines it passed (innermost first).
 #[derive(Default)]
 struct Trace {

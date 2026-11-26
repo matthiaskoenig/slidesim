@@ -213,7 +213,7 @@ impl Matrix {
 impl Drop for Matrix {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::MatDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::MatDestroy(&mut self.raw) }, "MatDestroy");
         }
     }
 }

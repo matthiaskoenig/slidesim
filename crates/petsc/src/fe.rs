@@ -133,7 +133,10 @@ impl Fe {
 impl Drop for Fe {
     fn drop(&mut self) {
         if crate::alive() {
-            unsafe { sys::PetscFEDestroy(&mut self.raw) };
+            crate::error::destroyed(
+                unsafe { sys::PetscFEDestroy(&mut self.raw) },
+                "PetscFEDestroy",
+            );
         }
     }
 }

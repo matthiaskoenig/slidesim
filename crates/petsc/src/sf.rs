@@ -116,7 +116,10 @@ impl Sf {
 impl Drop for Sf {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::PetscSFDestroy(&mut self.raw) };
+            crate::error::destroyed(
+                unsafe { sys::PetscSFDestroy(&mut self.raw) },
+                "PetscSFDestroy",
+            );
         }
     }
 }

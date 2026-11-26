@@ -117,7 +117,7 @@ impl Vector {
 impl Drop for Vector {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::VecDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::VecDestroy(&mut self.raw) }, "VecDestroy");
         }
     }
 }

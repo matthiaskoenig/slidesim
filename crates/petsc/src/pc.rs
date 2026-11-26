@@ -98,8 +98,8 @@ impl Pc {
 impl Drop for Pc {
     fn drop(&mut self) {
         if alive() {
-            // SAFETY: our reference; nothing to report an error to.
-            unsafe { sys::PCDestroy(&mut self.raw) };
+            // SAFETY: our reference.
+            crate::error::destroyed(unsafe { sys::PCDestroy(&mut self.raw) }, "PCDestroy");
         }
     }
 }

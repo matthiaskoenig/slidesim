@@ -9,6 +9,11 @@
 //! code is on the stack, so PETSc is not finalized but stays initialized (and usable through
 //! the wrappers) for the rest of the process.
 //!
+//! A solver whose solve failed ([`Ksp::solve`], [`Ts::solve`]) is leaked too when dropped: PETSc
+//! returns errors without restoring the state of the objects they passed through, and destroying
+//! them can free memory twice. If PETSc reports an error when a vector, matrix, mesh or solver is
+//! destroyed, the drop panics with it: the state of PETSc is corrupt.
+//!
 //! PETSc is not thread safe: no type here is `Send` or `Sync`.
 //!
 //! ```compile_fail

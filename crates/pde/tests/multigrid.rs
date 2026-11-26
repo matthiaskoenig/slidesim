@@ -393,6 +393,31 @@ fn adaptive_problem_matches_jacobi() {
     assert_matches_jacobi(time, &[0.2, 0.5]);
 }
 
+/// A solver inside the multigrid preconditioner of a time step which fails in the middle of a
+/// V-cycle (here the coarse solver, diverging on its first application) makes the time
+/// integration fail, and the problem can be dropped: PETSc returns the error without restoring
+/// the state of the preconditioner, so destroying the `TS` (with its `KSP`) ended in a
+/// segmentation fault, or with PETSc's debugging checks in `Object already free`.
+#[test]
+fn inner_solve_failure_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = tissue_small(&p, 1);
+    let time = TimeSpec {
+        end: 1.0,
+        dt: 0.1,
+        adaptive: false,
+        outputs: Vec::new(),
+    };
+    let options = "-mg_coarse_ksp_type richardson -mg_coarse_ksp_richardson_scale 1000 \
+                   -mg_coarse_ksp_divtol 10 -mg_coarse_ksp_max_it 5 -mg_coarse_pc_type none";
+    let mut problem =
+        Problem::new(&mesh, &tissue_field(), &time, &ceed(), options, &no_maps()).unwrap();
+    let e = problem.step_to(0.1).unwrap_err();
+    assert!(matches!(e, PdeError::Diverged { .. }), "{e}");
+    assert!(e.to_string().contains("inner solve"), "{e}");
+    drop(problem);
+}
+
 /// The results of this process in [`two_processes_match_one`]: the L2 norm and the total mass
 /// of the solution, for the runs on two processes.
 const REFERENCE: &str = "SLIDESIM_TEST_REFERENCE";

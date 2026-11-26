@@ -4,6 +4,7 @@ use std::ffi::{CStr, c_char};
 use std::fmt;
 use std::ptr::{null, null_mut};
 
+use crate::error::failed_solver;
 use crate::{
     AsVec, AsVecMut, Comm, Dm, Matrix, Pc, Result, alive, c_string, chk, string_from, sys, to_int,
 };
@@ -46,9 +47,13 @@ impl fmt::Display for ConvergedReason {
 /// An owned reference to a PETSc linear solver (`KSP`): created here, or shared with the
 /// object which holds it (for example [`crate::Snes::ksp`]); PETSc destroys it with its last
 /// reference.
+///
+/// A solver whose [`Ksp::solve`] failed is never destroyed, see there.
 #[derive(Debug)]
 pub struct Ksp {
     raw: sys::KSP,
+    /// Whether a [`Ksp::solve`] of this reference failed.
+    failed: bool,
 }
 
 impl Ksp {
@@ -56,7 +61,7 @@ impl Ksp {
     pub fn create(comm: &Comm) -> Result<Ksp> {
         let mut raw = null_mut();
         chk!(unsafe { sys::KSPCreate(comm.as_raw(), &mut raw) });
-        Ok(Ksp { raw })
+        Ok(Ksp { raw, failed: false })
     }
 
     /// Takes a new reference to `raw`.
@@ -65,21 +70,32 @@ impl Ksp {
     /// `raw` is a valid `KSP`.
     pub(crate) unsafe fn shared(raw: sys::KSP) -> Result<Ksp> {
         chk!(unsafe { sys::PetscObjectReference(raw as sys::PetscObject) });
-        Ok(Ksp { raw })
+        Ok(Ksp { raw, failed: false })
     }
 
     pub fn as_raw(&self) -> sys::KSP {
         self.raw
     }
 
+    /// An error if a solve of this reference failed (see [`Ksp::solve`]): for every method
+    /// which changes or runs the solver.
+    fn usable(&self) -> Result<()> {
+        if self.failed {
+            return Err(failed_solver("KSP"));
+        }
+        Ok(())
+    }
+
     /// `KSPSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
+        self.usable()?;
         chk!(unsafe { sys::KSPSetFromOptions(self.raw) });
         Ok(())
     }
 
     /// Sets the Krylov method, for example `cg` (`KSPSetType`).
     pub fn set_type(&mut self, name: &str) -> Result<()> {
+        self.usable()?;
         let name = c_string(name, "KSP type")?;
         chk!(unsafe { sys::KSPSetType(self.raw, name.as_ptr()) });
         Ok(())
@@ -87,6 +103,7 @@ impl Ksp {
 
     /// Sets the type of the preconditioner, for example `jacobi` (`PCSetType` of `KSPGetPC`).
     pub fn set_pc_type(&mut self, name: &str) -> Result<()> {
+        self.usable()?;
         let name = c_string(name, "PC type")?;
         let mut pc = null_mut();
         // SAFETY: the PC is borrowed from the KSP.
@@ -116,6 +133,7 @@ impl Ksp {
     /// Sets the prefix of the options of the solver and its preconditioner
     /// (`KSPSetOptionsPrefix`).
     pub fn set_options_prefix(&mut self, prefix: &str) -> Result<()> {
+        self.usable()?;
         let prefix = c_string(prefix, "options prefix")?;
         // SAFETY: a valid KSP and a NUL terminated prefix, which PETSc copies.
         chk!(unsafe { sys::KSPSetOptionsPrefix(self.raw, prefix.as_ptr()) });
@@ -125,6 +143,7 @@ impl Ksp {
     /// Sets the operator `a` and the matrix `p` its preconditioner is built from (often `a`
     /// again; `KSPSetOperators`). The solver keeps references to both.
     pub fn set_operators(&mut self, a: &Matrix, p: &Matrix) -> Result<()> {
+        self.usable()?;
         // SAFETY: valid matrices; PETSc takes its own references.
         chk!(unsafe { sys::KSPSetOperators(self.raw, a.as_raw(), p.as_raw()) });
         Ok(())
@@ -155,6 +174,7 @@ impl Ksp {
     /// the operators, right-hand side or initial guess (`KSPSetDMActive` false). The solver
     /// keeps a reference to `dm`.
     pub fn set_dm(&mut self, dm: &Dm, active: bool) -> Result<()> {
+        self.usable()?;
         // SAFETY: a valid KSP and DM; PETSc takes its own reference to the DM.
         chk!(unsafe { sys::KSPSetDM(self.raw, dm.as_raw()) });
         // SAFETY: a valid KSP.
@@ -170,6 +190,7 @@ impl Ksp {
         atol: Option<f64>,
         max_it: Option<usize>,
     ) -> Result<()> {
+        self.usable()?;
         let current = sys::PETSC_CURRENT as sys::PetscReal;
         let max_it = match max_it {
             Some(n) => to_int(n, "maximum iterations")?,
@@ -190,10 +211,28 @@ impl Ksp {
 
     /// Solves `A x = b` for the operator of [`Ksp::set_operators`], from the initial guess
     /// zero (`KSPSolve`). Collective.
+    ///
+    /// After an error the solver is failed: PETSc returns an error without restoring the state
+    /// of the objects the solve passed through, which may then be inconsistent. For example a
+    /// multigrid preconditioner (`PCMG`) holds the vector it is applied to, without a reference,
+    /// for the length of the application; when a solver inside it fails, and the solver is to
+    /// error if not converged (`-ksp_error_if_not_converged`), the vector stays, and destroying
+    /// or resetting the preconditioner releases a reference it never took: the vector, a work
+    /// vector of the Krylov method, is freed while the method still holds it. So a failed solver
+    /// is never destroyed: dropping this reference leaks it with everything it holds (whose
+    /// references it keeps). Every later call of a method taking `&mut self` is an error
+    /// (`PETSC_ERR_ARG_WRONGSTATE`); [`Ksp::converged_reason`] and [`Ksp::iterations`] still
+    /// tell why the solve stopped. Other references to the solver or its parts (for example
+    /// from [`Ksp::pc`] or [`crate::Pc::mg_smoother`]) must not run or change it either.
     pub fn solve(&mut self, b: &impl AsVec, x: &mut impl AsVecMut) -> Result<()> {
-        // SAFETY: a valid KSP and distinct vectors (`&` and `&mut`).
-        chk!(unsafe { sys::KSPSolve(self.raw, b.as_raw(), x.as_raw()) });
-        Ok(())
+        self.usable()?;
+        let solved = (|| {
+            // SAFETY: a valid KSP and distinct vectors (`&` and `&mut`).
+            chk!(unsafe { sys::KSPSolve(self.raw, b.as_raw(), x.as_raw()) });
+            Ok(())
+        })();
+        self.failed = solved.is_err();
+        solved
     }
 
     /// The number of iterations of the last solve (`KSPGetIterationNumber`).
@@ -212,6 +251,7 @@ impl Ksp {
     /// preconditioner is known to be symmetric positive definite ([`Matrix::set_spd`]), else
     /// GMRES. The estimates are renewed when the operator changes.
     pub fn chebyshev_est_eig_set(&mut self, a: f64, b: f64, c: f64, d: f64) -> Result<()> {
+        self.usable()?;
         // SAFETY: a valid KSP; a no-op for other types.
         chk!(unsafe { sys::KSPChebyshevEstEigSet(self.raw, a, b, c, d) });
         Ok(())
@@ -243,8 +283,9 @@ impl Ksp {
 
 impl Drop for Ksp {
     fn drop(&mut self) {
-        if alive() {
-            unsafe { sys::KSPDestroy(&mut self.raw) };
+        // A failed solver is leaked (see `Ksp::solve`).
+        if alive() && !self.failed {
+            crate::error::destroyed(unsafe { sys::KSPDestroy(&mut self.raw) }, "KSPDestroy");
         }
     }
 }

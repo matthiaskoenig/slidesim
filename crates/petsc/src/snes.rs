@@ -48,7 +48,7 @@ impl Snes {
 impl Drop for Snes {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::SNESDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::SNESDestroy(&mut self.raw) }, "SNESDestroy");
         }
     }
 }

@@ -928,7 +928,7 @@ impl Clone for Dm {
 impl Drop for Dm {
     fn drop(&mut self) {
         if alive() {
-            unsafe { sys::DMDestroy(&mut self.raw) };
+            crate::error::destroyed(unsafe { sys::DMDestroy(&mut self.raw) }, "DMDestroy");
         }
     }
 }

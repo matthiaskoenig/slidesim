@@ -959,6 +959,38 @@ fn divergence_is_error() {
     Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
 }
 
+/// The options which make the coarse solver of the multigrid preconditioner diverge on its first
+/// application, in the middle of a V-cycle: Richardson without a preconditioner, scaled so that
+/// its residual grows, stopped when it has grown tenfold (`DIVERGED_DTOL`), with finite values.
+const DIVERGING_COARSE_SOLVER: &str = "-mg_coarse_ksp_type richardson \
+     -mg_coarse_ksp_richardson_scale 1000 -mg_coarse_ksp_divtol 10 -mg_coarse_ksp_max_it 5 \
+     -mg_coarse_pc_type none";
+
+/// A solver inside the multigrid preconditioner which fails in the middle of a V-cycle (here the
+/// coarse solver) makes the pressure solve fail: an error naming the inner solve, and the flow
+/// can be solved again. PETSc returns the error without restoring the state of the
+/// preconditioner, so the solver must not be destroyed: this ended in a segmentation fault when
+/// it was (`KSPDestroy`, `PCReset_MG`, `VecDestroy`).
+#[test]
+fn inner_solve_failure_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, &[("left", 1.0), ("right", 0.0)]);
+    let scratch = Scratch::new("inner_solve_failure_is_error");
+    let maps = read_maps(
+        &[scratch.map("direction", PIXELS, |[x, y]| x + 0.5 * y)],
+        &mesh,
+    );
+    let e = Flow::solve(&mesh, &perfusion, &maps, &ceed(), DIVERGING_COARSE_SOLVER).unwrap_err();
+    let PdeError::SolveFailed { solve, reason } = &e else {
+        panic!("expected a failed solve, got {e}");
+    };
+    assert_eq!(solve, "perfusion");
+    assert!(reason.contains("inner solve"), "{e}");
+    assert!(reason.contains("DIVERGED_DTOL"), "{e}");
+    Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+}
+
 #[test]
 fn unknown_pressure_tag_lists_tags() {
     let p = Petsc::init(&[]).unwrap();
