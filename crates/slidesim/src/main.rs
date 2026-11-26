@@ -50,7 +50,9 @@ Output files in DIR:
   summary.json            per field and output time: times (s), l2_norm (mM*um), total_mass
                           (mM*um^2, the integral of the field weighed by the porosity) and
                           mass_balance (mM*um^2/s, over the interval since the output time
-                          before, each term its mean rate there; null at time 0):
+                          before, each term its mean rate there; null at time 0, and
+                          throughout if PETSc options chose another time integration than
+                          BDF2):
                           storage_rate, source, advection_defect, exchange (given by the cells)
                           and, per boundary tag, the advective and diffusive inflow and the
                           resupply of Dirichlet values next to the cells (storage_rate = source

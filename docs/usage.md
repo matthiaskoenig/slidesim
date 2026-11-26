@@ -68,7 +68,9 @@ the processes (PT-Scotch), and every result agrees across process counts within 
 :   Per output time: the time reached (s), the L2 norm of the field (mM*um) and its amount of
     substance, the integral of the field weighed by the porosity (`total_mass`, mM*um^2).
     `mass_balance` is the balance over the interval since the output time before, each term its
-    mean rate there (mM*um^2/s; `null` at time 0):
+    mean rate there (mM*um^2/s; `null` at time 0, and at every time if PETSc options chose a
+    time integration other than BDF2, such as `-oxygen_ts_type cn`, which the run says in one
+    line):
 
     \[
     \begin{aligned}

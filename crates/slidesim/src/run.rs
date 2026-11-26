@@ -296,6 +296,17 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         remove_earlier_outputs(&study, out)?;
     }
     comm.barrier()?;
+    if comm.rank() == 0 {
+        for (field, problem) in study.fields.iter().zip(&problems) {
+            if let Some(why) = problem.without_interval_balance() {
+                println!(
+                    "field '{}': no mass balance over the output intervals (null in \
+                     summary.json), it follows the steps of BDF of order 2: {why}",
+                    field.id
+                );
+            }
+        }
+    }
     if let Some(flow) = &flow {
         let islands = flow.islands();
         if islands.count > 0 && comm.rank() == 0 {
@@ -343,6 +354,8 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
                 Ok(balance) => Some(balance.into()),
                 // An interval of no length (the output of time 0).
                 Err(PdeError::NotStepped { .. }) => None,
+                // Another time integration, as the log says.
+                Err(_) if problem.without_interval_balance().is_some() => None,
                 Err(e) => return Err(e).with_context(|| format!("field '{id}'")),
             };
             values.mass_balance.push(balance);

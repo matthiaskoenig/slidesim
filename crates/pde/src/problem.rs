@@ -170,7 +170,10 @@ pub struct Exchanged {
 /// prefix while it lives ([`OptionsScope`]), and removes them when dropped; it leaves those of
 /// 3 as they are. The options override the multigrid preconditioner too: for example
 /// `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
-/// `-mg_coarse_pc_type lu` its coarse solver (on one process).
+/// `-mg_coarse_pc_type lu` its coarse solver (on one process). Options which change the time
+/// integration (`-ts_type cn`, `-ts_bdf_order 1`) are followed, without
+/// [`Problem::interval_balance`], which follows the steps of BDF2
+/// ([`Problem::without_interval_balance`] says why).
 ///
 /// Processes: the solution depends on the number of processes up to the tolerance of the linear
 /// solves, since the preconditioner does (algebraic multigrid aggregates the coarse level by
@@ -211,6 +214,9 @@ pub struct Problem {
     balance: OnceCell<Balance>,
     /// The start of the interval of [`Problem::interval_balance`].
     mark: Mark,
+    /// Why there is no [`Problem::interval_balance`]: the options chose a time integration other
+    /// than `TSBDF` of order 2.
+    without_interval_balance: Option<String>,
     /// The discretizations of the levels, coarse first, for tests of the reuse of operators.
     levels: Vec<Discretization>,
     /// Dropped after the `TS`, which may read options until it is destroyed.
@@ -409,6 +415,13 @@ impl Problem {
         ksp.set_operators(&shell, &shell)?;
         let multigrid = configure_multigrid(&mut ksp, mesh, &level_operators, symmetric)?;
         ts.set_from_options()?;
+        let without_interval_balance = match ts.type_name()?.as_str() {
+            "bdf" => match ts.bdf_order()? {
+                2 => None,
+                order => Some(format!("the options chose BDF of order {order}")),
+            },
+            other => Some(format!("the options chose the TS type '{other}'")),
+        };
         // Unless the options replaced it.
         if ksp.pc()?.type_name()? == "mg" {
             // The Jacobian at the shift of the step, of the pattern of the finest level of the
@@ -449,6 +462,7 @@ impl Problem {
             edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
             balance: OnceCell::new(),
             mark,
+            without_interval_balance,
             levels,
             _options: options,
         };
@@ -795,6 +809,12 @@ impl Problem {
         Ok(())
     }
 
+    /// Why the problem gives no [`Problem::interval_balance`] (the options chose a time
+    /// integration other than `TSBDF` of order 2, whose steps it follows), or `None`.
+    pub fn without_interval_balance(&self) -> Option<&str> {
+        self.without_interval_balance.as_deref()
+    }
+
     /// The mass balance over the interval from [`Problem::interval_start`] to the current time,
     /// each term its mean rate there (the amount over the length of the interval, in
     /// mM*um^2/s): `storage_rate` the change of [`Problem::total_mass`]; `source`, the inflows
@@ -804,10 +824,18 @@ impl Problem {
     /// [`Problem::start_interval`] and [`Problem::set_initial_condition`]. Collective.
     ///
     /// Errors: [`PdeError::NotStepped`] for an interval of no length; [`PdeError::Poisoned`]
-    /// after a failed [`Problem::step_to`]; [`PdeError::Unsupported`] if the steps were not of
-    /// `TSBDF` of order 2 as [`Integral`] follows them (other options of the time integration).
+    /// after a failed [`Problem::step_to`]; [`PdeError::Unsupported`] if the options chose
+    /// another time integration than `TSBDF` of order 2
+    /// ([`Problem::without_interval_balance`]), and if the steps were not as [`Integral`]
+    /// follows them.
     pub fn interval_balance(&self) -> Result<MassBalance> {
         self.ensure_usable()?;
+        if let Some(why) = &self.without_interval_balance {
+            return Err(PdeError::Unsupported(format!(
+                "no mass balance over an interval, which follows the steps of BDF of order 2: \
+                 {why}"
+            )));
+        }
         let equation = self.ts.context();
         equation.integral.check()?;
         let now = equation.integral.current();

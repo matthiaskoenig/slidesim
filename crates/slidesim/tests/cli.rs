@@ -159,6 +159,38 @@ fn point_data(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A time integration other than BDF2, chosen by PETSc options (another TS type, another BDF
+/// order): the run goes on to the end, with a note in the log and `null` for the mass balances,
+/// which follow the steps of BDF2.
+#[test]
+fn other_time_integration_runs_without_balance() {
+    for (name, options) in [
+        ("cn", ["-oxygen_ts_type", "cn"]),
+        ("bdf_order_1", ["-oxygen_ts_bdf_order", "1"]),
+    ] {
+        let out = scratch(&format!(
+            "other_time_integration_runs_without_balance_{name}"
+        ));
+        let run = slidesim(&args(&coarse_study(&out, 1), &out, &options));
+        assert_success(&run);
+        let notes: Vec<&str> = run
+            .stdout
+            .lines()
+            .filter(|line| line.contains("no mass balance"))
+            .collect();
+        assert_eq!(notes.len(), 1, "{name}: {}", run.stdout);
+        assert!(notes[0].starts_with("field 'oxygen': "), "{}", notes[0]);
+        println!("{}", notes[0]);
+        let [times, _, _] = summary(&out, "oxygen");
+        assert_eq!(times, OUTPUTS, "{name}");
+        assert!(
+            balances(&out, "oxygen").iter().all(Option::is_none),
+            "{name}: {:?}",
+            balances(&out, "oxygen")
+        );
+    }
+}
+
 /// The mass balances of the field `field` of `<out>/summary.json`, one per output time: `None`
 /// for an interval of no length, else the terms by name (`storage_rate`, `source`,
 /// `advection_defect`, `exchange`, `<tag>.advective`, `<tag>.diffusive`, `<tag>.resupply`), in

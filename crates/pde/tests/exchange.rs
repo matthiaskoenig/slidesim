@@ -510,7 +510,8 @@ fn interval_balance_of_one_step_is_the_change() {
 }
 
 /// Steps of another method than BDF2 (here backward Euler by the options): the balance over
-/// an interval, which follows the steps of BDF2, is an error rather than wrong.
+/// an interval, which follows the steps of BDF2, is an error rather than wrong, and the problem
+/// says why from the start.
 #[test]
 fn interval_balance_of_other_steps_is_an_error() {
     let p = Petsc::init(&[]).unwrap();
@@ -537,12 +538,13 @@ fn interval_balance_of_other_steps_is_an_error() {
     .unwrap();
     problem.step_to(3.0 * DT).unwrap();
     assert!(problem.mass_balance().is_ok());
+    assert_eq!(
+        problem.without_interval_balance(),
+        Some("the options chose the TS type 'beuler'")
+    );
     let e = problem.interval_balance().unwrap_err();
     assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
-    assert!(
-        e.to_string().contains("does not follow the time steps"),
-        "{e}"
-    );
+    assert!(e.to_string().contains("TS type 'beuler'"), "{e}");
 }
 
 /// An exchange for another discretization than the problem's is refused.

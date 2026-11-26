@@ -5,7 +5,8 @@ use std::ptr::null_mut;
 
 use crate::error::{callback, failed_solver};
 use crate::{
-    Comm, ConvergedReason, Matrix, Result, Snes, VecMut, VecRef, Vector, alive, c_string, chk, sys,
+    Comm, ConvergedReason, Matrix, Result, Snes, VecMut, VecRef, Vector, alive, c_string, chk,
+    string_from, sys,
 };
 
 /// An implicit equation `F(t, u, u_t) = 0` for a [`Ts`]: its residual and its Jacobian.
@@ -199,6 +200,22 @@ impl<C> Ts<C> {
         let name = c_string(name, "TS type")?;
         chk!(unsafe { sys::TSSetType(self.raw, name.as_ptr()) });
         Ok(())
+    }
+
+    /// The method, for example `bdf` (`TSGetType`): empty before one is set.
+    pub fn type_name(&self) -> Result<String> {
+        let mut name: sys::TSType = std::ptr::null();
+        // SAFETY: `name` receives a string of the TS, or stays null.
+        chk!(unsafe { sys::TSGetType(self.raw, &mut name) });
+        // SAFETY: null or a NUL terminated string of the TS, valid for this call.
+        Ok(unsafe { string_from(name) }.unwrap_or_default())
+    }
+
+    /// The order of a `bdf` method (`TSBDFGetOrder`; an error for other methods).
+    pub fn bdf_order(&self) -> Result<usize> {
+        let mut order: sys::PetscInt = 0;
+        chk!(unsafe { sys::TSBDFGetOrder(self.raw, &mut order) });
+        Ok(usize::try_from(order).unwrap_or(0))
     }
 
     /// Sets the order of a `bdf` method (`TSBDFSetOrder`; nothing for other methods).
