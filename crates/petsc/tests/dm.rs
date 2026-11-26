@@ -256,6 +256,101 @@ fn boundary_faces_and_supports() {
 }
 
 #[test]
+fn cones_of_cells_and_edges() {
+    let p = Petsc::init(&[]).unwrap();
+    let dm = quad_box(&p.comm());
+    let edges = dm.depth_stratum(1).unwrap();
+    let vertices = dm.depth_stratum(0).unwrap();
+    for cell in dm.height_stratum(0).unwrap() {
+        let cone = dm.cone(cell).unwrap();
+        assert_eq!(cone.len(), 4, "{cone:?}");
+        // The cone is the closure after the cell, in order.
+        assert_eq!(cone, dm.closure(cell).unwrap()[1..5]);
+        for edge in cone {
+            assert!(edges.contains(&edge));
+            let ends = dm.cone(edge).unwrap();
+            assert_eq!(ends.len(), 2);
+            assert!(ends.iter().all(|v| vertices.contains(v)), "{ends:?}");
+        }
+    }
+    assert!(dm.cone(vertices.start).unwrap().is_empty());
+}
+
+/// The overlap of one cell: every cell which shares a vertex with a cell of the process, each
+/// cell a leaf of the cell it is on its process, whose data a broadcast brings.
+#[test]
+fn overlap_holds_the_cells_around_the_vertices_of_local_cells() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mut dm = box_mesh(&comm, [4, 4], [4.0, 4.0]);
+    if let Some(distributed) = dm.distribute(0).unwrap() {
+        dm = distributed;
+    }
+    let Some((overlap, sf)) = dm.distribute_overlap(1).unwrap() else {
+        assert_eq!(comm.size(), 1);
+        return;
+    };
+    let cells = dm.height_stratum(0).unwrap();
+    let chart = |dm: &Dm| {
+        (0..3)
+            .map(|d| dm.depth_stratum(d).unwrap().end)
+            .max()
+            .unwrap()
+    };
+    let (roots, graph) = sf.graph().unwrap();
+    assert_eq!(roots, chart(&dm) as usize);
+    // The global number of each cell, from the process of the cell.
+    let numbering = dm.cell_numbering().unwrap();
+    let mut root_data = vec![-1.0; roots];
+    for (c, &g) in cells.clone().zip(&numbering) {
+        root_data[c as usize] = g as f64;
+    }
+    let mut leaf_data = vec![f64::NAN; chart(&overlap) as usize];
+    sf.bcast(&root_data, &mut leaf_data).unwrap();
+    let overlap_cells = overlap.height_stratum(0).unwrap();
+    let mut numbers: Vec<i64> = overlap_cells
+        .clone()
+        .map(|c| leaf_data[c as usize] as i64)
+        .collect();
+    assert!(numbers.iter().all(|&g| (0..16).contains(&g)), "{numbers:?}");
+    numbers.sort_unstable();
+    numbers.dedup();
+    assert_eq!(numbers.len(), overlap_cells.len());
+    // The cells of this process are leaves of themselves.
+    let mine: Vec<sys::PetscInt> = graph
+        .iter()
+        .filter(|l| l.rank == comm.rank() && overlap_cells.contains(&l.leaf))
+        .map(|l| {
+            assert!(cells.contains(&l.root), "{l:?}");
+            assert_eq!(leaf_data[l.leaf as usize], root_data[l.root as usize]);
+            l.leaf
+        })
+        .collect();
+    assert_eq!(mine.len(), cells.len());
+    // Around each vertex of a cell of this process, all its cells: 4 inside, 2 on a side, 1 at
+    // a corner.
+    let coordinates = overlap.local_coordinates().unwrap();
+    let vertices = overlap.depth_stratum(0).unwrap();
+    for &cell in &mine {
+        for point in overlap.closure(cell).unwrap() {
+            if !vertices.contains(&point) {
+                continue;
+            }
+            let i = 2 * (point - vertices.start) as usize;
+            let inside = |x: f64| if x > 0.0 && x < 4.0 { 2 } else { 1 };
+            let expected = inside(coordinates[i]) * inside(coordinates[i + 1]);
+            let mut around = Vec::new();
+            for edge in overlap.support(point).unwrap() {
+                around.extend(overlap.support(edge).unwrap());
+            }
+            around.sort_unstable();
+            around.dedup();
+            assert_eq!(around.len(), expected, "vertex {point}: {around:?}");
+        }
+    }
+}
+
+#[test]
 fn partitioner_type_is_set_and_read_from_options() {
     let p = Petsc::init(&[]).unwrap();
     let dm = quad_box(&p.comm());
@@ -321,11 +416,12 @@ fn partitioner_random_reset_repeats_the_partition() {
 
 /// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
 /// partitions.
-const PARALLEL_TESTS: [&str; 5] = [
+const PARALLEL_TESTS: [&str; 6] = [
     "mpi_world_has_the_expected_size",
     "barrier_waits_for_every_process",
     "ghost_points_of_a_distributed_mesh",
     "boundary_faces_and_supports",
+    "overlap_holds_the_cells_around_the_vertices_of_local_cells",
     "partitioner_random_reset_repeats_the_partition",
 ];
 

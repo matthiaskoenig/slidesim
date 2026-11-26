@@ -68,8 +68,9 @@ pub struct Inputs<'a> {
 /// `M_c` the mass matrix weighted with `c`, `A_w` advection (`int (w . grad u) v`) and `K_c` the
 /// stiffness matrix of `c`; with advection, every term but diffusion is tested with the SUPG
 /// test function `v + tau w . grad v` instead of `v` (streamline upwind Petrov-Galerkin, `tau`
-/// per point from [`PointData::stabilized`]; see [`Terms`]). With `div w = 0` (Darcy without
-/// sources) the advective form equals the conservative one. The coefficients are numbers or
+/// per point from [`PointData::stabilized`]; see [`Terms`]). The velocity of a flow is its
+/// conservative velocity, with `div w = 0` in each cell and a continuous normal component
+/// (Darcy without sources), so the advective form equals the conservative one. The coefficients are numbers or
 /// tables over maps ([`Coefficient`]), evaluated at the quadrature points of every level of the
 /// mesh ([`coefficient_values`]), with the velocity of the flow on that level
 /// ([`Flow::velocity`], solved on every level): the coarser levels of the multigrid
@@ -82,8 +83,8 @@ pub struct Inputs<'a> {
 /// advection, every tag through which the flow enters the domain (positive [`Flow::tag_flows`])
 /// needs a Dirichlet condition ([`PdeError::Inflow`] otherwise); where the flow leaves, without
 /// a condition, the outflow is free: the advective form needs no boundary term, and the
-/// diffusive flux is zero. The P1 Darcy velocity has a normal component on walls without flow
-/// and may come back in locally through a tag of net outflow; at each Gauss point of an edge of
+/// diffusive flux is zero. The flow may come back in locally through a tag of net outflow (the
+/// conservative velocity has no normal component on walls without flow); at each Gauss point of an edge of
 /// the boundary without Dirichlet condition where `w . n < 0`, the term `int (w . n)^- u v`
 /// (`(w . n)^- = max(0, -w . n)`) keeps the advective flux from entering
 /// ([`PointData::with_backflow`], with the velocity at the edge, [`Flow::edge_velocity`]), in
@@ -92,7 +93,7 @@ pub struct Inputs<'a> {
 /// Conservation: [`Problem::total_mass`] is the amount of substance `int phi u`, and
 /// [`Problem::mass_balance`] its balance at the end of a step from the discrete equations (the
 /// consistent fluxes at the Dirichlet tags, the advective outflow at the others, and the
-/// non-conservation of the P1 Darcy velocity, see [`MassBalance`]).
+/// advection defect, zero to rounding for the conservative velocity, see [`MassBalance`]).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each

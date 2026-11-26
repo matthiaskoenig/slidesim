@@ -14,6 +14,7 @@ MPI_Datatype petsc_sys_mpiu_int(void) { return MPIU_INT; }
 MPI_Datatype petsc_sys_mpiu_real(void) { return MPIU_REAL; }
 MPI_Op petsc_sys_mpi_sum(void) { return MPI_SUM; }
 MPI_Op petsc_sys_mpi_max(void) { return MPI_MAX; }
+MPI_Op petsc_sys_mpi_replace(void) { return MPI_REPLACE; }
 
 /* PetscFree of an array PETSc allocated for the caller (PetscFree is a macro). */
 PetscErrorCode petsc_sys_free(void *p) { return PetscFree(p); }

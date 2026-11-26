@@ -7,7 +7,7 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 
 use crate::{
-    AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, alive, c_string, chk, string_from, sys,
+    AsVec, AsVecMut, Comm, Error, Fe, Matrix, Result, Sf, alive, c_string, chk, string_from, sys,
     to_int,
 };
 
@@ -145,6 +145,32 @@ impl Dm {
         // SAFETY: `raw` receives a new DM, or stays null.
         chk!(unsafe { sys::DMPlexDistribute(self.raw, overlap, null_mut(), &mut raw) });
         Ok((!raw.is_null()).then_some(Dm { raw }))
+    }
+
+    /// The DM (distributed) with `overlap` more layers of cells shared with neighbouring
+    /// processes (`DMPlexDistributeOverlap`), with the star forest which migrated the points
+    /// of this DM (its roots) to those of the new one (its leaves): each point of the new DM is a
+    /// leaf of the point it is on its process. The new DM has its own numbering of the points;
+    /// the cones keep their order. Labels are distributed with it. With an overlap of one, the
+    /// cells of the new DM hold every cell which shares a vertex with a cell of this one (the
+    /// adjacency of finite elements, the default of a DMPlex). `None` on one process. Collective.
+    pub fn distribute_overlap(&self, overlap: usize) -> Result<Option<(Dm, Sf)>> {
+        let overlap = to_int(overlap, "overlap")?;
+        let (mut raw, mut sf) = (null_mut(), null_mut());
+        // SAFETY: `raw` and `sf` receive new objects, or stay null.
+        chk!(unsafe { sys::DMPlexDistributeOverlap(self.raw, overlap, &mut sf, &mut raw) });
+        // SAFETY: new references, given up here.
+        let sf = (!sf.is_null()).then(|| unsafe { Sf::from_raw(sf) });
+        Ok(match (raw.is_null(), sf) {
+            (false, Some(sf)) => Some((Dm { raw }, sf)),
+            (false, None) => {
+                return Err(Error::new(
+                    sys::PETSC_ERR_PLIB,
+                    "DMPlexDistributeOverlap gave a DM without its star forest".to_string(),
+                ));
+            }
+            (true, _) => None,
+        })
     }
 
     /// The graph partitioner [`Dm::distribute`] decides with which process owns which cell
@@ -345,6 +371,22 @@ impl Dm {
         // SAFETY: the IS (or null) is ours to destroy.
         chk!(unsafe { sys::DMGetStratumIS(self.raw, name.as_ptr(), value, &mut is) });
         take_is(is, true)
+    }
+
+    /// The points of the cone of `point`, one level down, in order (`DMPlexGetCone`): the edges
+    /// of a cell of a 2D mesh, or the two vertices of an edge.
+    pub fn cone(&self, point: Point) -> Result<Vec<Point>> {
+        let mut n = 0;
+        // SAFETY: as for `support`.
+        chk!(unsafe { sys::DMPlexGetConeSize(self.raw, point, &mut n) });
+        let mut cone: *const sys::PetscInt = null();
+        chk!(unsafe { sys::DMPlexGetCone(self.raw, point, &mut cone) });
+        if n == 0 || cone.is_null() {
+            return Ok(Vec::new());
+        }
+        // SAFETY: PETSc points `cone` into the DM's own storage, `n > 0` entries long, copied
+        // before the DM can change.
+        Ok(unsafe { std::slice::from_raw_parts(cone, n as usize) }.to_vec())
     }
 
     /// The local points whose closure holds `point`, one level up (`DMPlexGetSupport`): the

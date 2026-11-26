@@ -4,7 +4,8 @@
 //! anything is solved), loads the mesh (distributed over the processes, refined
 //! `mesh.refinements` times), reads the maps over the cells of each process, solves the Darcy
 //! [`Flow`] if the study has a `perfusion` section and writes it as `<out>/pressure.vtu` (point
-//! data `pressure.Pa`) and `<out>/velocity.vtu` (the point vector `velocity`, um/s). It removes
+//! data `pressure.Pa`) and `<out>/velocity.vtu` (the point vectors `velocity`, the conservative
+//! velocity the fields are carried by, and `primal_velocity`, `-K grad p / mu`, um/s). It removes
 //! the outputs `<out>/<field id>_<index>.vtu` of an earlier run (`pressure.vtu` and
 //! `velocity.vtu` included; other files in `<out>` stay), builds one [`Problem`] per field, and
 //! steps the fields to each output time of `time.outputs` in turn, then to `time.end`. At each

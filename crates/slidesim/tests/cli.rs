@@ -273,32 +273,36 @@ fn lobule_toy_flows_from_portal_to_central() {
     assert!(central < 0.0, "{flows}");
     assert!((portal + central).abs() < 1e-8 * portal, "{flows}");
     assert_eq!(point_data(&out.join("pressure.vtu")), ["pressure.Pa"]);
-    assert_eq!(point_data(&out.join("velocity.vtu")), ["velocity"]);
+    assert_eq!(
+        point_data(&out.join("velocity.vtu")),
+        ["velocity", "primal_velocity"]
+    );
     // The mass balance of the tracer at each output time (none before the first step).
     let balances = balances(&out, "sucrose");
     assert_eq!(balances.len(), 3, "{balances:?}");
     assert!(balances[0].is_none(), "{balances:?}");
     for terms in balances[1..].iter().map(|b| b.as_ref().unwrap()) {
         assert_closes(terms);
-        // Observed: advection defects of -411 and -229 against an inflow of 2105 um^2/s at 1 mM
-        // (about 20 % and 11 %): the non-conservation of the P1 velocity, small against the
-        // flux (bound: a quarter).
+        // The conservative velocity has no advection defect (the primal velocity of milestone
+        // 2 had -411 and -229 against an inflow of 2105 um^2/s at 1 mM, about 20 % and 11 %).
         let defect = term(terms, "advection_defect");
-        assert!(defect.abs() < 0.25 * portal, "{defect} against {portal}");
+        assert!(defect.abs() < 1e-10 * portal, "{defect} against {portal}");
         // The tracer enters at the portal wall (1 mM), carried and by diffusion, and leaves by
-        // the flow through the central wall and the section edge (free outflow, no diffusive
-        // flux there).
+        // the flow through the central wall; none crosses the section edge, a wall without
+        // flow (no diffusive flux there either: no condition).
         assert!(term(terms, "portal_wall.advective") > 0.0, "{terms:?}");
         assert!(term(terms, "portal_wall.diffusive") > 0.0, "{terms:?}");
+        assert!(term(terms, "central_wall.advective") < 0.0, "{terms:?}");
         for tag in ["central_wall", "section_edge"] {
-            assert!(term(terms, &format!("{tag}.advective")) <= 0.0, "{terms:?}");
             assert_eq!(term(terms, &format!("{tag}.diffusive")), 0.0, "{terms:?}");
         }
-        // The advective inflow at the portal wall is about the flow times 1 mM, short by the
-        // error of the primal normal velocity at the wall.
+        let section_edge = term(terms, "section_edge.advective");
+        assert!(section_edge.abs() <= 1e-12 * portal, "{terms:?}");
+        // The advective inflow at the portal wall is the flow times 1 mM: the normal component
+        // of the conservative velocity there is the flux through each edge over its length.
         let advective = term(terms, "portal_wall.advective");
         assert!(
-            advective > 0.5 * portal && advective < 1.05 * portal,
+            (advective - portal).abs() < 1e-10 * portal,
             "{advective} against {portal}"
         );
     }

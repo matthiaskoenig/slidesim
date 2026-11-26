@@ -24,8 +24,9 @@
 //! of a [`Flow`], stabilized by SUPG. Its [`MassBalance`] comes from its discrete equations.
 //!
 //! A [`Flow`] solves the steady Darcy perfusion of a study once: the pressure with an
-//! anisotropic permeability along the gradient of a map, the velocity at the quadrature points
-//! of every level, and the flows through the pressure boundaries.
+//! anisotropic permeability along the gradient of a map, the equilibrated fluxes through the
+//! edges and their conservative (Raviart-Thomas) velocity at the quadrature points of every
+//! level, and the flows through the pressure boundaries.
 //!
 //! The QFunctions are C headers in `qfunctions/` ([`QFUNCTION_DIR`]), compiled by `build.rs`
 //! for the CPU backends; backends which compile them at run time read them from there.
@@ -37,6 +38,7 @@ mod balance;
 mod coefficients;
 mod discretization;
 mod flow;
+mod fluxes;
 mod multigrid;
 mod operators;
 mod problem;

@@ -42,11 +42,11 @@ pub const UNTAGGED: &str = "(untagged)";
 /// which defines `advection_defect`. On `Gamma_N` the backflow term cancels the inflowing part
 /// of `int (u . n) c`, which leaves the outflow `int_Gamma_N (u . n)^+ c`; on the Dirichlet
 /// edges `Gamma_D` the advective flux `int (u . n) c` is whole, in and out. For a velocity
-/// which conserves mass (`div u = 0` with a continuous normal component) it is zero; the Darcy
-/// velocity of P1 pressures has jumps of `u . n` between the cells (and within a cell a
-/// divergence where the permeability varies), and `advection_defect` is their effect,
-/// `sum_edges int [u . n] c`: the non-conservation of the primal velocity, reported, not
-/// corrected. Hence the terms:
+/// which conserves mass (`div u = 0` with a continuous normal component), as the conservative
+/// velocity of a [`crate::Flow`] ([`crate::Flow::velocity`]), it is zero up to rounding; for
+/// another velocity, as the primal Darcy velocity of P1 pressures with its jumps of `u . n`
+/// between the cells, `advection_defect` is their effect, `sum_edges int [u . n] c`, reported,
+/// not corrected. Hence the terms:
 ///
 /// - `storage_rate`: `int phi c_t`, with `c_t` the time derivative of the BDF formula at the end
 ///   of the step (Dirichlet values are constant);
@@ -61,11 +61,8 @@ pub const UNTAGGED: &str = "(untagged)";
 /// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`.
 ///
 /// The velocity on an edge of the boundary is that of the flow at its Gauss points
-/// ([`crate::Flow::edge_velocity`]): the pressure gradient of its cell with the permeability
-/// at the points. On an edge without Dirichlet condition where the flow has a normal component
-/// although the pressure equation has no flow there (a no-flow wall: the condition of the
-/// pressure is natural, so the P1 velocity meets it weakly only), the outflow of that component
-/// leaves the domain: the advective part of the tag of that edge shows it.
+/// ([`crate::Flow::edge_velocity`]): the conservative velocity of its cell, whose normal
+/// component is zero on a wall without flow, so no substance leaves there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MassBalance {
     pub storage_rate: f64,

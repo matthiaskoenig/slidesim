@@ -19,13 +19,14 @@ use std::rc::Rc;
 
 use common::{PIXELS, Scratch, ceed, read_maps, unit_square};
 use contracts::{
-    BoundarySpec, Coefficient, Condition, Direction, FieldSpec, Perfusion, PressureBoundary,
-    TimeSpec,
+    BoundarySpec, Coefficient, Condition, Direction, FieldSpec, Perfusion, PressureBoundary, Scene,
+    Study, TimeSpec,
 };
 use maps::Maps;
 use mesh::Mesh;
 use pde::{
     BoundaryInflow, Discretization, Flow, Inputs, PdeError, PointData, Problem, Terms, Transport,
+    UNTAGGED,
 };
 use petsc::Petsc;
 
@@ -458,7 +459,7 @@ fn mass_balance_closes() {
     let scratch = Scratch::new("mass_balance_closes");
     let maps = direction_maps(&scratch, &mesh);
     // Anisotropic permeability, no flow through top and bottom: a flow which is not uniform,
-    // whose normal component jumps between the cells.
+    // whose primal velocity has a normal component jumping between the cells.
     let perfusion = perfusion([3.0, 1.0], &[("left", 1.0), ("right", 0.0)]);
     let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
     let inputs = Inputs {
@@ -512,9 +513,17 @@ fn mass_balance_closes() {
         for tag in ["right", "top", "bottom"] {
             assert!(inflow(tag).advective <= 0.0, "{tag}: {balance:?}");
         }
-        // The P1 velocity has a normal component on the sides without flow (the condition is
-        // natural, so weak), and jumps of it between the cells.
-        assert!(balance.advection_defect.abs() > 1e-3, "{balance:?}");
+        // The conservative velocity has no normal component on the sides without flow, and its
+        // normal component does not jump between the cells: no advection defect (the primal
+        // velocity of milestone 2 had one above 1e-3).
+        let scale = inflow("left").total();
+        assert!(
+            balance.advection_defect.abs() < 1e-10 * scale,
+            "{balance:?}"
+        );
+        for tag in ["top", "bottom"] {
+            assert_eq!(inflow(tag).advective, 0.0, "{tag}: {balance:?}");
+        }
     }
     // A new initial condition: no rate of change until the next step.
     problem.set_initial_condition(|_| 0.0).unwrap();
@@ -571,6 +580,63 @@ fn mass_balance_of_a_uniform_flow() {
             "left" => assert!(q > 0.0 && b.advective > 0.0, "{balance:?}"),
             "right" => assert!(q < 0.0 && b.diffusive == 0.0, "{balance:?}"),
             tag => panic!("tag {tag}: {balance:?}"),
+        }
+    }
+}
+
+/// The tracer of the study `testdata/studies/lobule_toy` (as `slidesim run` runs it): carried by
+/// the flow from the portal wall to the central wall of `lobule_toy.msh`, with the permeability
+/// along the zonation map. With the conservative velocity the advection defect of the balance
+/// at every output time is zero (to the residuals of the solves; it was 11 to 20 % of the
+/// inflow with the primal velocity of milestone 2), and no substance leaves through the section
+/// edge, a wall without flow.
+#[test]
+fn no_advection_defect_with_conservative_velocity() {
+    let p = Petsc::init(&[]).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/lobule_toy/study.json");
+    let study = Study::load(&path).unwrap();
+    let scene = Scene::load(&study.scene).unwrap();
+    let mesh = Mesh::load(&p, &scene, study.mesh.refinements).unwrap();
+    let maps = Maps::read(&scene.maps, &["zonation"], mesh.local_bounds().unwrap()).unwrap();
+    let options = &study.solver.petsc_options;
+    let perfusion = study.perfusion.as_ref().unwrap();
+    let flow = Flow::solve(&mesh, perfusion, &maps, &ceed(), options).unwrap();
+    let portal = flow
+        .tag_flows()
+        .iter()
+        .find(|(tag, _)| tag == "portal_wall")
+        .unwrap()
+        .1;
+    assert!(portal > 0.0, "{:?}", flow.tag_flows());
+    let inputs = Inputs {
+        maps: &maps,
+        flow: Some(&flow),
+    };
+    let field = &study.fields[0];
+    let mut problem = Problem::new(&mesh, field, &study.time, &ceed(), options, &inputs).unwrap();
+    for &t in &study.time.outputs[1..] {
+        problem.step_to(t).unwrap();
+        let balance = problem.mass_balance().unwrap();
+        println!("t = {t}: {balance:?}");
+        assert!(imbalance(&balance) < 1e-8, "t = {t}: {balance:?}");
+        // At 1 mM on the portal wall, the substance flows in at about the portal flow.
+        assert!(
+            balance.advection_defect.abs() <= 1e-10 * portal,
+            "t = {t}: advection defect {:e} against the portal flow {portal}",
+            balance.advection_defect
+        );
+        let walls: Vec<&BoundaryInflow> = balance
+            .boundary
+            .iter()
+            .filter(|b| b.tag == "section_edge" || b.tag == UNTAGGED)
+            .collect();
+        assert!(!walls.is_empty(), "{balance:?}");
+        for wall in walls {
+            assert!(
+                wall.advective.abs() <= 1e-12 * portal,
+                "t = {t}: {wall:?} against the portal flow {portal}"
+            );
         }
     }
 }
@@ -768,6 +834,7 @@ fn parity(ranks: usize, test: &str) {
                     "inflow_without_dirichlet_is_error",
                     "mass_balance_closes",
                     "mass_balance_of_a_uniform_flow",
+                    "no_advection_defect_with_conservative_velocity",
                     "backflow_without_condition",
                     "backflow_term_in_mult_diagonal_and_assembly",
                     "supg_tau_of_pure_advection",
