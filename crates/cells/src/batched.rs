@@ -61,7 +61,9 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 /// takes its own steps with the tolerances of the spec and keeps its step from one advance to
 /// the next, so a cell depends on no other cell, the number of processes, the backend or its
 /// blocks. A cell fails where its next step would be smaller than [`H_MIN`] (in the time unit of
-/// the model), or after [`MAX_ATTEMPTS`] step attempts in one advance.
+/// the model) or too small to advance the time, which rejected steps cause (an error estimate
+/// above the tolerances, values which are not finite, a singular Jacobian), or after
+/// [`MAX_ATTEMPTS`] step attempts in one advance.
 pub struct BatchedCells {
     species: Vec<String>,
     state_ids: Vec<String>,
@@ -429,8 +431,10 @@ impl BatchedCells {
             return Err(element(
                 i,
                 format!(
-                    "the cell model failed from t = {t0} s to t = {t1} s: its step fell below \
-                     {H_MIN} (in the time unit of the model) at t = {} s",
+                    "the cell model failed from t = {t0} s to t = {t1} s at t = {} s: its \
+                     rejected steps (an error above the tolerances, values which are not finite \
+                     or a singular Jacobian) made its step smaller than {H_MIN} (in the time \
+                     unit of the model), or too small to advance the time",
                     reached(i)
                 ),
             ));
