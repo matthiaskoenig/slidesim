@@ -91,8 +91,8 @@ impl EngineCells {
     /// the model cannot be translated, compiled or loaded, and [`CellsError::Element`] for a cell
     /// whose model does not initialize.
     pub fn new(setup: &CellSetup, spec: &CellsSpec, model_sbml: &str) -> Result<EngineCells> {
-        setup.check()?;
         let comm = setup.comm();
+        agree(&comm, setup.check())?;
         for (what, value) in [("rtol", spec.rtol), ("atol", spec.atol)] {
             if !(value.is_finite() && value > 0.0) {
                 return Err(CellsError::Tolerance { what, value });

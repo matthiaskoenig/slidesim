@@ -141,8 +141,16 @@ fn means_of_constant_field_are_the_constant() {
     );
 }
 
+/// The resupply of the Dirichlet tags of `exchange`, summed: the same on every process.
+fn total_resupply(exchange: &Exchange, resupply: &[(String, f64)]) -> f64 {
+    let tags: Vec<&String> = resupply.iter().map(|(t, _)| t).collect();
+    assert_eq!(tags, exchange.dirichlet_tags().iter().collect::<Vec<_>>());
+    resupply.iter().map(|(_, r)| r).sum()
+}
+
 /// Random increments, up to removing all of an element's mean: the amount of substance
-/// `int phi u` changes by `sum_i delta_i V_i`, the Dirichlet values on the portal wall stay.
+/// `int phi u` changes by `sum_i delta_i V_i` plus the resupply of the Dirichlet values on the
+/// portal wall, which stay.
 #[test]
 fn give_back_conserves_total() {
     let p = Petsc::init(&[]).unwrap();
@@ -163,28 +171,30 @@ fn give_back_conserves_total() {
         .map(|m| (2.0 * random.uniform() - 1.0) * m)
         .collect();
     let before = problem.total_mass().unwrap();
-    exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = total_resupply(&exchange, &resupply);
+    assert!(resupply != 0.0);
     let after = problem.total_mass().unwrap();
     let expected = exchanged(&exchange, &delta, &mesh);
-    let error = ((after - before) - expected).abs();
+    let error = ((after - before - resupply) - expected).abs();
     assert!(
         error <= 1e-12 * before.abs().max(expected.abs()),
-        "change {} against {expected}: error {error:e}",
+        "change {} - resupply {resupply} against {expected}: error {error:e}",
         after - before
     );
     // The time integration goes on from the changed field.
     problem.step_to(2.0 * DT).unwrap();
 }
 
-/// Uptake of 99.9 % of every element's blood, of a field which is zero on a part of the domain
-/// and on its Dirichlet boundary: every nodal value stays nonnegative, and the amount still
-/// changes by exactly the sum.
+/// Uptake of 99.9 % of every element's blood, of a field which is zero on a part of the domain,
+/// next to its Dirichlet boundary of value 2 as well: every nodal value stays nonnegative, and
+/// the amount changes by exactly the sum plus the resupply of the Dirichlet values.
 #[test]
 fn steep_uptake_stays_nonnegative() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = lobule(&p);
     let maps = lobule_maps(&mesh);
-    let mut problem = problem(&mesh, &maps, &field(0.0, 0.0));
+    let mut problem = problem(&mesh, &maps, &field(0.0, 2.0));
     problem
         .set_initial_condition(|[x, y]| if x + y > 400.0 { 3.0 + x / 400.0 } else { 0.0 })
         .unwrap();
@@ -193,21 +203,53 @@ fn steep_uptake_stays_nonnegative() {
     exchange.means(&problem, &mut means).unwrap();
     let delta: Vec<f64> = means.iter().map(|m| -0.999 * m).collect();
     let before = problem.total_mass().unwrap();
-    exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = total_resupply(&exchange, &resupply);
     let after = problem.total_mass().unwrap();
     assert_eq!(negative_values(&problem, &mesh), 0);
+    // The portal wall resupplies the share of its nodes.
+    assert!(resupply > 0.0, "{resupply}");
     let expected = exchanged(&exchange, &delta, &mesh);
-    let error = ((after - before) - expected).abs();
+    let error = ((after - before - resupply) - expected).abs();
     assert!(
         error <= 1e-12 * before,
-        "change {} against {expected}: error {error:e}",
+        "change {} - resupply {resupply} against {expected}: error {error:e}",
         after - before
     );
-    // Close to empty: a thousandth is left.
-    assert!(
-        (after - 1e-3 * before).abs() <= 1e-9 * before,
-        "{after} of {before}"
-    );
+}
+
+/// A uniform field, its Dirichlet value the same, and a uniform change of every element: the
+/// free nodal values change by the same, and the Dirichlet tag resupplies (or takes away) the
+/// share of its nodes; field change minus resupply is the exchanged amount.
+#[test]
+fn uniform_change_with_resupply() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let mut problem = problem(&mesh, &maps, &field(1.0, 1.0));
+    let exchange = exchange(&mesh, &maps, &problem);
+    for (change, value) in [(-0.5, 0.5), (0.25, 0.75)] {
+        let delta = vec![change; exchange.len()];
+        let before = problem.total_mass().unwrap();
+        let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+        assert_eq!(resupply.len(), 1);
+        assert_eq!(resupply[0].0, "portal_wall");
+        let resupply = resupply[0].1;
+        let after = problem.total_mass().unwrap();
+        // Out of the reservoir for an uptake, into it for a release.
+        assert!(resupply * change < 0.0, "{change}: {resupply}");
+        let expected = exchanged(&exchange, &delta, &mesh);
+        let error = ((after - before - resupply) - expected).abs();
+        assert!(error <= 1e-12 * before, "{change}: error {error:e}");
+        problem
+            .solution()
+            .with_array(|u| {
+                for u in u {
+                    assert!((u - value).abs() <= 1e-12, "{u} against {value}");
+                }
+            })
+            .unwrap();
+    }
 }
 
 /// A change of the solution between steps starts the time integration again (BDF2 starts with
@@ -259,6 +301,27 @@ fn other_discretization_is_an_error() {
     ));
 }
 
+/// Changes of the wrong length on one process only: an error on every process, none waits.
+#[test]
+fn wrong_length_on_one_process_is_an_error_everywhere() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let mut problem = problem(&mesh, &maps, &field(1.0, 1.0));
+    let exchange = exchange(&mesh, &maps, &problem);
+    let comm = p.comm();
+    let n = exchange.len() + usize::from(comm.rank() == comm.size() - 1);
+    let mut means = vec![0.0; n];
+    assert!(matches!(
+        exchange.means(&problem, &mut means),
+        Err(PdeError::Unsupported(_))
+    ));
+    assert!(matches!(
+        exchange.give_back(&mut problem, &means),
+        Err(PdeError::Unsupported(_))
+    ));
+}
+
 #[test]
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();
@@ -274,8 +337,10 @@ fn parallel_on_2_processes() {
             "means_of_constant_field_are_the_constant",
             "give_back_conserves_total",
             "steep_uptake_stays_nonnegative",
+            "uniform_change_with_resupply",
             "modify_restarts_the_time_integration",
             "other_discretization_is_an_error",
+            "wrong_length_on_one_process_is_an_error_everywhere",
         ],
     );
 }

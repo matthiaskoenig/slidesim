@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-ceed = { path = "../ceed" }
 contracts = { path = "../contracts" }
 maps = { path = "../maps" }
 mesh = { path = "../mesh" }
@@ -19,4 +18,5 @@ sbmlsim-engine.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
+ceed = { path = "../ceed" }
 test-support = { path = "../test-support" }

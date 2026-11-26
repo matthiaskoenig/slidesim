@@ -154,6 +154,11 @@ fn value(setup: &CellSetup, i: usize, id: &str) -> f64 {
         .1
 }
 
+/// The discretization of the finest level of `mesh`, as the fields have it.
+fn finest(mesh: &Mesh, ceed: &Ceed) -> Discretization {
+    Discretization::new(mesh, mesh.levels().len() - 1, ceed, 1).unwrap()
+}
+
 /// The local coarse cells of `mesh` in the area `tissue`, by the area tags of level 0.
 fn tissue_cells(mesh: &Mesh, ceed: &Ceed) -> Vec<usize> {
     let coarse = Discretization::new(mesh, 0, ceed, 1).unwrap();
@@ -217,11 +222,12 @@ fn parameters_are_area_means() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = mesh(&p, "two_areas.msh", 2);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let scratch = Scratch::new("area-means");
     let maps = read_maps(&[scratch.map("x", |x| x[0])], &mesh);
     let spec = linear_spec(vec![parameter("k", table("x", &[[0.0, 0.0], [2.0, 2.0]]))]);
     let porosity = table("x", &[[0.0, 0.1], [2.0, 0.3]]);
-    let setup = CellSetup::new(&mesh, &spec, &maps, &porosity, &ceed).unwrap();
+    let setup = CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
 
     let expected_cells = tissue_cells(&mesh, &ceed);
     assert_eq!(setup.cells, expected_cells);
@@ -230,7 +236,6 @@ fn parameters_are_area_means() {
         .sum_int(setup.cells.len().try_into().unwrap())
         .unwrap();
     assert!(total > 0);
-    let fine = Discretization::new(&mesh, mesh.levels().len() - 1, &ceed, 1).unwrap();
     let means = child_means(&mesh, &fine, |x| x[0]);
     let centroids = centroids(&mesh, &ceed);
     let numbering = mesh.levels()[0].cell_numbering().unwrap();
@@ -263,6 +268,7 @@ fn replace_rule_switches_value() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = mesh(&p, "two_areas.msh", 1);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let scratch = Scratch::new("replace");
     let flag = |x: [f64; 2]| if x[1] > 0.5 { 1.0 } else { 0.0 };
     let maps = read_maps(
@@ -278,8 +284,7 @@ fn replace_rule_switches_value() {
             value: table("x", &[[0.0, 10.0], [2.0, 12.0]]),
         }),
     }]);
-    let setup = CellSetup::new(&mesh, &spec, &maps, &Coefficient::Constant(0.2), &ceed).unwrap();
-    let fine = Discretization::new(&mesh, mesh.levels().len() - 1, &ceed, 1).unwrap();
+    let setup = CellSetup::new(&fine, &mesh, &spec, &maps, &Coefficient::Constant(0.2)).unwrap();
     let flag_map = maps.get("flag").unwrap();
     let flags = child_means(&mesh, &fine, |x| flag_map.sample(x).unwrap());
     let centroids = centroids(&mesh, &ceed);
@@ -313,6 +318,7 @@ fn no_value_in_tissue_is_an_error() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = mesh(&p, "two_areas.msh", 1);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let scratch = Scratch::new("no-value");
     // No value in the lumen (x > 1): it holds no cells.
     let lumen = |x: [f64; 2]| if x[0] > 1.05 { f64::NAN } else { x[0] };
@@ -332,12 +338,12 @@ fn no_value_in_tissue_is_an_error() {
         "k",
         table("lumen", &[[0.0, 0.0], [1.0, 1.0]]),
     )]);
-    CellSetup::new(&mesh, &spec, &maps, &porosity, &ceed).unwrap();
+    CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
     let spec = linear_spec(vec![parameter(
         "k",
         table("hole", &[[0.0, 0.0], [1.0, 1.0]]),
     )]);
-    match CellSetup::new(&mesh, &spec, &maps, &porosity, &ceed) {
+    match CellSetup::new(&fine, &mesh, &spec, &maps, &porosity) {
         Err(CellsError::Element {
             cell,
             centroid,
@@ -360,11 +366,12 @@ fn study_start_checks() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = mesh(&p, "two_areas.msh", 1);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let maps = Maps::default();
     let porosity = Coefficient::Constant(0.2);
     let sbml = model("linear_uptake.xml");
     let base = linear_spec(vec![parameter("k", Coefficient::Constant(0.5))]);
-    let setup = CellSetup::new(&mesh, &base, &maps, &porosity, &ceed).unwrap();
+    let setup = CellSetup::new(&fine, &mesh, &base, &maps, &porosity).unwrap();
     // The default: every area tag.
     let all = CellsSpec {
         areas: None,
@@ -372,7 +379,7 @@ fn study_start_checks() {
     };
     let n = mesh.levels()[0].height_stratum(0).unwrap().len();
     assert_eq!(
-        CellSetup::new(&mesh, &all, &maps, &porosity, &ceed)
+        CellSetup::new(&fine, &mesh, &all, &maps, &porosity)
             .unwrap()
             .cells
             .len(),
@@ -382,7 +389,7 @@ fn study_start_checks() {
         areas: Some(vec!["tissue".into(), "stroma".into()]),
         ..base.clone()
     };
-    let e = CellSetup::new(&mesh, &unknown_area, &maps, &porosity, &ceed).unwrap_err();
+    let e = CellSetup::new(&fine, &mesh, &unknown_area, &maps, &porosity).unwrap_err();
     assert!(e.to_string().contains("'stroma'"), "{e}");
     assert!(e.to_string().contains("lumen, tissue"), "{e}");
 
@@ -463,7 +470,7 @@ fn study_start_checks() {
         ),
     ];
     for (spec, named) in cases {
-        let setup = CellSetup::new(&mesh, &spec, &maps, &porosity, &ceed).unwrap();
+        let setup = CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
         let e = EngineCells::new(&setup, &spec, &sbml).unwrap_err();
         assert!(e.to_string().contains(named), "{named}: {e}");
     }
@@ -477,6 +484,7 @@ fn engine_cells_match_stepper() {
     let p = Petsc::init(&[]).unwrap();
     let mesh = mesh(&p, "lobule_toy.msh", 0);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let study = Study::load(testdata("studies/lobule_toy/study.json")).unwrap();
     let scene = Scene::load(&study.scene).unwrap();
     let maps = Maps::read(&scene.maps, &["zonation"], mesh.local_bounds().unwrap()).unwrap();
@@ -506,7 +514,7 @@ fn engine_cells_match_stepper() {
         outputs: vec!["protein".to_string()],
     };
     let porosity = Coefficient::Constant(0.15);
-    let mut setup = CellSetup::new(&mesh, &spec, &maps, &porosity, &ceed).unwrap();
+    let mut setup = CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
     let n = 10;
     assert!(setup.cells.len() >= n);
     setup.cells.truncate(n);
@@ -599,6 +607,7 @@ fn failure_on_one_process_stops_all() {
     let comm = p.comm();
     let mesh = mesh(&p, "lobule_toy.msh", 0);
     let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
     let spec = CellsSpec {
         areas: None,
         ..linear_spec(vec![
@@ -607,11 +616,11 @@ fn failure_on_one_process_stops_all() {
         ])
     };
     let mut setup = CellSetup::new(
+        &fine,
         &mesh,
         &spec,
         &Maps::default(),
         &Coefficient::Constant(0.2),
-        &ceed,
     )
     .unwrap();
     let failing = comm.size() - 1;
@@ -642,6 +651,35 @@ fn failure_on_one_process_stops_all() {
     }
 }
 
+/// A setup whose lists differ in length on one process only: an error on every process, none
+/// waits in the compilation.
+#[test]
+fn invalid_setup_on_one_process_is_an_error_everywhere() {
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let spec = CellsSpec {
+        areas: None,
+        ..linear_spec(Vec::new())
+    };
+    let mut setup = CellSetup::new(
+        &fine,
+        &mesh,
+        &spec,
+        &Maps::default(),
+        &Coefficient::Constant(0.2),
+    )
+    .unwrap();
+    if comm.rank() == comm.size() - 1 {
+        setup.centroids.pop();
+    }
+    let e = EngineCells::new(&setup, &spec, &model("linear_uptake.xml")).unwrap_err();
+    assert!(e.to_string().contains("centroids"), "{e}");
+}
+
 #[test]
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();
@@ -650,13 +688,14 @@ fn mpi_world_has_the_expected_size() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (cells on every process, errors one process finds).
-const PARALLEL_TESTS: [&str; 6] = [
+const PARALLEL_TESTS: [&str; 7] = [
     "mpi_world_has_the_expected_size",
     "parameters_are_area_means",
     "replace_rule_switches_value",
     "no_value_in_tissue_is_an_error",
     "study_start_checks",
     "failure_on_one_process_stops_all",
+    "invalid_setup_on_one_process_is_an_error_everywhere",
 ];
 
 #[test]

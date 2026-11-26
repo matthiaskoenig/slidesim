@@ -1,6 +1,5 @@
 //! The cells of a process and their parameters: [`CellSetup`].
 
-use ceed::Ceed;
 use contracts::{CellsSpec, Coefficient};
 use maps::Maps;
 use mesh::Mesh;
@@ -14,8 +13,9 @@ use crate::{CellsError, Result, agree};
 ///
 /// The tissue of an element is its finest children (on the finest level of the mesh, the level
 /// of the fields, [`Mesh::coarse_cell`]) whose area tag is one of the areas (default: every area
-/// tag of the mesh). Its parameters are means over its tissue, by the quadrature of the finest
-/// level: `sum_q w_q c(x_q) / sum_q w_q` over the quadrature points `x_q` of the tissue, with the
+/// tag of the mesh). Its parameters are means over its tissue, by the quadrature of the
+/// discretization of the fields (the same as the transport's and `pde::Exchange`'s):
+/// `sum_q w_q c(x_q) / sum_q w_q` over the quadrature points `x_q` of the tissue, with the
 /// quadrature weights `w_q`:
 ///
 /// - every [`contracts::CellParameter`]: the mean of its value (a constant is taken as it is); with
@@ -46,29 +46,38 @@ pub struct CellSetup {
 impl CellSetup {
     /// The cells of `spec` on `mesh` and their parameters, from the maps `maps` (read for the
     /// cells of this process) and the porosity `porosity` of the blood space, by the
-    /// quadrature of the finest level on `ceed`. Collective.
+    /// quadrature of `disc`: the discretization of the fields on the finest level of `mesh`
+    /// (`pde::Problem::discretization`, as for `pde::Exchange::new`). Collective.
     ///
     /// Errors: [`CellsError::UnknownArea`] for an area which is not an area tag of the mesh;
-    /// [`CellsError::Invalid`] for a map the maps lack; on every process,
-    /// [`CellsError::Element`] for a map without value in the tissue of an element, and for an
-    /// element whose mean porosity is not in (0, 1) (no blood or no cell volume).
+    /// on every process, [`CellsError::Invalid`] if `disc` is not on the finest level of
+    /// `mesh`, and for a map the maps lack; [`CellsError::Element`] for a map without value in
+    /// the tissue of an element, and for an element whose mean porosity is not in (0, 1) (no
+    /// blood or no cell volume).
     pub fn new(
+        disc: &Discretization,
         mesh: &Mesh,
         spec: &CellsSpec,
         maps: &Maps,
         porosity: &Coefficient,
-        ceed: &Ceed,
     ) -> Result<CellSetup> {
         let comm = mesh.finest().comm();
         let areas = areas(mesh, spec)?;
         let finest = mesh.levels().len() - 1;
-        let disc = Discretization::new(mesh, finest, ceed, 1)?;
         let n_fine = mesh.finest().height_stratum(0)?.len();
+        let n_disc = disc.dm().height_stratum(0)?.len();
+        let points = disc.num_quadrature_points();
+        let on_finest = if n_disc == n_fine && points.checked_rem(n_fine).unwrap_or(0) == 0 {
+            Ok(())
+        } else {
+            Err(CellsError::Invalid(format!(
+                "a discretization of {n_disc} local cells and {points} quadrature points on a \
+                 finest level of {n_fine} cells"
+            )))
+        };
+        agree(&comm, on_finest)?;
         // The quadrature points of each cell (none without cells).
-        let q = disc
-            .num_quadrature_points()
-            .checked_div(n_fine)
-            .unwrap_or(0);
+        let q = points.checked_div(n_fine).unwrap_or(0);
         let n_coarse = mesh.levels()[0].height_stratum(0)?.len();
 
         // The tissue of each coarse element (its finest cells in the areas), and the centroids.
@@ -105,7 +114,7 @@ impl CellSetup {
             .map(|&c| [sums[c][0] / sums[c][2], sums[c][1] / sums[c][2]])
             .collect();
         let means = Means {
-            disc: &disc,
+            disc,
             q,
             maps,
             tissue: cells.iter().map(|&c| tissue[c].as_slice()).collect(),

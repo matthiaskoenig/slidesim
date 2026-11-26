@@ -794,6 +794,12 @@ impl Discretization {
         Ok(sums)
     }
 
+    /// The essential tags, in the order given, with the entries of local vectors each
+    /// constrains (its dofs and those of its closure), sorted.
+    pub(crate) fn essential(&self) -> &[(String, Vec<usize>)] {
+        &self.shared.essential
+    }
+
     /// The entries of local vectors which the essential tag `tag` constrains (its dofs, and
     /// those of its closure), sorted. An error if `tag` is not one of the essential tags.
     pub(crate) fn essential_dofs(&self, tag: &str) -> Result<&[usize]> {

@@ -10,11 +10,7 @@ use mesh::Mesh;
 use petsc::Vector;
 
 use crate::operators::PointValues;
-use crate::{Discretization, PdeError, Problem, Result, SourceField, coefficient_values};
-
-/// The free share of an element (the part of its blood volume at nodes off the Dirichlet
-/// boundaries, relative to its blood volume) below which it counts as without free nodes.
-const NO_FREE_NODE: f64 = 1e-12;
+use crate::{Discretization, PdeError, Problem, Result, SourceField, UNTAGGED, coefficient_values};
 
 /// The exchange of the field of a [`Problem`] with cell models on coarse elements of the mesh
 /// ("cells", one model each).
@@ -27,50 +23,65 @@ const NO_FREE_NODE: f64 = 1e-12;
 ///   `u_i = int_(e_i) phi u / V_i`, the concentration in the cell's blood (the L2 projection to
 ///   the coarse elements, with the field's Dirichlet values).
 /// - [`Exchange::give_back`]: the change `delta_i` of that concentration (mM), which a cell
-///   model made, given back to the field as the amount `A_i = delta_i V_i`: the amount of
-///   substance of the field, `int phi u` ([`Problem::total_mass`]), changes by exactly
-///   `sum_i A_i`, up to rounding.
+///   model made, given back as the amount `A_i = delta_i V_i`, distributed over the nodes of
+///   the element. The free nodes (off the Dirichlet boundaries) change; the share of a Dirichlet
+///   node is exchanged with the Dirichlet value, which the boundary holds fixed (a reservoir):
+///   substance it resupplies to the field, or takes away. The amount of substance of the field,
+///   `int phi u` ([`Problem::total_mass`]), changes by exactly `sum_i A_i` plus the resupply,
+///   which `give_back` returns per Dirichlet tag (inflow through the tag).
 ///
 /// Both are libCEED operators on the quadrature points of the problem's level: the values of
 /// the field at the points, and the integral of values at the points against the test
 /// functions `v_j` ([`SourceField`]).
 ///
-/// How an amount is distributed: the field has P1 nodal values `u_j`, of which the nodes off the
-/// Dirichlet boundaries ("free") change. With `w_ij = int_(e_i) phi v_j` and the lumped mass
-/// `m_j = int phi v_j` (over the whole domain), `int phi u = sum_j m_j u_j`, so a change
-/// `du_j = a_j / m_j` of free node `j` changes the amount by `a_j`. Each cell gives its amount
-/// to the free nodes of its element:
+/// How an amount is distributed: the field has P1 nodal values `u_j`. With
+/// `w_ij = int_(e_i) phi v_j` (`sum_j w_ij = V_i`, over every node of the element) and the
+/// lumped mass `m_j = int phi v_j` (over the whole domain), `int phi u = sum_j m_j u_j`, so a
+/// change `du_j = a_j / m_j` of free node `j` changes the amount by `a_j`. Each cell distributes
+/// its amount over every node of its element:
 ///
-/// - an increase (`A_i > 0`) in proportion to `w_ij`: `a_ij = A_i w_ij / F_i` with the free
-///   blood volume `F_i = sum_(j free) w_ij`. A uniform increase of a field without Dirichlet
-///   nodes in the cells' elements is a uniform increase of its nodal values.
+/// - an increase (`A_i > 0`) in proportion to `w_ij`: `a_ij = A_i w_ij / V_i`, the transpose of
+///   the mean, so that a uniform change of concentration is a uniform change of the nodal
+///   values of the free nodes (whose cells all change alike). The share of the Dirichlet nodes,
+///   `A_i D'_i / V_i` with `D'_i = sum_(j Dirichlet) w_ij`, leaves through their tags.
 /// - a decrease (`A_i < 0`), the positivity safeguard: in proportion to the substance at each
-///   free node, `w_ij u_j^+` (`u^+ = max(u, 0)`): `a_ij = -r_i w_ij u_j^+` with
-///   `r_i = |A_i| / G_i` and `G_i = sum_(j free) w_ij u_j^+`, the substance at the free nodes of
-///   the element. A node loses at most `sum_i r_i w_ij u_j / m_j <= u_j` while `r_i <= 1`, so no
-///   nodal value which is nonnegative becomes negative, however steep the uptake, as long as
-///   no cell takes more than the substance at the free nodes of its element (`|A_i| <= G_i`).
-///   A cell can take more only next to Dirichlet nodes, whose values count in its mean but do
-///   not change, or where the field has negative values: then `r_i = 1` (its free nodes are
-///   emptied) and the rest, `|A_i| - G_i`, is taken in proportion to `w_ij` as an increase is
-///   given, so that the amount stays exact (and the values of those nodes go below zero).
+///   node, `w_ij u_j^+` (`u^+ = max(u, 0)`): `a_ij = -r_i w_ij u_j^+` with
+///   `r_i = |A_i| / G_i` and `G_i = sum_j w_ij u_j^+ = int_(e_i) phi u^+ >= u_i V_i`. A cell
+///   model whose blood concentration stays nonnegative takes at most `u_i V_i`, so `r_i <= 1`,
+///   and a free node loses at most `u_j sum_i r_i w_ij / m_j <= u_j`: no nodal value which is
+///   nonnegative becomes negative, however steep the uptake, next to Dirichlet nodes as well.
+///   The share of the Dirichlet nodes, `r_i D_i` with `D_i = sum_(j Dirichlet) w_ij u_j^+`, is
+///   resupplied by their tags.
+/// - only if a cell model ends with a negative blood concentration (`|A_i| > G_i`, within its
+///   integration tolerance for a model which keeps its concentrations nonnegative) is
+///   `r_i = 1` and the rest `|A_i| - G_i` taken as an increase is given: exact, and the field
+///   takes on the negative value the model reached. Not an error, so that a run does not end on
+///   the rounding of an integrator at a concentration of zero.
 ///
-/// Then `sum_j a_j = sum_i A_i`: the change of the amount is exact.
+/// Then the change of `int phi u` is `sum_i A_i` plus the resupply, exactly up to rounding. A
+/// Dirichlet node of several tags counts for the tag listed last, as its value does.
 ///
 /// The time integration of the problem starts afresh after a change ([`Problem::modify`]).
 #[derive(Debug)]
 pub struct Exchange {
     disc: Discretization,
+    /// The number of cells.
+    n: usize,
     /// For each local cell of the level, the cell of the exchange its coarse element is.
     owner: Vec<Option<usize>>,
     /// The porosity at the quadrature points of the level.
     porosity: Vec<f64>,
     /// `V_i`.
     volumes: Vec<f64>,
-    /// `F_i`.
+    /// The share of `V_i` at the free nodes, `F_i = sum_(j free) w_ij`.
     free_volumes: Vec<f64>,
-    /// Of the local entries of the level: 1 for a free dof, 0 for an essential one.
-    free: Vec<f64>,
+    /// The Dirichlet tags (the essential tags of the discretization, in their order, then
+    /// [`UNTAGGED`] if a Dirichlet dof is of none).
+    tags: Vec<String>,
+    /// Of each local entry of the level: `None` for a free dof, else the index of its tag.
+    tag_of: Vec<Option<usize>>,
+    /// The share of `V_i` at the Dirichlet nodes of each tag: `[tag][cell]`.
+    tag_volumes: Vec<Vec<f64>>,
     /// `m_j`, a global vector.
     lumped: Vector,
     values: PointValues,
@@ -85,10 +96,8 @@ impl Exchange {
     /// (the field's, a coefficient over `maps`). Collective.
     ///
     /// Errors (on every process): [`PdeError::Unsupported`] if `problem_disc` is not on the
-    /// finest level of `mesh`, a cell is not a local coarse element or is listed twice, or
-    /// every node of an element is on a Dirichlet boundary (its amount could not be given
-    /// back; possible without refinements); [`PdeError::Map`] if the porosity cannot be
-    /// evaluated.
+    /// finest level of `mesh`, or a cell is not a local coarse element or is listed twice;
+    /// [`PdeError::Map`] if the porosity cannot be evaluated.
     pub fn new(
         problem_disc: &Discretization,
         mesh: &Mesh,
@@ -134,67 +143,43 @@ impl Exchange {
             .collect();
 
         let porosity = coefficient_values(&disc, porosity, maps)?;
-        let per_cell = |values: &[f64]| cell_sums(&disc, &owner, &porosity, cells.len(), values);
-        let volumes = per_cell(&vec![1.0; porosity.len()]);
-        let free: Vec<f64> = disc
-            .shared()
-            .local_to_global
-            .iter()
-            .map(|&g| if g >= 0 { 1.0 } else { 0.0 })
-            .collect();
+        let (tags, tag_of) = dirichlet_tags(&disc)?;
         let values = PointValues::new(&disc)?;
-        let mut local = disc.local_vector()?;
-        local.with_array_mut(|x| x.copy_from_slice(&free))?;
-        let mut fraction = vec![0.0; porosity.len()];
-        values.apply(&local, &mut fraction)?;
-        let free_volumes = per_cell(&fraction);
-        // An element without free nodes, by its centroid.
-        let pinned = free_volumes
-            .iter()
-            .zip(&volumes)
-            .position(|(f, v)| *f <= NO_FREE_NODE * v);
-        if comm.max_int(pinned.is_some().into())? > 0 {
-            let message = match pinned {
-                Some(i) => {
-                    let centroid = centroid(&disc, &owner, i);
-                    format!(
-                        "the element at ({}, {}) um has every node on a Dirichlet boundary: \
-                         cells there cannot exchange with the field (refine the mesh)",
-                        centroid[0], centroid[1]
-                    )
-                }
-                None => "an element of another process has every node on a Dirichlet boundary \
-                         (refine the mesh)"
-                    .to_string(),
-            };
-            return Err(PdeError::Unsupported(message));
-        }
-
-        let mut source = SourceField::new(&disc)?;
-        source.values_mut().copy_from_slice(&porosity);
-        let mut lumped = disc.global_vector()?;
-        source.apply(&mut lumped)?;
-        Ok(Exchange {
-            disc,
+        let mut exchange = Exchange {
+            n: cells.len(),
             owner,
             porosity,
-            volumes,
-            free_volumes,
-            free,
-            lumped,
+            volumes: Vec::new(),
+            free_volumes: Vec::new(),
+            tags,
+            tag_of,
+            tag_volumes: Vec::new(),
+            lumped: disc.global_vector()?,
             values,
-            source: RefCell::new(source),
-        })
+            source: RefCell::new(SourceField::new(&disc)?),
+            disc,
+        };
+        exchange.volumes = exchange.per_cell(&vec![1.0; exchange.porosity.len()]);
+        let ones = vec![1.0; exchange.tag_of.len()];
+        let (free, tagged) = exchange.split(&ones)?;
+        exchange.free_volumes = free;
+        exchange.tag_volumes = tagged;
+        {
+            let mut source = exchange.source.borrow_mut();
+            source.values_mut().copy_from_slice(&exchange.porosity);
+            source.apply(&mut exchange.lumped)?;
+        }
+        Ok(exchange)
     }
 
     /// The number of cells.
     pub fn len(&self) -> usize {
-        self.volumes.len()
+        self.n
     }
 
     /// Whether there are no cells (on this process).
     pub fn is_empty(&self) -> bool {
-        self.volumes.is_empty()
+        self.n == 0
     }
 
     /// The blood volume `V_i = int_(e_i) phi` of each cell (um^2 in 2D).
@@ -202,13 +187,20 @@ impl Exchange {
         &self.volumes
     }
 
+    /// The Dirichlet tags of the field, in the order of [`Exchange::give_back`]'s resupply:
+    /// the tags of its Dirichlet conditions in the order listed, then [`UNTAGGED`] if a
+    /// Dirichlet dof is of none. The same on every process.
+    pub fn dirichlet_tags(&self) -> &[String] {
+        &self.tags
+    }
+
     /// The porosity-weighted mean of the field of `problem` over each cell, its Dirichlet values
     /// included, into `out` (one value per cell, mM). Collective.
     ///
-    /// Errors: [`PdeError::Unsupported`] if `problem` is not the problem of the exchange (its
-    /// discretization and porosity), or `out` is not one value per cell.
+    /// Errors (on every process): [`PdeError::Unsupported`] if `problem` is not the problem of
+    /// the exchange (its discretization and porosity), or `out` is not one value per cell.
     pub fn means(&self, problem: &Problem, out: &mut [f64]) -> Result<()> {
-        self.check(problem, out.len())?;
+        self.collective(self.check(problem, out.len()))?;
         let u = self.point_values(&problem.local_solution()?)?;
         let amounts = self.per_cell(&u);
         for ((m, a), v) in out.iter_mut().zip(amounts).zip(&self.volumes) {
@@ -218,53 +210,61 @@ impl Exchange {
     }
 
     /// Gives the change `delta[i]` of the concentration of each cell back to the field of
-    /// `problem`: the amount `delta[i] V_i`, distributed to the free nodes of the cell's element
-    /// as [`Exchange`] describes, so that `int phi u` changes by exactly `sum_i delta[i] V_i`
-    /// (over every process). The time integration of `problem` starts afresh
+    /// `problem`: the amount `delta[i] V_i`, distributed over the nodes of the cell's element as
+    /// [`Exchange`] describes. Returns the resupply: per Dirichlet tag
+    /// ([`Exchange::dirichlet_tags`], in that order) the amount its Dirichlet values supplied to
+    /// the field (mM*um^2, negative where they took it away), summed over every process, so
+    /// that `int phi u` changes by exactly `sum_i delta[i] V_i` (over every process) plus the
+    /// sum of the resupply. The time integration of `problem` starts afresh
     /// ([`Problem::modify`]). Collective.
     ///
     /// Errors (on every process): [`PdeError::Unsupported`] if `problem` is not the problem of
     /// the exchange, `delta` is not one value per cell, or a value is not finite;
     /// [`PdeError::Poisoned`] after a failed step of `problem`.
-    pub fn give_back(&self, problem: &mut Problem, delta: &[f64]) -> Result<()> {
-        self.check(problem, delta.len())?;
-        let comm = self.disc.dm().comm();
-        let infinite = delta.iter().position(|d| !d.is_finite());
-        if comm.max_int(infinite.is_some().into())? > 0 {
-            return Err(PdeError::Unsupported(match infinite {
-                Some(i) => format!("a change of {} for cell {i} to give back", delta[i]),
-                None => "a change which is not finite on another process".into(),
-            }));
-        }
-        // The substance at the free nodes: u^+ there, 0 at the essential ones.
-        let mut positive = problem.local_solution()?;
-        positive.with_array_mut(|u| {
-            for (u, free) in u.iter_mut().zip(&self.free) {
-                *u = u.max(0.0) * free;
+    pub fn give_back(&self, problem: &mut Problem, delta: &[f64]) -> Result<Vec<(String, f64)>> {
+        self.collective(self.check(problem, delta.len()).and_then(|()| {
+            match delta.iter().position(|d| !d.is_finite()) {
+                Some(i) => Err(PdeError::Unsupported(format!(
+                    "a change of {} for cell {i} to give back",
+                    delta[i]
+                ))),
+                None => Ok(()),
             }
+        }))?;
+        // The substance at the nodes, u^+, split into the free nodes and each Dirichlet tag.
+        let mut positive = problem.local_solution()?;
+        let positive = positive.with_array_mut(|u| {
+            u.iter_mut().for_each(|u| *u = u.max(0.0));
+            u.to_vec()
         })?;
-        let substance = self.per_cell(&self.point_values(&positive)?);
+        let (free, tagged) = self.split(&positive)?;
         // Per cell: the increase per unit of `w_ij` (`c_i`) and the share of the substance taken
-        // (`r_i`).
+        // (`r_i`); per tag the resupply.
         let mut increase = vec![0.0; self.len()];
         let mut share = vec![0.0; self.len()];
+        let mut resupply = vec![0.0; self.tags.len()];
         for i in 0..self.len() {
             let amount = delta[i] * self.volumes[i];
-            if amount >= 0.0 {
-                increase[i] = amount / self.free_volumes[i];
-            } else {
-                let taken = (-amount).min(substance[i]);
+            let substance = free[i] + tagged.iter().map(|t| t[i]).sum::<f64>();
+            let volume = self.free_volumes[i] + self.tag_volumes.iter().map(|t| t[i]).sum::<f64>();
+            let mut added = amount;
+            if amount < 0.0 {
+                let taken = (-amount).min(substance);
                 if taken > 0.0 {
-                    share[i] = taken / substance[i];
+                    share[i] = taken / substance;
                 }
-                increase[i] = -(-amount - taken) / self.free_volumes[i];
+                added = amount + taken;
+            }
+            increase[i] = added / volume;
+            for (t, r) in resupply.iter_mut().enumerate() {
+                *r += share[i] * tagged[t][i] - increase[i] * self.tag_volumes[t][i];
             }
         }
-        let increase = self.integrate(&increase)?;
-        let share = self.integrate(&share)?;
+        let b_increase = self.integrate(&increase)?;
+        let b_share = self.integrate(&share)?;
         problem.modify(|u| {
-            increase.with_array(|increase| {
-                share.with_array(|share| {
+            b_increase.with_array(|increase| {
+                b_share.with_array(|share| {
                     self.lumped.with_array(|lumped| {
                         u.with_array_mut(|u| {
                             for (j, u) in u.iter_mut().enumerate() {
@@ -275,7 +275,25 @@ impl Exchange {
                 })
             })????;
             Ok(())
-        })
+        })?;
+        let comm = self.disc.dm().comm();
+        self.tags
+            .iter()
+            .zip(resupply)
+            .map(|(tag, r)| Ok((tag.clone(), comm.sum_real(r)?)))
+            .collect()
+    }
+
+    /// `local` on every process if no process has an error, else an error on every process:
+    /// this process's, or one naming another process. Collective.
+    fn collective(&self, local: Result<()>) -> Result<()> {
+        let comm = self.disc.dm().comm();
+        if comm.max_int(local.is_err().into())? > 0 {
+            return Err(local.err().unwrap_or_else(|| {
+                PdeError::Unsupported("an invalid exchange on another process".into())
+            }));
+        }
+        Ok(())
     }
 
     /// [`PdeError::Unsupported`] unless `problem` is the problem of the exchange and `n` is the
@@ -300,6 +318,26 @@ impl Exchange {
         Ok(())
     }
 
+    /// The nodal values `x` (of the local entries) split by node: `int_(e_i) phi x` per cell of
+    /// the interpolant of `x` at the free nodes only (and zero elsewhere), and of `x` at the
+    /// Dirichlet nodes of each tag only (`[tag][cell]`).
+    fn split(&self, x: &[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>)> {
+        let mut local = self.disc.local_vector()?;
+        let mut part = |tag: Option<usize>| -> Result<Vec<f64>> {
+            local.with_array_mut(|values| {
+                for ((v, x), t) in values.iter_mut().zip(x).zip(&self.tag_of) {
+                    *v = if *t == tag { *x } else { 0.0 };
+                }
+            })?;
+            Ok(self.per_cell(&self.point_values(&local)?))
+        };
+        let free = part(None)?;
+        let tagged = (0..self.tags.len())
+            .map(|t| part(Some(t)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((free, tagged))
+    }
+
     /// The values of the local vector `local` at the quadrature points.
     fn point_values(&self, local: &Vector) -> Result<Vec<f64>> {
         let mut values = vec![0.0; self.porosity.len()];
@@ -309,7 +347,17 @@ impl Exchange {
 
     /// `sum_(points of e_i) w phi f` of the values `f` at the quadrature points, per cell.
     fn per_cell(&self, values: &[f64]) -> Vec<f64> {
-        cell_sums(&self.disc, &self.owner, &self.porosity, self.len(), values)
+        let q = self.disc.points_per_cell();
+        let weights = self.disc.quadrature_weights();
+        let mut sums = vec![0.0; self.n];
+        for (e, owner) in self.owner.iter().enumerate() {
+            if let Some(i) = owner {
+                for k in e * q..(e + 1) * q {
+                    sums[*i] += weights[k] * self.porosity[k] * values[k];
+                }
+            }
+        }
+        sums
     }
 
     /// `sum_i x_i w_ij` for the free dofs `j`, a global vector: `int phi x v_j` of the values
@@ -335,41 +383,29 @@ impl Exchange {
     }
 }
 
-/// `sum_(points of e_i) w phi f` of the values `f` at the quadrature points of `disc`, for each
-/// of the `n` cells: `owner` gives the cell of each local cell of `disc`, `porosity` is `phi` at
-/// the points.
-fn cell_sums(
-    disc: &Discretization,
-    owner: &[Option<usize>],
-    porosity: &[f64],
-    n: usize,
-    values: &[f64],
-) -> Vec<f64> {
-    let q = disc.points_per_cell();
-    let weights = disc.quadrature_weights();
-    let mut sums = vec![0.0; n];
-    for (e, owner) in owner.iter().enumerate() {
-        if let Some(i) = owner {
-            for k in e * q..(e + 1) * q {
-                sums[*i] += weights[k] * porosity[k] * values[k];
-            }
+/// The Dirichlet tags of `disc` and the tag of each local entry (`None` for a free dof): the
+/// essential tags in their order, a dof of several counting for the one listed last, then
+/// [`UNTAGGED`] if an essential dof is of none on any process. Collective.
+fn dirichlet_tags(disc: &Discretization) -> Result<(Vec<String>, Vec<Option<usize>>)> {
+    let essential = disc.essential();
+    let mut tags: Vec<String> = essential.iter().map(|(tag, _)| tag.clone()).collect();
+    let local_to_global = &disc.shared().local_to_global;
+    let mut tag_of: Vec<Option<usize>> = vec![None; local_to_global.len()];
+    for (t, (_, dofs)) in essential.iter().enumerate() {
+        for &i in dofs {
+            tag_of[i] = Some(t);
         }
     }
-    sums
-}
-
-/// The centroid of cell `i`: the mean of the quadrature points of its fine cells, weighted.
-fn centroid(disc: &Discretization, owner: &[Option<usize>], i: usize) -> [f64; 2] {
-    let q = disc.points_per_cell();
-    let (points, weights) = (disc.quadrature_points(), disc.quadrature_weights());
-    let mut sum = [0.0; 2];
-    let mut total = 0.0;
-    for (e, _) in owner.iter().enumerate().filter(|(_, o)| **o == Some(i)) {
-        for k in e * q..(e + 1) * q {
-            total += weights[k];
-            sum[0] += weights[k] * points[k][0];
-            sum[1] += weights[k] * points[k][1];
+    let untagged = tags.len();
+    let mut any = false;
+    for (t, &g) in tag_of.iter_mut().zip(local_to_global) {
+        if g < 0 && t.is_none() {
+            *t = Some(untagged);
+            any = true;
         }
     }
-    sum.map(|s| s / total)
+    if disc.dm().comm().max_int(any.into())? > 0 {
+        tags.push(UNTAGGED.to_string());
+    }
+    Ok((tags, tag_of))
 }
