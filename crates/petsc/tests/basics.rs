@@ -493,6 +493,50 @@ fn abort_ends_every_process() {
     }
 }
 
+/// Set in the run of [`panic_ends_every_process`] under `mpiexec`.
+const PANIC_RUN: &str = "SLIDESIM_TEST_PANIC_RUN";
+
+/// With [`Petsc::abort_world_on_panic`], a panic on one process ends every process, the others
+/// waiting for it in a collective call: no hang in `PetscFinalize` while unwinding.
+#[test]
+fn panic_ends_every_process() {
+    if std::env::var_os(PANIC_RUN).is_some() {
+        let p = Petsc::init(&[]).unwrap();
+        p.abort_world_on_panic(4);
+        let comm = p.comm();
+        if comm.rank() == 1 {
+            panic!("a bug on one process");
+        }
+        comm.sum_real(1.0).unwrap();
+        println!("process {} left the collective call", comm.rank());
+        return;
+    }
+    let Some(mpiexec) = test_support::Mpiexec::find() else {
+        eprintln!("skipped: no mpiexec");
+        return;
+    };
+    let mut cmd = mpiexec.command(2, std::env::current_exe().unwrap());
+    cmd.args([
+        "--exact",
+        "panic_ends_every_process",
+        "--test-threads",
+        "1",
+        "--nocapture",
+    ])
+    .env(PANIC_RUN, "1")
+    .env(test_support::MPI_RANKS, "2");
+    let run = test_support::run_with_timeout(cmd, std::time::Duration::from_secs(60));
+    let output = format!("{}\n{}", run.stdout, run.stderr);
+    let status = run.status.unwrap_or_else(|| panic!("hangs:\n{output}"));
+    assert!(!status.success(), "{output}");
+    assert!(!output.contains("left the collective call"), "{output}");
+    assert!(
+        run.stderr
+            .contains("[rank 1] panic: a bug on one process (at crates/petsc/tests/basics.rs:"),
+        "{output}"
+    );
+}
+
 unsafe extern "C" {
     fn printf(format: *const std::ffi::c_char, ...) -> std::ffi::c_int;
 }

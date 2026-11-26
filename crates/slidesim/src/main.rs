@@ -7,7 +7,7 @@
 //! Exit code 0 on success. Otherwise 1, with the error (and its causes) on stderr. On several
 //! processes an error ends every process (`MPI_Abort`, exit code 1), since the others may wait
 //! for the failing one in a collective call forever; each failing process prints its error
-//! prefixed with its rank.
+//! prefixed with its rank. So does a panic (a bug): `[rank <k>] panic: <message> (at <location>)`.
 
 mod coupled;
 mod run;
@@ -117,6 +117,10 @@ fn run_command(args: &RunArgs, started: Instant) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if petsc.comm().size() > 1 {
+        // A panic is a bug, but it must not leave the other processes waiting forever.
+        petsc.abort_world_on_panic(1);
+    }
     match run::run(&petsc, &args.study, &args.out, started) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

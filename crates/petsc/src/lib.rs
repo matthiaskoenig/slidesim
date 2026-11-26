@@ -160,14 +160,33 @@ impl Petsc {
     /// stdout unbuffered and Open MPI's `mpiexec` gives a terminal, other launchers need not).
     /// PETSc flushes after each of its own prints; other C code need not.
     pub fn abort_world(&self, code: i32) -> ! {
-        // Errors are ignored: the processes end either way.
-        let _ = std::io::stdout().flush();
-        // SAFETY: PetscFFlush(NULL) is fflush(NULL), which flushes every C output stream.
-        let _ = unsafe { sys::PetscFFlush(null_mut()) };
-        // SAFETY: MPI is initialized while `self` lives. MPI_Abort does not return; if an MPI
-        // implementation does, this process exits all the same.
-        unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
-        std::process::exit(code)
+        // MPI is initialized while `self` lives.
+        abort_world(code)
+    }
+
+    /// Makes a panic on this process end every process of `MPI_COMM_WORLD` (as
+    /// [`Petsc::abort_world`] with the exit code `code`), after printing
+    /// `[rank <rank>] panic: <message> (at <location>)` to stderr, and the backtrace if
+    /// `RUST_BACKTRACE` asks for one. Without it, a panicking process would finalize PETSc and MPI
+    /// while unwinding (dropping `Petsc`) and wait there for the others, which wait for it in a
+    /// collective call: the run hangs. Replaces the panic hook of the process; a panic after
+    /// PETSc is finalized only prints.
+    pub fn abort_world_on_panic(&self, code: i32) {
+        let rank = self.comm().rank();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = info.payload_as_str().unwrap_or("Box<dyn Any>");
+            let location = info
+                .location()
+                .map_or_else(|| "unknown location".to_string(), ToString::to_string);
+            eprintln!("[rank {rank}] panic: {message} (at {location})");
+            let backtrace = std::backtrace::Backtrace::capture();
+            if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                eprintln!("{backtrace}");
+            }
+            if alive() {
+                abort_world(code);
+            }
+        }));
     }
 
     /// `PETSC_COMM_SELF`: this process alone. Borrowed from `self`, as [`Petsc::comm`].
@@ -251,6 +270,19 @@ impl Drop for Petsc {
             sys::PetscFinalize();
         }
     }
+}
+
+/// Flushes the output of this process and ends every process of `MPI_COMM_WORLD` with the exit
+/// code `code`: [`Petsc::abort_world`], for a caller which ensures that MPI is initialized.
+fn abort_world(code: i32) -> ! {
+    // Errors are ignored: the processes end either way.
+    let _ = std::io::stdout().flush();
+    // SAFETY: PetscFFlush(NULL) is fflush(NULL), which flushes every C output stream.
+    let _ = unsafe { sys::PetscFFlush(null_mut()) };
+    // SAFETY: MPI is initialized (the caller's contract). MPI_Abort does not return; if an MPI
+    // implementation does, this process exits all the same.
+    unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
+    std::process::exit(code)
 }
 
 /// An MPI communicator, borrowed for `'a` from what keeps it alive: [`Petsc`] for
