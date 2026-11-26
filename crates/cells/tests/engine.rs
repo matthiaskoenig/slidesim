@@ -527,7 +527,7 @@ fn engine_cells_match_stepper() {
 }
 
 /// A cell model which fails on one process (a decay rate whose growth overflows) stops every
-/// process with the same error, naming the element.
+/// process with the same error, naming the element; the cells are not advanced after it.
 #[test]
 fn failure_on_one_process_stops_all() {
     c_cache();
@@ -577,6 +577,14 @@ fn failure_on_one_process_stops_all() {
         }
         other => panic!("expected an error naming the element, got {other:?}"),
     }
+    // The cells are not advanced again: the same error, the states as they were.
+    let states = cells.states().to_vec();
+    let mut blood = vec![1.0; cells.n_cells()];
+    match cells.advance(600.0, 1200.0, &mut blood) {
+        Err(CellsError::Element { cell, .. }) => assert_eq!(cell, element),
+        other => panic!("expected the error again, got {other:?}"),
+    }
+    assert_eq!(cells.states(), states.as_slice());
 }
 
 /// A setup whose lists differ in length on one process only: an error on every process, none

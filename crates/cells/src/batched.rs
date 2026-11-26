@@ -18,7 +18,9 @@ use sbmlsim_c::{
 use sbmlsim_engine::Stepper;
 
 use crate::model::{Link, Outputs, QModel, Work};
-use crate::{CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Result, agree};
+use crate::{
+    CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Poison, Result, agree,
+};
 
 /// The smallest step of a cell, in the time unit of its model: a cell which needs a smaller one
 /// fails.
@@ -83,6 +85,8 @@ pub struct BatchedCells {
     global: Vec<i64>,
     centroids: Vec<[f64; 2]>,
     comm: OwnedComm,
+    /// The error of a failed advance, after which the cells are not advanced again.
+    poison: Poison,
     /// None where this process has no cells.
     batch: Option<Batch>,
     /// The time the cells reached (s).
@@ -318,6 +322,7 @@ impl BatchedCells {
             global: setup.global.clone(),
             centroids: setup.centroids.clone(),
             comm,
+            poison: Poison::default(),
             batch,
             t: 0.0,
         })
@@ -462,8 +467,10 @@ impl CellSolver for BatchedCells {
     }
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
+        self.poison.check()?;
         let local = self.advance_local(t0, t1, blood);
-        agree(&self.comm.comm(), local)
+        let agreed = agree(&self.comm.comm(), local);
+        self.poison.keep(agreed)
     }
 
     fn states(&self) -> &[f64] {

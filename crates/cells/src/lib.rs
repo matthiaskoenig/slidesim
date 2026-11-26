@@ -60,7 +60,7 @@ pub trait CellSolver {
     ///
     /// Errors (on every process, the same): [`CellsError::Element`] naming the first element
     /// whose model fails, on the lowest process with one. After an error the cells are not
-    /// advanced again.
+    /// advanced again: every later call returns the same error and leaves the cells as they are.
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats>;
 
     /// The states of every cell (`n_cells * state_ids().len()` values, cell by cell), as the
@@ -242,6 +242,30 @@ pub(crate) fn agree<T>(comm: &Comm, local: Result<T>) -> Result<T> {
     };
     comm.broadcast_bytes(root, &mut bytes)?;
     Err(decode(&bytes))
+}
+
+/// The error of a failed advance of the cells, kept: after it, the cells are not advanced again,
+/// so that a retry cannot advance the cells which had advanced before the failure a second time.
+/// Every process keeps the same error ([`agree`]), so every process refuses alike.
+#[derive(Debug, Default)]
+pub(crate) struct Poison(Option<Vec<u8>>);
+
+impl Poison {
+    /// The kept error, if there is one.
+    pub(crate) fn check(&self) -> Result<()> {
+        match &self.0 {
+            Some(bytes) => Err(decode(bytes)),
+            None => Ok(()),
+        }
+    }
+
+    /// `result`, its error kept.
+    pub(crate) fn keep<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Err(e) = &result {
+            self.0 = Some(encode(e));
+        }
+        result
+    }
 }
 
 /// The kinds of errors [`agree`] sends.

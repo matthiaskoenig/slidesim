@@ -9,7 +9,9 @@ use sbmlsim_abi::{IntegratorSettings, Tolerance};
 use sbmlsim_engine::Stepper;
 
 use crate::model::{Link, Outputs, Work};
-use crate::{CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Result, agree};
+use crate::{
+    CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Poison, Result, agree,
+};
 
 /// The cells of a process on sbmlsim-core's engine: the model translated to C and compiled
 /// once per process (`sbmlsim_c`, cached across processes and runs, see
@@ -33,6 +35,8 @@ pub struct EngineCells {
     global: Vec<i64>,
     centroids: Vec<[f64; 2]>,
     comm: OwnedComm,
+    /// The error of a failed advance, after which the cells are not advanced again.
+    poison: Poison,
     /// The state of a cell during an advance.
     work: Vec<f64>,
     outputs: Outputs,
@@ -117,6 +121,7 @@ impl EngineCells {
             global: setup.global.clone(),
             centroids: setup.centroids.clone(),
             comm,
+            poison: Poison::default(),
             work: Vec::with_capacity(description.states.len()),
             outputs,
             t: 0.0,
@@ -195,8 +200,10 @@ impl CellSolver for EngineCells {
     }
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
+        self.poison.check()?;
         let local = self.advance_local(t0, t1, blood);
-        agree(&self.comm.comm(), local)
+        let agreed = agree(&self.comm.comm(), local);
+        self.poison.keep(agreed)
     }
 
     fn states(&self) -> &[f64] {
