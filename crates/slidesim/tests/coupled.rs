@@ -268,6 +268,13 @@ fn conservation(name: &str, adaptive: bool) {
     // The counts of the cells, and every phase.
     assert!(summary["cells"]["count"].as_u64().unwrap() > 100);
     assert!(summary["cells"]["steps"].as_u64().unwrap() > 0);
+    // The time in the cells: the largest of a process at least the mean.
+    let seconds = &summary["cells"]["seconds"];
+    let (mean, max) = (
+        seconds["mean"].as_f64().unwrap(),
+        seconds["max"].as_f64().unwrap(),
+    );
+    assert!(mean > 0.0 && max >= mean, "{seconds}");
     for phase in [
         "setup",
         "pressure",

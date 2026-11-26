@@ -14,6 +14,20 @@ use petsc::{Comm, Dm, Fe, Vector, Viewer};
 
 use crate::run::Phases;
 
+/// The steps of the cells of every process ([`Coupled::stats`]).
+pub(crate) struct CellStats {
+    pub(crate) steps: u64,
+    pub(crate) rejected: u64,
+    pub(crate) seconds: Seconds,
+}
+
+/// A time over the processes: its mean and its largest value (s).
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub(crate) struct Seconds {
+    pub(crate) mean: f64,
+    pub(crate) max: f64,
+}
+
 /// The cells of a study coupled to its fields by Strang splitting.
 ///
 /// The time from the current time to the next output time (or the end) is split into `n` equal
@@ -48,9 +62,10 @@ pub(crate) struct Coupled {
     blood: Vec<f64>,
     before: Vec<f64>,
     work: Vec<f64>,
-    /// The steps and rejected steps of the cells of this process.
+    /// The steps and rejected steps of the cells of this process, and its time in them (s).
     steps: u64,
     rejected: u64,
+    seconds: f64,
     /// For each linked species, the amount the cells gave to its field since t = 0 (mM*um^2),
     /// over every process.
     exchanged: Vec<f64>,
@@ -149,6 +164,7 @@ impl Coupled {
             work: Vec::new(),
             steps: 0,
             rejected: 0,
+            seconds: 0.0,
             exchanged: vec![0.0; spec.species.len()],
             setup,
             scale,
@@ -223,6 +239,7 @@ impl Coupled {
         let stats = self.solver.advance(self.t, t1, &mut self.blood)?;
         self.steps += stats.steps;
         self.rejected += stats.rejected;
+        self.seconds += stats.seconds;
         self.t = t1;
         phases.end("cells")?;
         for (s, (field, exchange)) in self.links.iter().enumerate() {
@@ -242,14 +259,23 @@ impl Coupled {
         self.count
     }
 
-    /// The steps and the rejected steps of the cells of every process. Collective.
-    pub(crate) fn stats(&self, comm: &Comm) -> Result<(u64, u64)> {
+    /// The steps and the rejected steps of the cells of every process, and the mean and the
+    /// largest time of a process in its cells (s, without the wait for the others).
+    /// Collective.
+    pub(crate) fn stats(&self, comm: &Comm) -> Result<CellStats> {
         let sum = |x: u64| -> Result<u64> {
             Ok(u64::try_from(
                 comm.sum_int(petsc::sys::PetscInt::try_from(x)?)?,
             )?)
         };
-        Ok((sum(self.steps)?, sum(self.rejected)?))
+        Ok(CellStats {
+            steps: sum(self.steps)?,
+            rejected: sum(self.rejected)?,
+            seconds: Seconds {
+                mean: comm.sum_real(self.seconds)? / comm.size() as f64,
+                max: comm.max_real(self.seconds)?,
+            },
+        })
     }
 
     /// For each linked species, the index of its field and the amount the cells gave to it

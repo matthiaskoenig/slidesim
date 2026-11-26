@@ -303,6 +303,12 @@ impl Comm {
         self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
     }
 
+    /// The maximum of `x` over all processes (`MPI_Allreduce`).
+    pub fn max_real(&self, x: sys::PetscReal) -> Result<sys::PetscReal> {
+        let op = unsafe { sys::petsc_sys_mpi_max() };
+        self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
+    }
+
     /// The bytes `data` of the process `root`, on every process (`MPI_Bcast`): the others'
     /// `data` is replaced, whatever its length. For messages of errors which one process found,
     /// so that every process reports the same.

@@ -31,7 +31,7 @@
 //!         "boundary": {"<tag>": {"advective": ..., "diffusive": ..., "resupply": ...}}}]}},
 //!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
 //!                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
-//!  "cells": {"count": <n>, "steps": <n>, "rejected": <n>,
+//!  "cells": {"count": <n>, "steps": <n>, "rejected": <n>, "seconds": {"mean": ..., "max": ...},
 //!            "exchanged": {"<field id>": [...]}, "amounts": {"<species id>": [...]}},
 //!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "exchange": ...,
 //!             "cells": ..., "output": ...}}
@@ -50,7 +50,9 @@
 //! `storage_rate` is the change of `total_mass` over the interval divided by its length, and
 //! the terms add up to it exactly, up to the residuals of the linear solves.
 //! `cells` is there for a study with cells: their number, the steps and rejected steps of
-//! their integrators summed over the cells and the run, and per output time the amount each
+//! their integrators summed over the cells and the run, the time of a process in its cells (s,
+//! the mean over the processes and the largest; the phase `cells` is the largest and the wait
+//! of the others for it), and per output time the amount each
 //! linked field received from the cells since t = 0 (mM*um^2) and the amount of each species
 //! of the cell compartment in all cells, in the units of the fields (mM*um^2: its
 //! concentration times the cell volume of the model, times the blood volume of the element in
@@ -80,7 +82,7 @@ use pde::{Flow, Inputs, MassBalance, PdeError, Problem};
 use petsc::{Comm, Petsc, Vector, Viewer};
 use serde::Serialize;
 
-use crate::coupled::{Coupled, linked_fields};
+use crate::coupled::{Coupled, Seconds, linked_fields};
 
 /// `summary.json`.
 #[derive(Debug, Serialize)]
@@ -144,6 +146,9 @@ struct CellsSummary {
     /// The steps of the integrators of the cells and the rejected step attempts, summed.
     steps: u64,
     rejected: u64,
+    /// The time of each process in its cells (without the wait for the others) over the
+    /// processes: the mean and the largest; their ratio is the imbalance of the work.
+    seconds: Seconds,
     /// Per linked field and output time, the amount the cells gave to the field since t = 0:
     /// mM*um^2.
     exchanged: BTreeMap<String, Vec<f64>>,
@@ -366,7 +371,8 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         &mut phases,
     )?;
     if let (Some(coupled), Some(cells)) = (&coupled, &mut summary.cells) {
-        (cells.steps, cells.rejected) = coupled.stats(&comm)?;
+        let stats = coupled.stats(&comm)?;
+        (cells.steps, cells.rejected, cells.seconds) = (stats.steps, stats.rejected, stats.seconds);
     }
     phases.end("output")?;
 
