@@ -26,7 +26,7 @@ const H_MIN: f64 = 1e-10;
 
 /// The most step attempts of a cell in one advance: a cell which has not reached the end of
 /// the advance after as many fails.
-const MAX_ATTEMPTS: u64 = 1_000_000;
+const MAX_ATTEMPTS: u32 = 1_000_000;
 
 /// The QFunction of a library, of the signature of `CeedQFunctionUser`.
 type Function = unsafe extern "C" fn(
@@ -36,14 +36,14 @@ type Function = unsafe extern "C" fn(
     *const *mut CeedScalar,
 ) -> c_int;
 
-// The context of the QFunction is its four values, in the order of `RosenbrockContext`.
-const _: () = assert!(size_of::<RosenbrockContext>() == 4 * size_of::<f64>());
+// The context of the QFunction is its five values, in the order of `RosenbrockContext`.
+const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 
 /// The cells of a process as one libCEED operator: one point per cell (one element of one node
 /// per cell, strided restrictions, no basis), the QFunction of the model
-/// ([`sbmlsim_c::generate_qfunction`]: the model with the Rosenbrock integrator RODAS4, one step
-/// attempt per point and application) compiled once per process (`sbmlsim_c`, cached across
-/// processes and runs).
+/// ([`sbmlsim_c::generate_qfunction`]: the model with the Rosenbrock integrator RODAS4, step
+/// attempts per point until it reaches the end of the advance, at most [`MAX_ATTEMPTS`])
+/// compiled once per process (`sbmlsim_c`, cached across processes and runs).
 ///
 /// The cells are initialized as the engine path initializes its steppers (a
 /// [`sbmlsim_engine::Stepper`] of the model of the C target per cell, the defaults, the cell's
@@ -51,13 +51,15 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 4 * size_of::<f64>());
 ///
 /// An advance sets the linked species to their concentrations in the blood (as amounts, times
 /// the volume of their compartment, unless the model stores the concentration), then applies
-/// the operator until every cell has reached the end of the advance or failed, the outputs of
-/// one application the inputs of the next (two operators, which read the fields of one set of
-/// vectors and write the other). Each cell takes its own steps with the tolerances of the spec
-/// and keeps its step from one advance to the next, so a cell depends on no other cell, the
-/// number of processes, the backend or its blocks. A cell fails where its next step would be
-/// smaller than [`H_MIN`] (in the time unit of the model), or after [`MAX_ATTEMPTS`] step
-/// attempts in one advance.
+/// the operator once (it reads the fields of one set of vectors and writes the other): each cell
+/// steps until it reaches the end of the advance or fails, so a process reads and writes its
+/// cells once per advance and a cell which is done waits for no other. (One attempt per
+/// application, which the QFunction allows for calls of bounded work, passes over every cell as
+/// often as the cell of the most attempts needs, the cells which are done included.) Each cell
+/// takes its own steps with the tolerances of the spec and keeps its step from one advance to
+/// the next, so a cell depends on no other cell, the number of processes, the backend or its
+/// blocks. A cell fails where its next step would be smaller than [`H_MIN`] (in the time unit of
+/// the model), or after [`MAX_ATTEMPTS`] step attempts in one advance.
 pub struct BatchedCells {
     species: Vec<String>,
     state_ids: Vec<String>,
@@ -68,7 +70,7 @@ pub struct BatchedCells {
     /// Of every cell, in the order of the parameters of the description (the field
     /// `parameters` of the QFunction).
     parameters: Vec<f64>,
-    /// The control of every cell (`t`, `h`, done, failed), after the last application.
+    /// The control of every cell (`t`, `h`, done, failed), after the last advance.
     control: Vec<f64>,
     /// The accepted and rejected steps of every cell in the last advance.
     counts: Vec<f64>,
@@ -98,24 +100,22 @@ impl std::fmt::Debug for BatchedCells {
     }
 }
 
-/// The operators of the cells of a process and their vectors.
+/// The operator of the cells of a process and its vectors.
 struct Batch {
     qfunction: QFunction,
-    /// `operators[k]` reads the states, controls and counts of the set `k` of vectors (and the
-    /// parameters) and writes those of the other set.
-    operators: [Operator; 2],
+    /// Reads the states, controls and counts of the first of each pair of vectors (and the
+    /// parameters) and writes those of the second.
+    operator: Operator,
     state: [CVector; 2],
     control: [CVector; 2],
     counts: [CVector; 2],
-    /// The set of vectors which holds the cells.
-    current: usize,
     /// The library of the function of the QFunction, dropped after the QFunction and the
     /// operators (the fields are dropped in their order).
     _library: Arc<Library>,
 }
 
 impl Batch {
-    /// The operators of the QFunction of `qmodel` on `ceed` for the `n` cells of the
+    /// The operator of the QFunction of `qmodel` on `ceed` for the `n` cells of the
     /// `parameters`, with `context`.
     fn new(
         ceed: &Ceed,
@@ -162,35 +162,31 @@ impl Batch {
         };
         let (state, control, counts) = (pair(ns)?, pair(CONTROL)?, pair(COUNTS)?);
         let parameters = CVector::from_slice(ceed, parameters)?;
-        let operator = |k: usize| -> Result<Operator> {
-            let mut op = Operator::new(ceed, &qfunction)?;
-            let read = [&state[k], &parameters, &control[k], &counts[k]];
-            for ((name, r), v) in INPUTS.iter().zip(&restrictions).zip(read) {
-                op.set_field(name, Some(r), None, FieldVector::Passive(v))?;
-            }
-            let written = [&state[1 - k], &control[1 - k], &counts[1 - k]];
-            let r = [&restrictions[0], &restrictions[2], &restrictions[3]];
-            for ((name, r), v) in OUTPUTS.iter().zip(r).zip(written) {
-                op.set_field(name, Some(r), None, FieldVector::Passive(v))?;
-            }
-            Ok(op)
-        };
-        let operators = [operator(0)?, operator(1)?];
+        let mut operator = Operator::new(ceed, &qfunction)?;
+        let read = [&state[0], &parameters, &control[0], &counts[0]];
+        for ((name, r), v) in INPUTS.iter().zip(&restrictions).zip(read) {
+            operator.set_field(name, Some(r), None, FieldVector::Passive(v))?;
+        }
+        let written = [&state[1], &control[1], &counts[1]];
+        let r = [&restrictions[0], &restrictions[2], &restrictions[3]];
+        for ((name, r), v) in OUTPUTS.iter().zip(r).zip(written) {
+            operator.set_field(name, Some(r), None, FieldVector::Passive(v))?;
+        }
         Ok(Batch {
             qfunction,
-            operators,
+            operator,
             state,
             control,
             counts,
-            current: 0,
             _library: Arc::clone(&qmodel.library),
         })
     }
 
-    /// Applies the operators until every cell is done or failed, or has made `MAX_ATTEMPTS`
-    /// step attempts: from the states `fill` writes and the controls `control`, with `context`.
-    /// Afterwards `control` holds the controls, `counts` the steps of this run and `states` the
-    /// states. Whether every cell is done or failed.
+    /// Applies the operator once, with `context` (whose attempts are [`MAX_ATTEMPTS`]): every
+    /// cell steps until it is done or failed, or has made `MAX_ATTEMPTS` step attempts, from the
+    /// states `fill` writes and the controls `control`. Afterwards `control` holds the controls,
+    /// `counts` the steps of this run and `states` the states. Whether every cell is done or
+    /// failed.
     fn run(
         &mut self,
         context: &RosenbrockContext,
@@ -199,31 +195,27 @@ impl Batch {
         counts: &mut [f64],
         states: &mut [f64],
     ) -> Result<bool> {
-        let k = self.current;
-        self.state[k].with_array_mut(fill)?;
-        self.control[k].with_array_mut(|a| a.copy_from_slice(control))?;
-        self.counts[k].set_value(0.0)?;
+        self.state[0].with_array_mut(fill)?;
+        self.control[0].with_array_mut(|a| a.copy_from_slice(control))?;
+        self.counts[0].set_value(0.0)?;
         self.qfunction.set_context(&words(context))?;
-        let mut attempts = 0;
-        while !finished(control) {
-            if attempts == MAX_ATTEMPTS {
-                break;
-            }
-            self.operators[self.current].apply_passive()?;
-            self.current = 1 - self.current;
-            self.control[self.current].with_array(|a| control.copy_from_slice(a))?;
-            attempts += 1;
-        }
-        let k = self.current;
-        self.counts[k].with_array(|a| counts.copy_from_slice(a))?;
-        self.state[k].with_array(|a| states.copy_from_slice(a))?;
+        self.operator.apply_passive()?;
+        self.control[1].with_array(|a| control.copy_from_slice(a))?;
+        self.counts[1].with_array(|a| counts.copy_from_slice(a))?;
+        self.state[1].with_array(|a| states.copy_from_slice(a))?;
         Ok(finished(control))
     }
 }
 
 /// The context as the values of the QFunction's context.
-fn words(context: &RosenbrockContext) -> [f64; 4] {
-    [context.t1, context.rtol, context.atol, context.h_min]
+fn words(context: &RosenbrockContext) -> [f64; 5] {
+    [
+        context.t1,
+        context.rtol,
+        context.atol,
+        context.h_min,
+        context.attempts,
+    ]
 }
 
 /// Whether every cell of the controls `control` is done or failed.
@@ -305,6 +297,7 @@ impl BatchedCells {
             rtol: spec.rtol,
             atol: spec.atol,
             h_min: H_MIN,
+            attempts: f64::from(MAX_ATTEMPTS),
         };
         let batch = (n > 0).then(|| Batch::new(ceed, qmodel, &parameters, n, &context));
         let batch = agree(&comm, batch.transpose())?;
@@ -383,6 +376,7 @@ impl BatchedCells {
             rtol: self.rtol,
             atol: self.atol,
             h_min: H_MIN,
+            attempts: f64::from(MAX_ATTEMPTS),
         };
         let (states, parameters, links) = (&self.states, &self.parameters, &self.links);
         let blood_in: &[f64] = blood;
