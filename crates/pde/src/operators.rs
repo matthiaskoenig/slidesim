@@ -1,13 +1,13 @@
 //! Operators on a [`Discretization`]: transport (mass, reaction, advection and diffusion with
 //! coefficients at the quadrature points, stabilized by SUPG) and sources at quadrature points.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 
 use ceed::{CVector, EvalMode, FieldVector, Operator, QFunction};
 use petsc::{AsVec, AsVecMut, InsertMode, Matrix, ShellOperator, VecMut, VecRef, Vector};
 
-use crate::discretization::Shared;
+use crate::discretization::{Counts, Shared};
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{Discretization, PdeError, PointData, Result};
 
@@ -142,6 +142,9 @@ impl Transport {
         })?;
         op.set_field("v", r, b, FieldVector::Active)?;
         op.set_field("dv", r, b, FieldVector::Active)?;
+        if terms == Terms::Jacobian {
+            Counts::count(&shared.counts.jacobians);
+        }
         Ok(Transport {
             shift,
             terms,
@@ -262,6 +265,42 @@ impl Transport {
     /// out, like the dofs themselves; entries of rows owned by another process are sent to it.
     /// Collective.
     pub fn assemble(&self) -> Result<Matrix> {
+        let mut matrix = self.pattern()?;
+        self.reassemble(&mut matrix)?;
+        Ok(matrix)
+    }
+
+    /// The steady terms and the mass term of a Jacobian ([`Terms::Jacobian`]) assembled as two
+    /// AIJ matrices of the pattern of [`Transport::assemble`] (the mass term zero at the
+    /// backflow entries): `[steady, mass]`, of which the Jacobian at a shift `s` is
+    /// `steady + s mass`. From the values the assembly of the Jacobian keeps (see
+    /// [`Transport::reassemble`]), computed once for both. Collective.
+    ///
+    /// Errors: [`PdeError::Unsupported`] for the other terms.
+    pub fn assemble_terms(&self) -> Result<[Matrix; 2]> {
+        if self.terms != Terms::Jacobian {
+            return Err(PdeError::Unsupported(format!(
+                "the steady and mass terms of an operator of the terms {:?}: of a Jacobian only",
+                self.terms
+            )));
+        }
+        let mut steady = self.pattern()?;
+        let mut mass = steady.duplicate()?;
+        let affine = self.affine()?;
+        let backflow = self.backflow();
+        let mut values = affine.steady.clone();
+        values.extend(backflow.iter().map(|&(_, _, value)| value));
+        steady.set_values_coo(&values)?;
+        values.clear();
+        values.extend_from_slice(&affine.mass);
+        values.resize(values.len() + backflow.len(), 0.0);
+        mass.set_values_coo(&values)?;
+        Ok([steady, mass])
+    }
+
+    /// An AIJ matrix of the coordinate pattern of the operator, its values unset: the entries
+    /// of libCEED, then the backflow entries. Collective.
+    fn pattern(&self) -> Result<Matrix> {
         let (mut rows, mut cols) = self.op.assemble_coo_symbolic()?;
         // The backflow term after the entries of libCEED, in the order of `reassemble`.
         for &(i, j, _) in self.backflow() {
@@ -289,9 +328,13 @@ impl Transport {
         let (rows, cols) = (global(rows)?, global(cols)?);
         let (local_rows, global_rows) = shared.global_sizes;
         let comm = shared.dm.comm();
-        let mut matrix = Matrix::aij_coo(&comm, local_rows, global_rows, &rows, &cols)?;
-        self.reassemble(&mut matrix)?;
-        Ok(matrix)
+        Ok(Matrix::aij_coo(
+            &comm,
+            local_rows,
+            global_rows,
+            &rows,
+            &cols,
+        )?)
     }
 
     /// Assembles the operator with its current shift again into `matrix`, from
@@ -306,15 +349,8 @@ impl Transport {
     pub fn reassemble(&self, matrix: &mut Matrix) -> Result<()> {
         let mut values = match self.terms {
             Terms::Jacobian => {
-                let mut affine = self.affine.borrow_mut();
-                if affine.is_none() {
-                    // At shift 0 the Jacobian is the steady terms.
-                    *affine = Some(Affine {
-                        steady: self.coo_values([0.0, Terms::Jacobian.context()])?,
-                        mass: self.coo_values([1.0, Terms::Mass.context()])?,
-                    });
-                }
-                let affine = affine.as_ref().expect("assembled above");
+                Counts::count(&self.shared.counts.jacobian_assemblies);
+                let affine = self.affine()?;
                 affine
                     .steady
                     .iter()
@@ -330,6 +366,22 @@ impl Transport {
         values.extend(self.backflow().iter().map(|&(_, _, value)| value));
         matrix.set_values_coo(&values)?;
         Ok(())
+    }
+
+    /// The values of the coordinate entries of libCEED of the steady and the mass terms of a
+    /// Jacobian, computed at the first call.
+    fn affine(&self) -> Result<Ref<'_, Affine>> {
+        if self.affine.borrow().is_none() {
+            // At shift 0 the Jacobian is the steady terms.
+            let affine = Affine {
+                steady: self.coo_values([0.0, Terms::Jacobian.context()])?,
+                mass: self.coo_values([1.0, Terms::Mass.context()])?,
+            };
+            *self.affine.borrow_mut() = Some(affine);
+        }
+        Ok(Ref::map(self.affine.borrow(), |affine| {
+            affine.as_ref().expect("computed above")
+        }))
     }
 
     /// The values of the coordinate entries of libCEED of the operator with the context

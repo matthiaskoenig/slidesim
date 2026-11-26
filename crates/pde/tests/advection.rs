@@ -644,7 +644,8 @@ fn no_advection_defect_with_conservative_velocity() {
 /// A tracer carried past two holes which touch at a point (`pinched.msh` refined once: the
 /// rectangle [0, 4] x [0, 2] um, the holes walls, the flow from `left` to `right`), where the
 /// boundary touches itself: no advection defect at every step, and nothing leaves through the
-/// walls (to rounding) (`Mesh::load` splits the vertex of the point contact, so no flow passes there).
+/// walls (to rounding) (`Mesh::load` splits the vertex of the point contact, so no flow passes
+/// there).
 #[test]
 fn no_advection_defect_at_a_point_contact() {
     let p = Petsc::init(&[]).unwrap();

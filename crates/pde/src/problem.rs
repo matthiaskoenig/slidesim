@@ -2,7 +2,7 @@
 //! level, with the coefficients of the field at the quadrature points, and advection by the
 //! velocity of a [`Flow`] stabilized by SUPG.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use ceed::Ceed;
@@ -14,7 +14,7 @@ use petsc::{
     sys,
 };
 
-use crate::balance::{self, Parts};
+use crate::balance::{Balance, Setup, State};
 use crate::operators::PointValues;
 use crate::{
     Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result, SharedOperator,
@@ -37,9 +37,9 @@ const TOLERANCE: &str = "-ksp_rtol 1e-10";
 /// viewers.
 const CONCENTRATION_UNIT: &str = "mM";
 
-/// A change of the shift of the Jacobian, relative to the shift, beyond which the
-/// preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a fixed step computes
-/// shifts which differ in the last bits).
+/// A change of the shift of the Jacobian, relative to the shift, beyond which its matrices are
+/// assembled again and the preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a
+/// fixed step computes shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
 
 /// The net flow through a tag, relative to the largest net flow through a tag, above which the
@@ -165,8 +165,10 @@ pub struct Problem {
     /// without advection).
     edge_velocity: Vec<(Point, [[f64; 2]; 2])>,
     values: PointValues,
-    /// The operators of the levels of the Jacobian built, for tests of their reuse.
-    operator_builds: usize,
+    /// The operators of the mass balance, built at its first computation.
+    balance: OnceCell<Balance>,
+    /// The discretizations of the levels, coarse first, for tests of the reuse of operators.
+    levels: Vec<Discretization>,
     /// Dropped after the `TS`, which may read options until it is destroyed.
     _options: OptionsScope,
 }
@@ -317,17 +319,21 @@ impl Problem {
             })
             .chain(std::iter::once(Ok(SharedOperator(Rc::clone(&jacobian)))))
             .collect::<Result<Vec<_>>>()?;
-        // The only operators of the levels the problem builds.
-        let operator_builds = level_operators.len();
-        let steady = Transport::new(&disc, Rc::clone(&data), Terms::Steady)?;
+        // The steady terms and the mass term from the Jacobian, whose shift is still 0: there it
+        // is the steady terms.
+        let [steady, mass] = jacobian.borrow().assemble_terms()?;
         let mut lift = disc.global_vector()?;
-        steady.apply_local(&local_with_dirichlet(&disc, &dirichlet)?, &mut lift)?;
+        jacobian
+            .borrow()
+            .apply_local(&local_with_dirichlet(&disc, &dirichlet)?, &mut lift)?;
         let equation = Equation {
-            steady: steady.assemble()?,
+            steady,
             lift,
-            mass: Transport::new(&disc, Rc::clone(&data), Terms::Mass)?.assemble()?,
+            mass,
             data: Rc::clone(&data),
             jacobian,
+            built_shift: 0.0,
+            shifts: Vec::new(),
             multigrid: None,
             source: SourceField::stabilized(&disc, data)?,
             f: fine.source,
@@ -379,7 +385,8 @@ impl Problem {
             conditions,
             edge_tags,
             edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
-            operator_builds,
+            balance: OnceCell::new(),
+            levels,
             _options: options,
         })
     }
@@ -508,12 +515,35 @@ impl Problem {
         Ok(self.ts.linear_iterations()?)
     }
 
-    /// The number of operators of the levels of the Jacobian the problem built (one per level of
-    /// the mesh): built once, they are kept, with the multigrid preconditioner over them, for
-    /// every step. For tests.
+    /// The number of Jacobians built on the levels of the problem: one per level of the mesh,
+    /// built once and kept for every step. For tests.
     #[doc(hidden)]
     pub fn operator_builds(&self) -> usize {
-        self.operator_builds
+        self.levels
+            .iter()
+            .map(|level| level.shared().counts.jacobians.get())
+            .sum()
+    }
+
+    /// The number of multigrid preconditioners configured over the levels of the problem: one,
+    /// kept for every step (none if the options replace it). For tests.
+    #[doc(hidden)]
+    pub fn multigrid_builds(&self) -> usize {
+        self.disc.shared().counts.multigrids.get()
+    }
+
+    /// The number of assemblies of the Jacobian of the finest level into its matrix: one when
+    /// the multigrid is configured (at shift 0), then one per change of the shift
+    /// ([`Problem::jacobian_shifts`]). For tests.
+    #[doc(hidden)]
+    pub fn jacobian_assemblies(&self) -> usize {
+        self.disc.shared().counts.jacobian_assemblies.get()
+    }
+
+    /// The shifts the time integration evaluated the Jacobian at, in order. For tests.
+    #[doc(hidden)]
+    pub fn jacobian_shifts(&self) -> &[f64] {
+        &self.ts.context().shifts
     }
 
     /// The size of the next step (in s), before it is shortened to end at a requested time: the
@@ -578,7 +608,8 @@ impl Problem {
 
     /// The mass balance at the end of the last step, from the discrete equations: the rate of
     /// change of [`Problem::total_mass`], the sources, the inflow through each tag of the
-    /// boundary and the defect of the advecting velocity (see [`MassBalance`]). Collective.
+    /// boundary and the defect of the advecting velocity (see [`MassBalance`]). Its operators and
+    /// the edges of the boundary by tag are built at the first call and kept. Collective.
     ///
     /// Errors: [`PdeError::NotStepped`] before the first step, and before the first step after
     /// [`Problem::set_initial_condition`]; [`PdeError::Poisoned`] after a failed
@@ -599,21 +630,29 @@ impl Problem {
         c_t.set(0.0)?;
         self.disc.dm().global_to_local(&rate, &mut c_t)?;
         let c = self.local_solution()?;
-        let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
-        let fluxes: Vec<(&str, f64)> = self.fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
-        balance::mass_balance(&Parts {
-            disc: &self.disc,
-            free: &self.free,
-            data: &equation.data,
+        if self.balance.get().is_none() {
+            let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
+            let fluxes: Vec<(&str, f64)> =
+                self.fluxes.iter().map(|(t, q)| (t.as_str(), *q)).collect();
+            let balance = Balance::new(&Setup {
+                disc: &self.disc,
+                free: &self.free,
+                data: &equation.data,
+                conditions: &self.conditions,
+                dirichlet: &dirichlet,
+                fluxes: &fluxes,
+                edge_tags: &self.edge_tags,
+                edge_velocity: &self.edge_velocity,
+            })?;
+            self.balance.get_or_init(|| balance);
+        }
+        let balance = self.balance.get().expect("built above");
+        balance.compute(&State {
             f: &equation.f,
             porosity: &equation.porosity,
             c: &c,
             c_t: &c_t,
-            conditions: &self.conditions,
-            dirichlet: &dirichlet,
-            fluxes: &fluxes,
-            edge_tags: &self.edge_tags,
-            edge_velocity: &self.edge_velocity,
+            values: &self.values,
         })
     }
 
@@ -756,6 +795,13 @@ struct Equation {
     data: Rc<PointData>,
     /// The Jacobian `shift M_phi + A_w + K_(phi d) + M_(phi k)`, shared with its shell matrix.
     jacobian: Rc<RefCell<Transport>>,
+    /// The shift the preconditioner was built at, and with multigrid the matrices of the levels
+    /// assembled at, the Jacobian the Krylov method applies among them: within
+    /// [`SHIFT_TOLERANCE`] of the shift of the time integration.
+    built_shift: f64,
+    /// The shifts of the Jacobians of the time integration, in order (see
+    /// [`Problem::jacobian_shifts`]).
+    shifts: Vec<f64>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
     multigrid: Option<Multigrid>,
     /// `phi f` at the points, integrated.
@@ -834,18 +880,20 @@ impl Implicit for Equation {
         self.rate.axpy(1.0, u_t)?;
         self.rate.axpy(-shift, u)?;
         self.rate_shift = Some(shift);
-        let same = {
-            let mut jacobian = self.jacobian.borrow_mut();
-            // The operator applies the exact shift; the preconditioner follows changes beyond
-            // rounding.
-            let same = (shift - jacobian.shift).abs() <= SHIFT_TOLERANCE * shift.abs();
-            jacobian.shift = shift;
-            same
-        };
-        if !same && let Some(multigrid) = &mut self.multigrid {
-            multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
+        self.shifts.push(shift);
+        // The matrix-free operator applies the exact shift. The preconditioner, and with
+        // multigrid the assembled Jacobian the Krylov method applies, follow changes beyond
+        // rounding from the shift they were built at; comparing with the shift of the last call
+        // instead would let small changes add up unseen.
+        self.jacobian.borrow_mut().shift = shift;
+        let rebuild = (shift - self.built_shift).abs() > SHIFT_TOLERANCE * shift.abs();
+        if rebuild {
+            self.built_shift = shift;
+            if let Some(multigrid) = &mut self.multigrid {
+                multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
+            }
         }
-        Ok(!same)
+        Ok(rebuild)
     }
 }
 

@@ -517,8 +517,26 @@ fn reuse_problem(mesh: &Mesh) -> Problem {
     problem
 }
 
+/// The assemblies of the Jacobian of the finest level which the shifts of a time integration
+/// call for: one when the multigrid is configured (at shift 0), then one at each shift which
+/// differs from the last one assembled by more than rounding (`1e-12` relative).
+fn assemblies_for(shifts: &[f64]) -> usize {
+    let mut built = 0.0;
+    let mut assemblies = 1;
+    for &shift in shifts {
+        if (shift - built).abs() > 1e-12 * shift.abs() {
+            built = shift;
+            assemblies += 1;
+        }
+    }
+    assemblies
+}
+
 /// A problem keeps its operators and multigrid between steps and between calls of `step_to`:
-/// 20 steps in two calls build the operator of each level once.
+/// 20 steps in two calls build the Jacobian of each level and the multigrid once, and assemble
+/// the Jacobian again only where BDF changes the shift: at its start (a half step of BDF1, then
+/// the first step of BDF2 on the uneven history, then BDF2 with the fixed step), not at the
+/// second call of `step_to`.
 #[test]
 fn operators_are_built_once() {
     let p = Petsc::init(&[]).unwrap();
@@ -527,10 +545,73 @@ fn operators_are_built_once() {
     assert_eq!(levels, 3);
     let mut problem = reuse_problem(&mesh);
     assert_eq!(problem.operator_builds(), levels);
+    assert_eq!(problem.multigrid_builds(), 1);
+    assert_eq!(problem.jacobian_assemblies(), 1);
     problem.step_to(REUSE_HALF).unwrap();
+    let assemblies = problem.jacobian_assemblies();
     problem.step_to(REUSE_END).unwrap();
     assert_eq!(problem.steps().unwrap(), 20);
     assert_eq!(problem.operator_builds(), levels);
+    assert_eq!(problem.multigrid_builds(), 1);
+    // The start of BDF2 solves once more (the half step); then BDF2 with a fixed step, the
+    // shift 1.5 / dt from the second step on.
+    let shifts = problem.jacobian_shifts();
+    assert_eq!(shifts.len(), 21, "{shifts:?}");
+    for shift in &shifts[2..] {
+        assert!(
+            (shift - 1.5 / REUSE_DT).abs() <= 1e-12 / REUSE_DT,
+            "{shifts:?}"
+        );
+    }
+    assert_eq!(problem.jacobian_assemblies(), assemblies_for(shifts));
+    assert_eq!(problem.jacobian_assemblies(), 4, "{shifts:?}");
+    assert_eq!(problem.jacobian_assemblies(), assemblies, "{shifts:?}");
+}
+
+/// Fixed steps shortened to end at the requested times assemble the Jacobian again for each
+/// change of the shift, and only then: at the shortened steps and the steps after them.
+#[test]
+fn fixed_steps_reassemble_at_shortened_steps() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let mut problem = reuse_problem(&mesh);
+    // 0.25 does not divide 0.6 or 1.9: the last step to each is shortened.
+    for t in [0.6, 1.9, REUSE_END] {
+        problem.step_to(t).unwrap();
+    }
+    let shifts = problem.jacobian_shifts();
+    let assemblies = problem.jacobian_assemblies();
+    assert_eq!(assemblies, assemblies_for(shifts), "{shifts:?}");
+    // More than at the start of BDF2, fewer than the steps: none while the step stays.
+    assert!(
+        assemblies > 4 && assemblies < shifts.len(),
+        "{assemblies}: {shifts:?}"
+    );
+    assert_eq!(problem.operator_builds(), mesh.levels().len());
+    assert_eq!(problem.multigrid_builds(), 1);
+}
+
+/// Adaptive steps assemble the Jacobian again once per distinct shift.
+#[test]
+fn adaptive_steps_reassemble_once_per_shift() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 2);
+    let time = TimeSpec {
+        adaptive: true,
+        ..fixed(2.0, 0.01)
+    };
+    let mut problem =
+        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
+    problem.set_initial_condition(phi).unwrap();
+    problem.step_to(1.0).unwrap();
+    problem.step_to(2.0).unwrap();
+    let shifts = problem.jacobian_shifts();
+    let assemblies = problem.jacobian_assemblies();
+    assert_eq!(assemblies, assemblies_for(shifts), "{shifts:?}");
+    // The adaptor changes the step, and with it the shift, at most steps.
+    assert!(assemblies > shifts.len() / 2, "{assemblies}: {shifts:?}");
+    assert_eq!(problem.operator_builds(), mesh.levels().len());
+    assert_eq!(problem.multigrid_builds(), 1);
 }
 
 /// Steps in two calls of `step_to`, with the operators and the multigrid of the first call,
@@ -854,13 +935,15 @@ fn spatial_order_variable_coefficients_on_refinements_1_and_2() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 12] = [
+const PARALLEL_TESTS: [&str; 14] = [
     "mpi_world_has_the_expected_size",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",
     "fixed_steps_keep_their_size_after_requested_times",
     "operators_are_built_once",
+    "fixed_steps_reassemble_at_shortened_steps",
+    "adaptive_steps_reassemble_once_per_shift",
     "same_result_with_reuse",
     "spatial_order_p1_on_refinements_2_and_3",
     "spatial_order_variable_coefficients_on_refinements_1_and_2",

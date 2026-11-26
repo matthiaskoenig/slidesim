@@ -4,6 +4,7 @@
 use mesh::Mesh;
 use petsc::{Ksp, Matrix};
 
+use crate::discretization::Counts;
 use crate::{Discretization, PdeError, Result, SharedOperator};
 
 /// The iterations of a smoother, before and after the coarse correction each: a Chebyshev
@@ -132,6 +133,8 @@ pub fn configure_multigrid(
         }
     }
 
+    let counts = &discs[n - 1].shared().counts;
+    Counts::count(&counts.multigrids);
     let assembled = levels
         .iter()
         .map(|op| {

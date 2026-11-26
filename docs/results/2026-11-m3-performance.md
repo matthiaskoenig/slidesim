@@ -125,6 +125,39 @@ s; `MatMultTranspose` (restriction) 0.31 s, `MatResidual` 0.30 s, `KSPOrthogonal
 
 The other phases of a run, 4 processes: `setup` 0.9 s (0.7 s before; the assembly of the levels
 moved into it), `pressure` 0.9 s, `output` 1.1 s. On one process `output` (3.7 s for 6 output
-times) is now a third of the transport phase (9.7 s): the mass balance builds new libCEED
-operators at every output time, and the VTU files take 0.4 s. A later task with more output
-times should look at it.
+times) was a third of the transport phase (9.7 s): the mass balance built new libCEED operators
+at every output time. The next section fixes this.
+
+## Setup and output phases
+
+Two more changes, measured with `scripts/bench/transport.sh` against the state above in the same
+session (the machine was busier than in the measurements above: the same binary took 0.0579 s
+per step on 1 process instead of 0.0486). Fixed steps, seconds of each phase:
+
+| Phase | 1 process | 4 processes | 8 processes |
+| --- | ---: | ---: | ---: |
+| `setup` before / after | 2.28 / 1.88 | 1.05 / 0.88 | 0.84 / 0.78 |
+| `output` before / after | 4.05 / 3.08 | 1.29 / 0.95 | 0.91 / 0.62 |
+| `transport` s per step before / after | 0.0579 / 0.0562 | 0.0162 / 0.0161 | 0.0111 / 0.0103 |
+
+The adaptive runs show the same `setup` and `output` changes (1 process: 2.26 / 1.88 s and
+3.93 / 3.04 s).
+
+5. **Mass balance built once** (`crates/pde/src/balance.rs`, `crates/pde/src/problem.rs`). The
+   operators of the mass balance (steady terms, mass term, source and advection on the finest
+   level without essential boundaries), the loads of the flux conditions and the edges of the
+   boundary sorted to their entries are built at the first `Problem::mass_balance` and kept;
+   each later call applies them. On one process a balance took about 350 ms before, and the
+   output phase falls by 1 s. The balances are bitwise the same.
+6. **Steady and mass matrices from the Jacobian** (`crates/pde/src/operators.rs`,
+   `crates/petsc/src/matrix.rs`). The residual's steady and mass matrices of the finest level
+   are the two terms the Jacobian keeps for its reassembly (`Transport::assemble_terms`), in one
+   coordinate pattern shared by both (`Matrix::duplicate`), instead of two more operators, two
+   more libCEED assemblies and two more patterns. The lifting vector of the Dirichlet values is
+   the Jacobian applied at shift 0. On one process an assembly of the finest level took about
+   110 ms for the values and 85 ms for the pattern; `setup` falls by 0.4 s.
+
+What remains of `output` is the VTU files of PETSc's viewer (`VecView` 1.6 s of the 3.1 s on one
+process, 8 files) and the reductions of the summary. The rest of `setup` on one process: PETSc
+and the study 0.3 s, the mesh 0.3 s, the discretizations of the levels 0.2 s, the coefficients
+0.1 s, the assembly of the levels and the multigrid 0.6 s.

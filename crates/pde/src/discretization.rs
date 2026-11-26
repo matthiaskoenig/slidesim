@@ -1,6 +1,7 @@
 //! The P1 discretization of a mesh level: `PetscFE`, section, and libCEED restrictions, bases
 //! and quadrature geometry.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -85,6 +86,29 @@ pub(crate) struct Shared {
     cell_tags: Vec<Option<u32>>,
     /// The gradients of the basis functions on the reference cell (constant for P1).
     reference_gradients: Vec<[f64; 2]>,
+    /// Events on the discretization, for tests of the reuse of operators.
+    pub(crate) counts: Counts,
+}
+
+/// The number of times an event happened on a [`Discretization`], for tests of the reuse of
+/// operators.
+#[derive(Debug, Default)]
+pub(crate) struct Counts {
+    /// Jacobians built on it ([`crate::Transport::new`] of [`crate::Terms::Jacobian`]).
+    pub(crate) jacobians: Cell<usize>,
+    /// Multigrid preconditioners configured with it as their finest level
+    /// ([`crate::configure_multigrid`]).
+    pub(crate) multigrids: Cell<usize>,
+    /// Assemblies of a Jacobian on it into its matrix, at a shift
+    /// ([`crate::Transport::reassemble`], also by [`crate::Transport::assemble`]).
+    pub(crate) jacobian_assemblies: Cell<usize>,
+}
+
+impl Counts {
+    /// Counts one more `event`.
+    pub(crate) fn count(event: &Cell<usize>) {
+        event.set(event.get() + 1);
+    }
 }
 
 /// The quadrature degree of degree `degree` elements: mass matrices are integrated exactly.
@@ -348,6 +372,7 @@ impl Discretization {
                 area_tags,
                 cell_tags,
                 reference_gradients,
+                counts: Counts::default(),
             }),
         })
     }
