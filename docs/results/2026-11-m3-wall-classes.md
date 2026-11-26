@@ -8,6 +8,7 @@ slides (user's decision, below).
 
 The portal and central walls of a slide's mesh come from slideviz's lumen classes
 (`zonation_layers.py`, `lumen_class`):
+
 - a lumen beside a CYP2E1 valley (a periportal minimum) is portal;
 - a lumen beside a peak (a pericentral maximum) is central;
 - a lumen beside both or neither is other.
@@ -77,34 +78,34 @@ this reading all three dosed slides pass. The evidence:
   39 of 39 (500mg_m1), as pericentral necrosis around central veins should give.
 - **Portal lumina sit at the necrosis less often than chance:**
 
-  | dosed slide | share of the section within 50 um of necrotic pixels (chance) | portal lumina at the necrosis |
-  |---|---|---|
-  | 281mg_m1 | 57.0 % | 13 % (7 of 54) |
-  | 375mg_m1 | 79.3 % | 35 % (7 of 20) |
-  | 500mg_m1 | 46.8 % | 7 % (3 of 43) |
+    | dosed slide | share of the section within 50 um of necrotic pixels (chance) | portal lumina at the necrosis |
+    |---|---|---|
+    | 281mg_m1 | 57.0 % | 13 % (7 of 54) |
+    | 375mg_m1 | 79.3 % | 35 % (7 of 20) |
+    | 500mg_m1 | 46.8 % | 7 % (3 of 43) |
 
 - **The ratios fail low, not high:** 375mg_m1 and 500mg_m1 have fewer portal lumina per central
   lumen than any control. The user's explanation is that fewer valleys are found in necrotic
   tissue. The valley counts measured here only partly fit it:
 
-  | animal | valleys per mm^2 of section | peaks per mm^2 | valleys in necrosis | peaks in necrosis | section necrotic |
-  |---|---|---|---|---|---|
-  | 000mg_m1 | 6.15 | 6.57 | 0.0 % | 0.0 % | 0.0 % |
-  | 000mg_m2 | 6.46 | 6.67 | 0.0 % | 0.0 % | 0.1 % |
-  | 000mg_m3 | 6.89 | 7.08 | 0.6 % | 0.0 % | 0.0 % |
-  | 281mg_m1 | 8.92 | 9.49 | 22.0 % | 38.7 % | 29.6 % |
-  | 375mg_m1 | 7.32 | 7.55 | 36.4 % | 66.2 % | 50.3 % |
-  | 500mg_m1 | 7.32 | 8.59 | 11.6 % | 52.0 % | 21.4 % |
+    | animal | valleys per mm^2 of section | peaks per mm^2 | valleys in necrosis | peaks in necrosis | section necrotic |
+    |---|---|---|---|---|---|
+    | 000mg_m1 | 6.15 | 6.57 | 0.0 % | 0.0 % | 0.0 % |
+    | 000mg_m2 | 6.46 | 6.67 | 0.0 % | 0.0 % | 0.1 % |
+    | 000mg_m3 | 6.89 | 7.08 | 0.6 % | 0.0 % | 0.0 % |
+    | 281mg_m1 | 8.92 | 9.49 | 22.0 % | 38.7 % | 29.6 % |
+    | 375mg_m1 | 7.32 | 7.55 | 36.4 % | 66.2 % | 50.3 % |
+    | 500mg_m1 | 7.32 | 8.59 | 11.6 % | 52.0 % | 21.4 % |
 
-  - Over the whole section, the dosed slides have more valleys per mm^2 than the controls, not
-    fewer.
-  - Inside the necrosis there are fewer valleys than its area would hold: 36 % of the valleys
-    against 50 % of the section on 375mg_m1, and 12 % against 21 % on 500mg_m1.
-  - Most of the valleys that do lie inside the necrosis are probably not periportal minima,
-    because necrosis is pericentral.
+    - Over the whole section, the dosed slides have more valleys per mm^2 than the controls, not
+      fewer.
+    - Inside the necrosis there are fewer valleys than its area would hold: 36 % of the valleys
+      against 50 % of the section on 375mg_m1, and 12 % against 21 % on 500mg_m1.
+    - Most of the valleys that do lie inside the necrosis are probably not periportal minima,
+      because necrosis is pericentral.
 
-  So the valley set changes where the tissue is necrotic. This check does not show how that
-  lowers the number of portal lumina, and one slide per dose cannot settle it.
+    So the valley set changes where the tissue is necrotic. This check does not show how that
+    lowers the number of portal lumina, and one slide per dose cannot settle it.
 
 - **The ratio criterion is weak with three controls:** the controls' range is wide (1.32 to
   6.17), and 000mg_m3 has only 6 central lumina.

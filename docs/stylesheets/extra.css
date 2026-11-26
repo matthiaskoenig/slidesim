@@ -1,0 +1,34 @@
+/* the names in the first column of a table (fields, options, files) are not broken inside */
+.md-typeset table:not([class]) td:first-child code {
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+/* The results tables have many columns of numbers: tighter cells than the theme's
+   (.9375em 1.25em), so that most of them fit the width of the page without scrolling */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: .7em .8em;
+}
+
+/* Explanatory diagrams (`.sim-diagram`), inline SVG drawn with the tokens of the theme so one
+   diagram reads in both colour schemes. The overview and the methods overview use it. */
+.sim-diagram { width: 100%; height: auto; margin: .2rem 0 0;
+  --sd-ink: var(--md-default-fg-color, #1a1a19);
+  --sd-soft: var(--md-default-fg-color--light, #6b6b68);
+  --sd-line: var(--md-default-fg-color--lighter, #c3c3c0);
+  --sd-accent: #3f51b5;
+  color: var(--sd-line); }
+[data-md-color-scheme="slate"] .sim-diagram { --sd-accent: #7986cb; }
+.sim-diagram text { fill: var(--sd-ink); font-size: 13px; text-anchor: middle;
+  font-family: var(--md-text-font-family, system-ui), sans-serif; }
+.sim-diagram .sd-sub { fill: var(--sd-soft); font-size: 10.5px; }
+.sim-diagram .sd-title { fill: var(--sd-soft); font-size: 11.5px; letter-spacing: .02em; }
+.sim-diagram .sd-label { fill: var(--sd-soft); font-size: 11px; font-style: italic; text-anchor: start; }
+.sim-diagram .sd-contract { fill: var(--sd-accent); font-weight: 600; }
+.sim-diagram rect { fill: none; stroke: var(--sd-line); stroke-width: 1.5; }
+.sim-diagram .sd-artifact rect { stroke-dasharray: 4 3; }
+.sim-diagram .sd-instance rect { stroke: var(--sd-accent); stroke-width: 2; }
+.sim-diagram .sd-module rect { fill: color-mix(in srgb, var(--sd-accent) 8%, transparent); }
+.sim-diagram line, .sim-diagram path.sd-link { stroke: currentColor; stroke-width: 1.5; fill: none; }
+.sim-diagram .sd-call { stroke: var(--sd-accent); stroke-width: 2; }

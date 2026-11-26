@@ -124,8 +124,8 @@ the choice of g0 changes the result very little.
 
 ## References
 
-- [BioNumbers 100614] Diffusion coefficient of sucrose in water, from Vogel S, Life's Devices,
-  1989. https://bionumbers.hms.harvard.edu/bionumber.aspx?id=100614
+- [BioNumbers 100614] Diffusion coefficient of sucrose in water, from Vogel S,
+  Life's Devices, 1989. https://bionumbers.hms.harvard.edu/bionumber.aspx?id=100614
 - [Bonfiglio 2010] Bonfiglio A et al. Mathematical modeling of the circulation in the liver lobule.
   J Biomech Eng 2010. DOI 10.1115/1.4002563, PMID 21034152 (abstract; values via [Siggers 2014]).
 - [Debbaut 2012] Debbaut C et al. Perfusion characteristics of the human hepatic microcirculation

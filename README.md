@@ -6,6 +6,10 @@ On this geometry, PDEs describe transport (diffusion, perfusion along the sinuso
 and every mesh element carries an SBML ODE network which supplies local sources and sinks and
 which changes coefficients of the PDEs. The results are explored in a web viewer.
 
+Documentation: https://matthiaskoenig.github.io/slidesim/ (built from `docs/` with Zensical:
+`uvx --from zensical==0.1.3 zensical build --clean --strict`), with the results of the milestones
+on real slides.
+
 ## Requirements
 
 - Rust: the toolchain of `rust-toolchain.toml` (rustup installs it on the first `cargo` call in
