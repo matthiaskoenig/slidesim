@@ -338,6 +338,8 @@ fn restarts_at_inexact_times_build_no_preconditioner() {
         beyond += usize::from(shifts[1] / shifts[3] > 2.0);
     }
     eprintln!("{beyond} of 20 restarts with 3/dt beyond twice 1.5/dt by rounding");
+    // Not vacuous: some restarts are at times where rounding puts the shifts beyond the factor.
+    assert!(beyond > 0, "no restart with 3/dt beyond twice 1.5/dt");
     assert_eq!(problem.preconditioner_builds(), builds);
 }
 
