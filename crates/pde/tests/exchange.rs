@@ -258,7 +258,8 @@ fn uniform_change_with_resupply() {
 }
 
 /// A change of the solution between steps starts the time integration again (BDF2 starts with
-/// its first step again), and the rate of change is unknown until the next step.
+/// its first step again), and the rate of change is unknown until the next step. The start of
+/// BDF2 changes the shift, but within a factor of 2: it builds no preconditioner.
 #[test]
 fn modify_restarts_the_time_integration() {
     let p = Petsc::init(&[]).unwrap();
@@ -267,6 +268,8 @@ fn modify_restarts_the_time_integration() {
     let mut problem = problem(&mesh, &maps, &field(1.0, 1.0));
     problem.step_to(3.0 * DT).unwrap();
     let start = problem.jacobian_shifts().to_vec();
+    let builds = problem.preconditioner_builds();
+    assert_eq!(builds, 2);
     let uniform = problem.total_mass().unwrap();
     problem
         .modify(
@@ -286,6 +289,7 @@ fn modify_restarts_the_time_integration() {
     // The three steps after the change repeat the shifts of the first three: the start of
     // BDF2, then BDF2.
     assert_eq!(&shifts[start.len()..], &start[..], "{shifts:?}");
+    assert_eq!(problem.preconditioner_builds(), builds);
     assert!(problem.mass_balance().is_ok());
     // The change is in the solution: the field relaxes towards the Dirichlet value 1.
     let mass = problem.total_mass().unwrap();

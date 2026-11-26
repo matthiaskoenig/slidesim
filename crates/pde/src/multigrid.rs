@@ -46,10 +46,11 @@ pub struct Multigrid {
 /// discretizations of [`Discretization::hierarchy`] (each linked to the one before), each with
 /// the coefficients of its level (the same coefficient functions at its quadrature points) and
 /// the same terms and shift. The operator of `ksp` should be the operator `levels` ends with: as
-/// a shell matrix, or assembled, the matrix [`Multigrid::finest`]. For a solve on a coarser
-/// level `l`, `levels` holds the operators of the levels `0..=l` only. `symmetric` says whether the
-/// operators are symmetric positive definite (diffusion and reaction), or not (with advection).
-/// Collective.
+/// a shell matrix, or assembled, the matrix [`Multigrid::finest`] (or one of its pattern at a
+/// shift near the shift of the levels, which the multigrid then preconditions). For a solve on
+/// a coarser level `l`, `levels` holds the operators of the levels `0..=l` only. `symmetric` says
+/// whether the operators are symmetric positive definite (diffusion and reaction), or not (with
+/// advection). Collective.
 ///
 /// - Interpolation: `DMCreateInterpolation` from each level to the next, between the DMs of
 ///   the discretizations (nested P1 spaces; essential dofs are left out on both levels).
@@ -195,8 +196,9 @@ pub fn configure_multigrid(
 
 impl Multigrid {
     /// The operator of the finest level assembled, in step with the shift
-    /// ([`Multigrid::set_shift`]): for the solver itself, whose Krylov method then applies the
-    /// assembled matrix too.
+    /// ([`Multigrid::set_shift`]): the matrix of the preconditioner of the solver, which its
+    /// Krylov method may apply too, or (with [`petsc::Matrix::duplicate`]) the pattern of the
+    /// operator the Krylov method applies.
     pub fn finest(&self) -> &Matrix {
         self.assembled.last().expect("a multigrid has a level")
     }

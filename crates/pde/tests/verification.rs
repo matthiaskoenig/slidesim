@@ -518,25 +518,45 @@ fn reuse_problem(mesh: &Mesh) -> Problem {
 }
 
 /// The assemblies of the Jacobian of the finest level which the shifts of a time integration
-/// call for: one when the multigrid is configured (at shift 0), then one at each shift which
-/// differs from the last one assembled by more than rounding (`1e-12` relative).
-fn assemblies_for(shifts: &[f64]) -> usize {
-    let mut built = 0.0;
-    let mut assemblies = 1;
-    for &shift in shifts {
-        if (shift - built).abs() > 1e-12 * shift.abs() {
+/// call for, and the builds of the multigrid preconditioner at a new shift: the multigrid is
+/// configured at shift 0 (its finest level assembled); the Jacobian is assembled at each shift
+/// which differs from the last one assembled by more than rounding (`1e-12` relative); the
+/// preconditioner is built again (its finest level assembled too) at each shift beyond a factor
+/// of 2 either way from the shift it was built at, and at a shift other than it which the shift
+/// before has too.
+fn assemblies_for(shifts: &[f64]) -> (usize, usize) {
+    let differ = |a: f64, b: f64| (a - b).abs() > 1e-12 * a.abs();
+    let (mut assembled, mut built) = (None, 0.0);
+    let (mut assemblies, mut builds) = (1, 0);
+    for (k, &shift) in shifts.iter().enumerate() {
+        if assembled.is_none_or(|a: f64| differ(shift, a)) {
+            assembled = Some(shift);
+            assemblies += 1;
+        }
+        let kept = k > 0 && !differ(shift, shifts[k - 1]);
+        if !(0.5..=2.0).contains(&(shift / built)) || (kept && differ(shift, built)) {
             built = shift;
+            builds += 1;
             assemblies += 1;
         }
     }
-    assemblies
+    (assemblies, builds)
+}
+
+/// The assemblies of the Jacobian and the builds of the preconditioner of `problem`.
+fn assemblies(problem: &Problem) -> (usize, usize) {
+    (
+        problem.jacobian_assemblies(),
+        problem.preconditioner_builds(),
+    )
 }
 
 /// A problem keeps its operators and multigrid between steps and between calls of `step_to`:
 /// 20 steps in two calls build the Jacobian of each level and the multigrid once, and assemble
 /// the Jacobian again only where BDF changes the shift: at its start (a half step of BDF1, then
 /// the first step of BDF2 on the uneven history, then BDF2 with the fixed step), not at the
-/// second call of `step_to`.
+/// second call of `step_to`. The preconditioner is built at the first shift, which the second
+/// is within a factor of 2 of, and again at the shift of BDF2, which the steps keep.
 #[test]
 fn operators_are_built_once() {
     let p = Petsc::init(&[]).unwrap();
@@ -546,9 +566,9 @@ fn operators_are_built_once() {
     let mut problem = reuse_problem(&mesh);
     assert_eq!(problem.operator_builds(), levels);
     assert_eq!(problem.multigrid_builds(), 1);
-    assert_eq!(problem.jacobian_assemblies(), 1);
+    assert_eq!(assemblies(&problem), (1, 0));
     problem.step_to(REUSE_HALF).unwrap();
-    let assemblies = problem.jacobian_assemblies();
+    let half = assemblies(&problem);
     problem.step_to(REUSE_END).unwrap();
     assert_eq!(problem.steps().unwrap(), 20);
     assert_eq!(problem.operator_builds(), levels);
@@ -563,13 +583,15 @@ fn operators_are_built_once() {
             "{shifts:?}"
         );
     }
-    assert_eq!(problem.jacobian_assemblies(), assemblies_for(shifts));
-    assert_eq!(problem.jacobian_assemblies(), 4, "{shifts:?}");
-    assert_eq!(problem.jacobian_assemblies(), assemblies, "{shifts:?}");
+    assert_eq!(assemblies(&problem), assemblies_for(shifts));
+    assert_eq!(assemblies(&problem), (6, 2), "{shifts:?}");
+    assert_eq!(assemblies(&problem), half, "{shifts:?}");
 }
 
 /// Fixed steps shortened to end at the requested times assemble the Jacobian again for each
-/// change of the shift, and only then: at the shortened steps and the steps after them.
+/// change of the shift, and only then: at the shortened steps and the steps after them. The
+/// preconditioner is built again where a shortened step changes the shift by more than a
+/// factor of 2.
 #[test]
 fn fixed_steps_reassemble_at_shortened_steps() {
     let p = Petsc::init(&[]).unwrap();
@@ -580,18 +602,20 @@ fn fixed_steps_reassemble_at_shortened_steps() {
         problem.step_to(t).unwrap();
     }
     let shifts = problem.jacobian_shifts();
-    let assemblies = problem.jacobian_assemblies();
-    assert_eq!(assemblies, assemblies_for(shifts), "{shifts:?}");
+    let (assembled, builds) = assemblies(&problem);
+    assert_eq!((assembled, builds), assemblies_for(shifts), "{shifts:?}");
     // More than at the start of BDF2, fewer than the steps: none while the step stays.
     assert!(
-        assemblies > 4 && assemblies < shifts.len(),
-        "{assemblies}: {shifts:?}"
+        assembled > 5 && assembled < shifts.len(),
+        "{assembled}: {shifts:?}"
     );
+    assert!(builds < assembled / 2, "{builds}: {shifts:?}");
     assert_eq!(problem.operator_builds(), mesh.levels().len());
     assert_eq!(problem.multigrid_builds(), 1);
 }
 
-/// Adaptive steps assemble the Jacobian again once per distinct shift.
+/// Adaptive steps assemble the Jacobian again once per distinct shift, and build the
+/// preconditioner again only where the shift drifted by more than a factor of 2.
 #[test]
 fn adaptive_steps_reassemble_once_per_shift() {
     let p = Petsc::init(&[]).unwrap();
@@ -606,10 +630,14 @@ fn adaptive_steps_reassemble_once_per_shift() {
     problem.step_to(1.0).unwrap();
     problem.step_to(2.0).unwrap();
     let shifts = problem.jacobian_shifts();
-    let assemblies = problem.jacobian_assemblies();
-    assert_eq!(assemblies, assemblies_for(shifts), "{shifts:?}");
+    let (assembled, builds) = assemblies(&problem);
+    assert_eq!((assembled, builds), assemblies_for(shifts), "{shifts:?}");
     // The adaptor changes the step, and with it the shift, at most steps.
-    assert!(assemblies > shifts.len() / 2, "{assemblies}: {shifts:?}");
+    assert!(assembled > shifts.len() / 2, "{assembled}: {shifts:?}");
+    assert!(
+        builds >= 2 && builds < assembled / 4,
+        "{builds}: {shifts:?}"
+    );
     assert_eq!(problem.operator_builds(), mesh.levels().len());
     assert_eq!(problem.multigrid_builds(), 1);
 }

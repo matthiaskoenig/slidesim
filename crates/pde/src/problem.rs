@@ -38,10 +38,22 @@ const TOLERANCE: &str = "-ksp_rtol 1e-10";
 /// viewers.
 const CONCENTRATION_UNIT: &str = "mM";
 
-/// A change of the shift of the Jacobian, relative to the shift, beyond which its matrices are
-/// assembled again and the preconditioner is rebuilt. Smaller changes are rounding (BDF2 with a
-/// fixed step computes shifts which differ in the last bits).
+/// A change of the shift of the Jacobian, relative to the shift, beyond which its matrix is
+/// assembled again (and without multigrid, its preconditioner rebuilt). Smaller changes are
+/// rounding (BDF2 with a fixed step computes shifts which differ in the last bits).
 const SHIFT_TOLERANCE: f64 = 1e-12;
+
+/// The factor by which the shift of the Jacobian may differ from the shift the multigrid
+/// preconditioner was built at, either way, for a Jacobian whose shift the step before did not
+/// have: the preconditioner is kept for it. The multigrid of the shift `s_b` preconditions the
+/// Jacobian of `s` nearly as well while `s / s_b` is within a factor of 2 (for symmetric
+/// operators the eigenvalues of `J(s_b)^-1 J(s)` lie between 1 and `s / s_b`). The factor spans
+/// the three shifts of a start of BDF2 with the step `dt` (`2 / dt` for the half step, `3 / dt`,
+/// then `1.5 / dt`), so that a restart of the time integration ([`Problem::modify`]) builds no
+/// preconditioner, and adaptive steps, whose shift changes at most steps, build one only when
+/// the step drifted by a factor of 2. A shift which two Jacobians in a row have (fixed steps)
+/// gets its own preconditioner.
+const PRECONDITIONER_RANGE: f64 = 2.0;
 
 /// The net flow through a tag, relative to the largest net flow through a tag, above which the
 /// tag has inflow ([`PdeError::Inflow`]).
@@ -123,14 +135,17 @@ pub struct Exchanged {
 /// algebraic multigrid, alone). The operators of libCEED ([`Transport`]) are built once and
 /// assembled into sparse matrices, which the steps apply: an assembled matrix is several times
 /// cheaper to apply than its operator, and equals it up to rounding. The Jacobian is the
-/// assembled operator of the finest level of the multigrid ([`Multigrid::finest`]); if the
-/// options replace the multigrid preconditioner, the matrix-free operator. The residual applies
-/// the assembled steady terms and mass matrix, with the steady terms of the Dirichlet values
-/// computed once, and the source integrated matrix-free when it changed
-/// ([`Problem::source_mut`]). A step changes the shift only, on every level; when the shift changes
-/// the operators of the levels are assembled again and the preconditioner is rebuilt (the
-/// smoothers and the coarse solver set up again). The operators, their matrices and the
-/// multigrid are kept from step to step and from one [`Problem::step_to`] to the next.
+/// assembled operator of the finest level, at the shift of the step, in the pattern of the
+/// finest level of the multigrid ([`Multigrid::finest`]); if the options replace the multigrid
+/// preconditioner, the matrix-free operator. The residual applies the assembled steady terms and
+/// mass matrix, with the steady terms of the Dirichlet values computed once, and the source
+/// integrated matrix-free when it changed ([`Problem::source_mut`]). A step changes the shift only:
+/// when it changes, the Jacobian is assembled again; the multigrid preconditioner stays as it was
+/// built while the shift is within a factor of 2 of its shift, and is built again at the new shift
+/// beyond, and at a shift two steps in a row have (the operators of the levels assembled again,
+/// the smoothers and the coarse solver set up again). The operators, their
+/// matrices and the multigrid are kept from step to step and from one [`Problem::step_to`] to the
+/// next.
 ///
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
@@ -352,8 +367,10 @@ impl Problem {
             data: Rc::clone(&data),
             jacobian,
             built_shift: 0.0,
+            preconditioner_builds: 0,
             shifts: Vec::new(),
             multigrid: None,
+            krylov: None,
             source: SourceField::stabilized(&disc, data)?,
             f: fine.source,
             porosity: fine.porosity,
@@ -384,8 +401,13 @@ impl Problem {
         ts.set_from_options()?;
         // Unless the options replaced it.
         if ksp.pc()?.type_name()? == "mg" {
-            ts.set_jacobian_matrices(multigrid.finest(), multigrid.finest())?;
-            ts.context_mut().multigrid = Some(multigrid);
+            // The Jacobian at the shift of the step, of the pattern of the finest level of the
+            // multigrid, which preconditions it at its own shift.
+            let krylov = multigrid.finest().duplicate()?;
+            ts.set_jacobian_matrices(&krylov, multigrid.finest())?;
+            let equation = ts.context_mut();
+            equation.multigrid = Some(multigrid);
+            equation.krylov = Some((krylov, None));
         }
 
         let mut u = disc.global_vector()?;
@@ -618,12 +640,23 @@ impl Problem {
         self.disc.shared().counts.multigrids.get()
     }
 
-    /// The number of assemblies of the Jacobian of the finest level into its matrix: one when
-    /// the multigrid is configured (at shift 0), then one per change of the shift
-    /// ([`Problem::jacobian_shifts`]). For tests.
+    /// The number of assemblies of the Jacobian of the finest level into a matrix: one when the
+    /// multigrid is configured (its finest level, at shift 0), then one per change of the shift
+    /// ([`Problem::jacobian_shifts`]), and one per build of the multigrid preconditioner at a
+    /// new shift ([`Problem::preconditioner_builds`]). For tests.
     #[doc(hidden)]
     pub fn jacobian_assemblies(&self) -> usize {
         self.disc.shared().counts.jacobian_assemblies.get()
+    }
+
+    /// The number of times the preconditioner was built at a new shift: with multigrid, when the
+    /// shift left the factor 2 either way around the shift it was built at
+    /// (including the first Jacobian, as the multigrid is configured at shift 0), or two
+    /// Jacobians in a row had a shift other than it; without, at every change of the shift. For
+    /// tests.
+    #[doc(hidden)]
+    pub fn preconditioner_builds(&self) -> usize {
+        self.ts.context().preconditioner_builds
     }
 
     /// The shifts the time integration evaluated the Jacobian at, in order. For tests.
@@ -1016,14 +1049,20 @@ struct Equation {
     /// The Jacobian `shift M_phi + A_w + K_(phi d) + M_(phi k)`, shared with its shell matrix.
     jacobian: Rc<RefCell<Transport>>,
     /// The shift the preconditioner was built at, and with multigrid the matrices of the levels
-    /// assembled at, the Jacobian the Krylov method applies among them: within
-    /// [`SHIFT_TOLERANCE`] of the shift of the time integration.
+    /// assembled at: with multigrid within the factor [`PRECONDITIONER_RANGE`] of the shift of
+    /// the time integration, else within [`SHIFT_TOLERANCE`].
     built_shift: f64,
+    /// The number of builds of the preconditioner at a new shift.
+    preconditioner_builds: usize,
     /// The shifts of the Jacobians of the time integration, in order (see
     /// [`Problem::jacobian_shifts`]).
     shifts: Vec<f64>,
     /// The multigrid preconditioner of the Jacobian, unless the options chose another one.
     multigrid: Option<Multigrid>,
+    /// With multigrid, the Jacobian assembled, which the Krylov method applies, and the shift
+    /// it was assembled at (none before the first): within [`SHIFT_TOLERANCE`] of the shift of
+    /// the time integration.
+    krylov: Option<(Matrix, Option<f64>)>,
     /// `phi f` at the points, integrated.
     source: SourceField,
     /// The source `f` at the points (see [`Problem::source_mut`]).
@@ -1103,17 +1142,38 @@ impl Implicit for Equation {
         self.rate.axpy(-shift, u)?;
         self.rate_shift = Some(shift);
         self.shifts.push(shift);
-        // The matrix-free operator applies the exact shift. The preconditioner, and with
-        // multigrid the assembled Jacobian the Krylov method applies, follow changes beyond
-        // rounding from the shift they were built at; comparing with the shift of the last call
-        // instead would let small changes add up unseen.
+        // The matrix-free operator applies the exact shift.
         self.jacobian.borrow_mut().shift = shift;
-        let rebuild = (shift - self.built_shift).abs() > SHIFT_TOLERANCE * shift.abs();
+        // The changes are compared with the shift the matrices were built at, not with the shift
+        // of the last call, which would let small changes add up unseen.
+        let changed = |built: f64| (shift - built).abs() > SHIFT_TOLERANCE * shift.abs();
+        let rebuild = match (&mut self.multigrid, &mut self.krylov) {
+            (Some(multigrid), Some((krylov, assembled))) => {
+                if assembled.is_none_or(changed) {
+                    self.jacobian
+                        .borrow()
+                        .reassemble(krylov)
+                        .map_err(PdeError::into_petsc)?;
+                    *assembled = Some(shift);
+                }
+                let ratio = shift / self.built_shift;
+                let near = (1.0 / PRECONDITIONER_RANGE..=PRECONDITIONER_RANGE).contains(&ratio);
+                // The shift of the Jacobian before this one (pushed above).
+                let kept = (self.shifts.len() >= 2)
+                    .then(|| self.shifts[self.shifts.len() - 2])
+                    .is_some_and(|before| !changed(before));
+                let rebuild = !near || (kept && changed(self.built_shift));
+                if rebuild {
+                    multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
+                }
+                rebuild
+            }
+            // The preconditioner the options chose, of the matrix-free operator.
+            _ => changed(self.built_shift),
+        };
         if rebuild {
             self.built_shift = shift;
-            if let Some(multigrid) = &mut self.multigrid {
-                multigrid.set_shift(shift).map_err(PdeError::into_petsc)?;
-            }
+            self.preconditioner_builds += 1;
         }
         Ok(rebuild)
     }
