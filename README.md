@@ -74,7 +74,9 @@ boundary tag, and the `advection_defect` of the velocity).
 
 A study with a `perfusion` section solves the Darcy flow first (maps named by the study are read
 from the scene) and also writes `pressure.vtu` and `velocity.vtu`; `summary.json` then has the flow
-through each pressure tag (`perfusion.tag_flows`). `testdata/studies/lobule_toy` is an example:
+through each pressure tag (`perfusion.tag_flows`). A part of the mesh which no pressure tag reaches
+(an island bounded by walls alone) has pressure 0 and no flow; `perfusion.pressure_islands` counts
+these parts and gives their area. `testdata/studies/lobule_toy` is an example:
 
 ```bash
 target/debug/slidesim run testdata/studies/lobule_toy/study.json --out out

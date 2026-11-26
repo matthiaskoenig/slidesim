@@ -19,6 +19,13 @@ Run from the repository root:
   (11), `right` (12), `rim` (13, top and bottom), `hole_wall` (14, both holes) and `inner_line`
   (15, the segment from (3.5, 0.5) to (3.5, 1.5) inside the domain, embedded in its mesh). Mesh
   size about `PINCHED_SIZE` um.
+- `island.msh`: the rectangle [0, 6] x [0, 4] um with the square hole [2, 4] x [1, 3], and in the
+  hole a floating island, the square [2.5, 3.5] x [1.5, 2.5] (`ISLAND_OUTER`, `ISLAND_HOLE`,
+  `ISLAND`): area `tissue` (3, both parts), edges `portal_wall` (11, left), `central_wall` (12,
+  right), `section_edge` (13, top and bottom) and `vessel_wall` (14, the boundaries of the hole
+  and of the island). No pressure wall reaches the island. Mesh size about `ISLAND_SIZE` um.
+- `island_removed.msh`: `island.msh` without the island: the same mesh of the rest, its nodes and
+  triangles in the same order.
 
 Written by hand, not by this script:
 
@@ -45,6 +52,11 @@ LOBULE_PORTAL = (90.0, 90.0)
 LOBULE_CENTRAL = (310.0, 310.0)
 LOBULE_SIZE = 20.0
 PINCHED_SIZE = 0.25
+ISLAND_SIZE = 0.25
+# The outer rectangle, the hole and the island of `island.msh`: corners (x0, y0, x1, y1), um.
+ISLAND_OUTER = (0.0, 0.0, 6.0, 4.0)
+ISLAND_HOLE = (2.0, 1.0, 4.0, 3.0)
+ISLAND = (2.5, 1.5, 3.5, 2.5)
 
 
 def start(name: str, size: float) -> None:
@@ -161,8 +173,49 @@ def pinched() -> None:
     finish("pinched")
 
 
+def island() -> None:
+    start("island", ISLAND_SIZE)
+    geo = gmsh.model.geo
+
+    def loop(x0, y0, x1, y1):
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        points = [geo.addPoint(x, y, 0.0, ISLAND_SIZE) for x, y in corners]
+        lines = [geo.addLine(a, b) for a, b in zip(points, points[1:] + points[:1])]
+        return lines, geo.addCurveLoop(lines)
+
+    # The rest first, so that its nodes and triangles come first.
+    outer, outer_loop = loop(*ISLAND_OUTER)
+    hole, hole_loop = loop(*ISLAND_HOLE)
+    rest = geo.addPlaneSurface([outer_loop, hole_loop])
+    rim, rim_loop = loop(*ISLAND)
+    floating = geo.addPlaneSurface([rim_loop])
+    geo.synchronize()
+    gmsh.model.mesh.generate(2)
+    bottom, right, top, left = outer
+    # One mesh, written twice: with the island, and without it (only the elements of physical
+    # groups are written, and PETSc ignores nodes of no element).
+    for name, surfaces, walls in (
+        ("island", [rest, floating], hole + rim),
+        ("island_removed", [rest], hole),
+    ):
+        gmsh.model.removePhysicalGroups()
+        gmsh.model.addPhysicalGroup(2, surfaces, 3, "tissue")
+        for tag, (wall, curves) in enumerate(
+            (
+                ("portal_wall", [left]),
+                ("central_wall", [right]),
+                ("section_edge", [bottom, top]),
+                ("vessel_wall", walls),
+            ),
+            start=11,
+        ):
+            gmsh.model.addPhysicalGroup(1, curves, tag, wall)
+        gmsh.write(str(HERE / f"{name}.msh"))
+    gmsh.finalize()
+
 if __name__ == "__main__":
     unit_square()
     tissue_small()
     lobule_toy()
     pinched()
+    island()

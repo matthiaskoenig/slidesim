@@ -16,8 +16,8 @@ use crate::fluxes::Fluxes;
 use crate::operators::PointValues;
 use crate::qfunctions::{self as qf, GEOMETRY_2D_SIZE, TRANSPORT_DATA_SIZE};
 use crate::{
-    Discretization, PdeError, PointData, Result, SharedOperator, SourceField, Terms, Transport,
-    configure_multigrid,
+    Discretization, Floating, PdeError, PointData, Result, SharedOperator, SourceField, Terms,
+    Transport, configure_multigrid,
 };
 
 /// The options prefix of the pressure solves.
@@ -100,6 +100,12 @@ const VELOCITY_UNIT: &str = "um/s";
 /// listed last, whose pressure it has. The flows of the tags add up to the inflow through the
 /// whole boundary, `-int f` (zero for [`Flow::solve`]), to the tolerance of the solve.
 ///
+/// Islands: a connected component of the mesh (cells joined through their edges) which no
+/// pressure tag reaches, for example a part of the domain bounded by walls alone, has a pressure
+/// determined up to a constant only. Its pressure is 0, every dof of it essential
+/// ([`Discretization::pinned_hierarchy`]): no flow, a velocity and edge fluxes of exactly zero
+/// there, and the flow elsewhere as without it. [`Flow::islands`] tells their number and area.
+///
 /// Processes: as for [`crate::Problem`], the results depend on the number of processes up to
 /// the tolerance of the linear solves: with the defaults, L2 norms, edge fluxes and flows
 /// through the tags on 1, 2 and 3 processes agree within about `2e-12` relative on the unit
@@ -125,6 +131,8 @@ pub struct Flow {
     /// level, coarse first, sorted by edge.
     edge_velocity: Vec<Vec<(Point, [[f64; 2]; 2])>>,
     tag_flows: Vec<(String, f64)>,
+    /// The islands of the finest level.
+    islands: Floating,
     values: PointValues,
 }
 
@@ -145,7 +153,8 @@ impl Flow {
     /// `perfusion` is valid (`contracts::Study::validate`): positive viscosity, permeabilities
     /// and `g0`.
     ///
-    /// Errors: [`PdeError::Unsupported`] without pressure boundaries (the pressure is not
+    /// Errors: [`PdeError::Unsupported`] without pressure boundaries, or (on every process) if
+    /// no connected component of the mesh has a point of a pressure tag (the pressure is not
     /// determined), for a viscosity or `g0` which is not positive, or (on every process) for a
     /// pressure tag whose flow cannot leave through edges of the boundary of the tag (a tag on
     /// edges inside the domain, on cells or on vertices alone), naming the tag: the
@@ -220,7 +229,7 @@ impl Flow {
         let _options = OptionsScope::new(PREFIX, &[DEFAULTS, petsc_options])?;
 
         let essential: Vec<&str> = boundaries.iter().map(|(tag, _)| tag.as_str()).collect();
-        let levels = Discretization::hierarchy(mesh, ceed, 1, &essential)?;
+        let levels = Discretization::pinned_hierarchy(mesh, ceed, 1, &essential)?;
         let finest = levels.len() - 1;
         // The coefficients of the finest level first: a map error names a point of the level of
         // the pressure, where there is one.
@@ -282,6 +291,7 @@ impl Flow {
         )?;
         Ok(Flow {
             values: PointValues::new(&disc)?,
+            islands: disc.floating(),
             disc,
             free,
             pressure,
@@ -334,6 +344,13 @@ impl Flow {
     /// equation at the dofs the tag constrains (see [`Flow`]). The same on every process.
     pub fn tag_flows(&self) -> &[(String, f64)] {
         &self.tag_flows
+    }
+
+    /// The islands of the mesh: its connected components which no pressure tag reaches, whose
+    /// pressure is 0 and which have no flow (see [`Flow`]); their number and area (um^2). The
+    /// same on every process.
+    pub fn islands(&self) -> Floating {
+        self.islands
     }
 
     /// The conservative velocity (um/s, see [`Flow::velocity`]) at the two Gauss points of each

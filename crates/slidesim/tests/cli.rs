@@ -266,7 +266,11 @@ fn max_relative_difference(a: &[f64], b: &[f64]) -> f64 {
 fn lobule_toy_flows_from_portal_to_central() {
     let out = scratch("lobule_toy_flows_from_portal_to_central");
     assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
-    let flows = &summary_json(&out)["perfusion"]["tag_flows"];
+    let summary = summary_json(&out);
+    let islands = &summary["perfusion"]["pressure_islands"];
+    assert_eq!(islands["count"].as_u64(), Some(0), "{islands}");
+    assert_eq!(islands["area_um2"].as_f64(), Some(0.0), "{islands}");
+    let flows = &summary["perfusion"]["tag_flows"];
     let portal = flows["portal_wall"].as_f64().unwrap();
     let central = flows["central_wall"].as_f64().unwrap();
     assert!(portal > 0.0, "{flows}");
@@ -323,6 +327,69 @@ fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
         .collect();
     assert!(near.len() > 10, "{}", near.len());
     near.iter().sum::<f64>() / near.len() as f64
+}
+
+/// The study of `lobule_study` on `island.msh` (whose rest has `portal_wall` and `central_wall`,
+/// and an island of 1 um^2 bounded by `vessel_wall` alone, which no pressure reaches), with the
+/// zonation map of `lobule_toy` scaled over it, written into `dir` with its scene.
+fn island_study(dir: &Path) -> PathBuf {
+    let lobule = lobule_study();
+    let mut scene: Value = serde_json::from_str(
+        &std::fs::read_to_string(lobule.with_file_name("scene.json")).unwrap(),
+    )
+    .unwrap();
+    let testdata = lobule.parent().unwrap().join("../..");
+    scene["mesh"]["path"] = Value::from(testdata.join("meshes/island.msh").display().to_string());
+    let map = &mut scene["maps"][0];
+    map["path"] = Value::from(lobule.with_file_name("zonation.zarr").display().to_string());
+    // 106 pixels over [-0.1, 6.3] um.
+    map["um_per_px"] = Value::from(0.0625);
+    map["origin_um"] = serde_json::json!([-0.1, -0.1]);
+    let scene_path = dir.join("scene.json");
+    std::fs::write(&scene_path, scene.to_string()).unwrap();
+    let mut study: Value =
+        serde_json::from_str(&std::fs::read_to_string(&lobule).unwrap()).unwrap();
+    study["scene"] = Value::from(scene_path.display().to_string());
+    study["time"] =
+        serde_json::json!({"end": 0.1, "dt": 0.05, "adaptive": false, "outputs": [0.0, 0.1]});
+    let path = dir.join("island_study.json");
+    std::fs::write(&path, study.to_string()).unwrap();
+    path
+}
+
+/// A floating island of the mesh, which no pressure boundary reaches, has no flow: the run
+/// succeeds, reports it in `summary.json` (`perfusion.pressure_islands`: one, its area) and says
+/// so in one line.
+#[test]
+fn island_reports_pressure_islands() {
+    let dir = scratch("island_reports_pressure_islands");
+    let out = dir.join("out");
+    let run = slidesim(&args(&island_study(&dir), &out, &[]));
+    assert_success(&run);
+    let islands = &summary_json(&out)["perfusion"]["pressure_islands"];
+    assert_eq!(islands["count"].as_u64(), Some(1), "{islands}");
+    let area = islands["area_um2"].as_f64().unwrap();
+    assert!((area - 1.0).abs() < 1e-12, "{islands}");
+    let lines: Vec<&str> = run
+        .stdout
+        .lines()
+        .filter(|line| line.contains("pressure island"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", run.stdout);
+    assert!(lines[0].contains("1 pressure island "), "{}", lines[0]);
+    // The mass balance of the tracer stays exact: the island exchanges nothing by advection.
+    let portal = summary_json(&out)["perfusion"]["tag_flows"]["portal_wall"]
+        .as_f64()
+        .unwrap();
+    assert!(portal > 0.0);
+    for terms in balances(&out, "sucrose")[1..]
+        .iter()
+        .map(|b| b.as_ref().unwrap())
+    {
+        assert_closes(terms);
+        let defect = term(terms, "advection_defect");
+        assert!(defect.abs() < 1e-10 * portal, "{defect} against {portal}");
+    }
 }
 
 /// The phases of a run in `summary.json`, the wall time of process 0 in each: together the time

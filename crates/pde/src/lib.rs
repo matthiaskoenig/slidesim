@@ -36,6 +36,7 @@
 
 mod balance;
 mod coefficients;
+mod components;
 mod discretization;
 mod flow;
 mod fluxes;
@@ -45,7 +46,7 @@ mod problem;
 
 pub use balance::{BoundaryInflow, MassBalance, UNTAGGED};
 pub use coefficients::{PointData, coefficient_values};
-pub use discretization::Discretization;
+pub use discretization::{Discretization, Floating};
 pub use flow::Flow;
 pub use multigrid::{Multigrid, configure_multigrid};
 pub use operators::{SharedOperator, SourceField, Terms, Transport};

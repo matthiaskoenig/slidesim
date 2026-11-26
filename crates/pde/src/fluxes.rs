@@ -63,8 +63,9 @@
 
 use std::collections::BTreeSet;
 
-use petsc::{Dm, Point, Sf, Vector};
+use petsc::{Dm, Point, Vector};
 
+use crate::components::Overlap;
 use crate::{Discretization, PdeError, Result};
 
 /// The equilibrated fluxes of a level, and the geometry of its local cells for their
@@ -358,15 +359,17 @@ impl Patches {
     /// The patches of the level `level` (a DM of a level, with its labels) with the records
     /// `records` of its local cells and the pressure tags `tags`. Collective.
     fn new(level: &Dm, records: &[Record], tags: &[&str]) -> Result<Patches> {
-        let cells = level.height_stratum(0)?;
-        let base = level.clone_mesh()?;
-        let (dm, local, records) = match base.distribute_overlap(1)? {
-            None => (base, (0..cells.len()).map(Some).collect(), records.to_vec()),
-            Some((dm, sf)) => {
-                let (local, overlap_records) = migrate(&dm, &sf, &cells, records)?;
-                (dm, local, overlap_records)
+        let num_local = level.height_stratum(0)?.len();
+        let overlap = Overlap::new(level)?;
+        // The records of the cells of the overlap, from the processes of the cells.
+        let mut migrated = vec![[0.0; RECORD]; overlap.local().len()];
+        for k in 0..RECORD {
+            let column: Vec<f64> = records.iter().map(|record| record[k]).collect();
+            for (record, value) in migrated.iter_mut().zip(overlap.values(&column)?) {
+                record[k] = value;
             }
-        };
+        }
+        let (dm, local) = overlap.into_parts();
         let mut marked = Vec::with_capacity(tags.len());
         for &tag in tags {
             let mut points = BTreeSet::new();
@@ -379,9 +382,9 @@ impl Patches {
             first_cell: dm.height_stratum(0)?.start,
             dm,
             local,
-            records,
+            records: migrated,
             tags: marked,
-            num_local: cells.len(),
+            num_local,
         })
     }
 
@@ -699,43 +702,4 @@ impl Patches {
             moments[c][e_out][j_out] = mu[i + 1];
         }
     }
-}
-
-/// The local cells of `dm` (the level of `cells`, distributed with an overlap of one cell by
-/// `sf`) which are local cells of the level, and the records of the cells of `dm`, broadcast
-/// from the records `records` of the local cells of the level of every process. Collective.
-fn migrate(
-    dm: &Dm,
-    sf: &Sf,
-    cells: &std::ops::Range<Point>,
-    records: &[Record],
-) -> Result<(Vec<Option<usize>>, Vec<Record>)> {
-    let overlap_cells = dm.height_stratum(0)?;
-    let (roots, graph) = sf.graph()?;
-    let chart = graph
-        .iter()
-        .map(|l| l.leaf as usize + 1)
-        .chain([overlap_cells.end as usize])
-        .max()
-        .unwrap_or(0);
-    let mut root = vec![0.0; roots];
-    let mut leaf = vec![0.0; chart];
-    let mut migrated = vec![[0.0; RECORD]; overlap_cells.len()];
-    for k in 0..RECORD {
-        for (c, record) in records.iter().enumerate() {
-            root[cells.start as usize + c] = record[k];
-        }
-        sf.bcast(&root, &mut leaf)?;
-        for (c, record) in migrated.iter_mut().enumerate() {
-            record[k] = leaf[overlap_cells.start as usize + c];
-        }
-    }
-    let rank = dm.comm().rank();
-    let mut local = vec![None; overlap_cells.len()];
-    for l in &graph {
-        if l.rank == rank && overlap_cells.contains(&l.leaf) && cells.contains(&l.root) {
-            local[(l.leaf - overlap_cells.start) as usize] = Some((l.root - cells.start) as usize);
-        }
-    }
-    Ok((local, migrated))
 }

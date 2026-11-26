@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use common::{PIXELS, Scratch, ceed, read_maps, unit_square};
@@ -873,6 +874,184 @@ fn pressure_tag_inside_the_domain_is_error() {
     assert!(message.contains("edges of the boundary"), "{message}");
 }
 
+/// The island of `island.msh`, um: the square [2.5, 3.5] x [1.5, 2.5], alone in a hole of the
+/// rest of the mesh ([2, 4] x [1, 3]), so every point of the mesh in it is of the island.
+const ISLAND: [[f64; 2]; 2] = [[2.5, 1.5], [3.5, 2.5]];
+
+fn on_island([x, y]: [f64; 2]) -> bool {
+    (ISLAND[0][0]..=ISLAND[1][0]).contains(&x) && (ISLAND[0][1]..=ISLAND[1][1]).contains(&y)
+}
+
+/// The anisotropic oblique flow (map `x + 0.5 y`) from `portal_wall` (1 Pa) to `central_wall`
+/// (0 Pa) through the mesh `file` (`island.msh` or `island_removed.msh`) refined once.
+fn island_flow(p: &Petsc, test: &str, file: &str) -> (Mesh, Flow) {
+    let mesh = common::fixture_mesh(p, file, 1);
+    let scratch = Scratch::new(test);
+    let direction = scratch.map_on_grid("direction", [45, 65], 0.1, [-0.2, -0.2], |[x, y]| {
+        x + 0.5 * y
+    });
+    let maps = read_maps(&[direction], &mesh);
+    let pressures = [("portal_wall", 1.0), ("central_wall", 0.0)];
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, &pressures);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+    (mesh, flow)
+}
+
+/// The values of `values` at the points `points`, by the bits of the coordinates of the point.
+fn by_point<T: Copy>(points: &[[f64; 2]], values: &[T]) -> HashMap<[u64; 2], T> {
+    assert_eq!(points.len(), values.len());
+    points
+        .iter()
+        .zip(values)
+        .map(|(x, &v)| (x.map(f64::to_bits), v))
+        .collect()
+}
+
+/// The flux through each local edge of level `level` of `mesh` with the edges `edges`, by the
+/// middle of the edge, in the direction of the normal of the edge from its lower left vertex to
+/// the other turned by -90 degrees (the same edge of two meshes has the same direction).
+fn edge_fluxes_by_middle(edges: &Edges, flow: &Flow) -> Vec<([f64; 2], f64)> {
+    let fluxes = edges.fluxes(flow);
+    let dm = edges.disc.dm();
+    let stratum = dm.depth_stratum(1).unwrap();
+    stratum
+        .clone()
+        .map(|edge| {
+            let &[a, b] = dm.cone(edge).unwrap().as_slice() else {
+                panic!("edge {edge}");
+            };
+            let (a, b) = (edges.at(a), edges.at(b));
+            let sign = if a <= b { 1.0 } else { -1.0 };
+            let middle = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+            (middle, sign * fluxes[(edge - stratum.start) as usize])
+        })
+        .collect()
+}
+
+/// A floating island, a connected component of the mesh which no pressure tag reaches (its
+/// boundary a wall without pressure), has pressure 0, and no flow: its velocities (conservative
+/// and primal) and edge fluxes are 0, on every level. The rest of the mesh has the flow of the
+/// mesh without the island, within 1e-12 (on one process: on several, the two meshes are
+/// partitioned differently). The flow reports the island: one, of 1 um^2.
+#[test]
+fn island_has_zero_flow() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "island_has_zero_flow";
+    let (mesh, flow) = island_flow(&p, test, "island.msh");
+    let islands = flow.islands();
+    assert_eq!(islands.count, 1, "{islands:?}");
+    assert!((islands.area - 1.0).abs() < 1e-12, "{islands:?}");
+    let disc = flow.discretization();
+    let nodes = disc.node_coordinates();
+    let pressure = flow.local_pressure().unwrap();
+    let pressure = pressure.with_array(<[f64]>::to_vec).unwrap();
+    let island_nodes = nodes.iter().filter(|&&x| on_island(x)).count();
+    let island_nodes = disc
+        .dm()
+        .comm()
+        .sum_int(island_nodes as petsc::sys::PetscInt)
+        .unwrap();
+    assert!(island_nodes > 0);
+    for (x, p) in nodes.iter().zip(&pressure) {
+        if on_island(*x) {
+            assert_eq!(*p, 0.0, "{x:?}");
+        }
+    }
+    for level in 0..mesh.levels().len() {
+        let points = Discretization::new(&mesh, level, &ceed(), 1).unwrap();
+        let points = points.quadrature_points();
+        for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
+            for (x, u) in points.iter().zip(velocity) {
+                if on_island(*x) {
+                    assert_eq!(*u, [0.0, 0.0], "level {level}, {x:?}");
+                }
+            }
+        }
+        let edges = Edges::new(&mesh, level);
+        for (middle, flux) in edge_fluxes_by_middle(&edges, &flow) {
+            if on_island(middle) {
+                assert_eq!(flux, 0.0, "level {level}, {middle:?}");
+            }
+        }
+    }
+    let flows = flow.tag_flows();
+    assert!(flows[0].1 > 0.0, "{flows:?}");
+
+    let (removed_mesh, removed) = island_flow(&p, test, "island_removed.msh");
+    assert_eq!(removed.islands().count, 0);
+    assert_eq!(removed.islands().area, 0.0);
+    if test_support::ranks() > 1 {
+        return;
+    }
+    let close = |a: f64, b: f64, scale: f64| (a - b).abs() <= 1e-12 * scale;
+    for ((tag, q), (other, q_removed)) in flows.iter().zip(removed.tag_flows()) {
+        assert_eq!(tag, other);
+        assert!(
+            close(*q, *q_removed, flows[0].1),
+            "{tag}: {q} against {q_removed}"
+        );
+    }
+    let rest = removed.discretization();
+    let rest_pressure = removed.local_pressure().unwrap();
+    let rest_pressure = by_point(
+        rest.node_coordinates(),
+        &rest_pressure.with_array(<[f64]>::to_vec).unwrap(),
+    );
+    for (x, p) in nodes.iter().zip(&pressure) {
+        if !on_island(*x) {
+            let other = rest_pressure[&x.map(f64::to_bits)];
+            assert!(close(*p, other, 1.0), "{x:?}: {p} against {other}");
+        }
+    }
+    for level in 0..mesh.levels().len() {
+        let points = Discretization::new(&mesh, level, &ceed(), 1).unwrap();
+        let rest_points = Discretization::new(&removed_mesh, level, &ceed(), 1).unwrap();
+        let rest_velocity = by_point(rest_points.quadrature_points(), removed.velocity(level));
+        let scale = rest_velocity
+            .values()
+            .fold(0.0_f64, |m, u| m.max(u[0].abs()).max(u[1].abs()));
+        for (x, u) in points.quadrature_points().iter().zip(flow.velocity(level)) {
+            if !on_island(*x) {
+                let other = rest_velocity[&x.map(f64::to_bits)];
+                for c in 0..2 {
+                    assert!(
+                        close(u[c], other[c], scale),
+                        "level {level}, {x:?}: {u:?}, {other:?}"
+                    );
+                }
+            }
+        }
+        let rest_edges = Edges::new(&removed_mesh, level);
+        let (points, fluxes): (Vec<_>, Vec<_>) = edge_fluxes_by_middle(&rest_edges, &removed)
+            .into_iter()
+            .unzip();
+        let rest_fluxes = by_point(&points, &fluxes);
+        let scale = fluxes.iter().fold(0.0_f64, |m, f| m.max(f.abs()));
+        for (middle, flux) in edge_fluxes_by_middle(&Edges::new(&mesh, level), &flow) {
+            if !on_island(middle) {
+                let other = rest_fluxes[&middle.map(f64::to_bits)];
+                assert!(
+                    close(flux, other, scale),
+                    "level {level}, {middle:?}: {flux}, {other}"
+                );
+            }
+        }
+    }
+}
+
+/// A pinned hierarchy ([`Discretization::pinned_hierarchy`]) of a mesh where no component has an
+/// essential dof (here no essential tag at all) is an error on every process: nothing would be
+/// left to solve for.
+#[test]
+fn nothing_but_floating_components_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = common::fixture_mesh(&p, "island.msh", 0);
+    let e = Discretization::pinned_hierarchy(&mesh, &ceed(), 1, &[]).unwrap_err();
+    let message = e.to_string();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{message}");
+    assert!(message.contains("no connected component"), "{message}");
+}
+
 /// The velocity of every level is at the quadrature points of that level, in the layout of any
 /// discretization of it (here one with the essential tags of a species): against the exact
 /// velocity of the anisotropic manufactured flow there, the error falls with the mesh size
@@ -1014,8 +1193,9 @@ fn unknown_pressure_tag_lists_tags() {
 }
 
 /// The results `parallel_on_*_processes` compares between process counts: of [`uniform`], of
-/// the flow through `lobule_toy.msh` ([`lobule_flow`]) and of the flows of `pinched_boundary`
-/// ([`pinched_flow`]), the L2 norm of the pressure, the
+/// the flow through `lobule_toy.msh` ([`lobule_flow`]), of the flows of `pinched_boundary`
+/// ([`pinched_flow`]) and of the flow through `island.msh` ([`island_flow`]), the islands (their
+/// number and area, each plus 1 for a relative comparison), the L2 norm of the pressure, the
 /// L2 norms of the velocity (conservative and primal) and the sum of the absolute edge fluxes
 /// on every level, the flows through the tags, and the sums of the edge fluxes through them on
 /// the finest level; and those of the anisotropic manufactured solution (see
@@ -1024,10 +1204,15 @@ fn parity_results(p: &Petsc) -> Vec<f64> {
     let mut results = Vec::new();
     let pinched =
         PINCHED_PRESSURES.map(|pressures| pinched_flow(p, "parity_pinched", pressures).unwrap());
+    let island = island_flow(p, "parity_island", "island.msh");
     for (mesh, flow) in [uniform(p), lobule_flow(p, "parity_lobule", 1)]
         .into_iter()
         .chain(pinched)
+        .chain([island])
     {
+        let islands = flow.islands();
+        results.push(islands.count as f64 + 1.0);
+        results.push(islands.area + 1.0);
         results.push(flow.pressure_l2_error(|_| 0.0).unwrap());
         for level in 0..mesh.levels().len() {
             for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
@@ -1070,6 +1255,8 @@ fn parity(ranks: usize, test: &str) {
                     "tag_flows_equal_edge_flux_sums",
                     "pinched_boundary",
                     "pressure_tag_inside_the_domain_is_error",
+                    "island_has_zero_flow",
+                    "nothing_but_floating_components_is_error",
                     "velocity_of_every_level_at_its_points",
                     "isotropic_where_gradient_vanishes",
                     "divergence_is_error",

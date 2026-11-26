@@ -20,7 +20,8 @@
 //!     "mass_balance": [null | {
 //!         "storage_rate": ..., "source": ..., "advection_defect": ...,
 //!         "boundary": {"<tag>": {"advective": ..., "diffusive": ...}}}]}},
-//!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>}},
+//!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
+//!                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
 //!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "output": ...}}
 //! ```
 //!
@@ -31,7 +32,10 @@
 //! `storage_rate = source + sum over the tags of (advective + diffusive) - advection_defect`,
 //! the inflow through each tag of the boundary positive into the domain
 //! ([`pde::BoundaryInflow`]). `perfusion` is there for a study with perfusion: the flow through
-//! each pressure tag ([`Flow::tag_flows`], positive into the domain). `phases` is the wall time
+//! each pressure tag ([`Flow::tag_flows`], positive into the domain), and the pressure islands,
+//! the connected components of the mesh which no pressure tag reaches, whose pressure is 0 and
+//! which have no flow ([`Flow::islands`]): their number and area (0 and 0.0 without). With
+//! islands, the run says so in one line. `phases` is the wall time
 //! of process 0 in each phase of the run (s), the phases separated by barriers: `setup` (from the
 //! start of the process: PETSc, the study, the mesh, the maps and the problems of the fields),
 //! `pressure` (the flow, zero without perfusion), `transport` (the steps of the fields) and
@@ -101,6 +105,14 @@ impl Phases {
 struct PerfusionSummary {
     /// The flow through each pressure tag, positive into the domain: um^2/s.
     tag_flows: BTreeMap<String, f64>,
+    pressure_islands: IslandsSummary,
+}
+
+/// [`pde::Floating`] of [`Flow::islands`] in `summary.json`.
+#[derive(Debug, Serialize)]
+struct IslandsSummary {
+    count: usize,
+    area_um2: f64,
 }
 
 /// The values of one field at the output times.
@@ -184,6 +196,15 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         .transpose()?;
     phases.end("pressure")?;
     if let Some(flow) = &flow {
+        let islands = flow.islands();
+        if islands.count > 0 && comm.rank() == 0 {
+            let plural = if islands.count == 1 { "" } else { "s" };
+            println!(
+                "perfusion: {} pressure island{plural} of {} um^2 in all, which no pressure \
+                 boundary reaches: pressure 0 and no flow there",
+                islands.count, islands.area
+            );
+        }
         write_flow(flow, out)?;
     }
     phases.end("output")?;
@@ -215,6 +236,10 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
             .collect(),
         perfusion: flow.as_ref().map(|flow| PerfusionSummary {
             tag_flows: flow.tag_flows().iter().cloned().collect(),
+            pressure_islands: IslandsSummary {
+                count: flow.islands().count,
+                area_um2: flow.islands().area,
+            },
         }),
         phases: BTreeMap::new(),
     };
