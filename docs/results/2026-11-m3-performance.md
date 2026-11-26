@@ -212,7 +212,8 @@ steps, 6 steps each), 20,160 `SNESSolve` (+17 %), 8,642 `PCSetUp` (31.8 s), 20,1
 `TSJacobianEval` (20.5 s). The extra solves (pro rata 64 s of the 448 s of `SNESSolve`), the
 multigrid setups and the Jacobian evaluations cost roughly 115 s, a quarter of the transport
 phase; with one shift for the whole run they would nearly vanish. Without the merging of the
-half cell steps there would be twice the restarts.
+half cell steps there would be twice the restarts. (Task 13a removed the setups of the restarts:
+[below](#coupled-runs-faster-restarts-the-interval-balance-the-batched-cells).)
 
 **Results.** The mass balances of both fields close at every output within 9.2e-11 of their
 largest term (the interval balance, exchange and resupply included). Necrosis (cell state
@@ -300,8 +301,13 @@ Changes:
    the QFunction makes up to `attempts` step attempts per point and application;
    `crates/cells/src/batched.rs`). Before, one application per attempt passed over every cell as
    often as the slowest cell needed. Bitwise the same steps (564,076,825 in 24 h); the cells
-   phase about 10 % shorter (2 h: 21.5 -> 19.3 s; sbmlsim-core's `qfunction_performance` 9 % more
-   point-steps per second).
+   phase 10 % shorter over 2 h (21.5 -> 19.3 s; sbmlsim-core's `qfunction_performance` 9 % more
+   point-steps per second) and 30 % over 24 h (146.8 -> 103.4 s, the table below). The gain grows
+   with the spread of the attempts the cells of a process need in an advance: the passes over
+   finished cells, which the application per attempt made, were as many as the slowest cell's
+   attempts beyond the others', and the cells diverge as the necrosis spreads unevenly over the
+   later hours (the work of the slowest process against the mean: 1.06 over the first 2 h, 1.36
+   over 24 h, below).
 4. **The time of each process in its cells** is in `summary.json` (`cells.seconds`, mean and
    largest over the processes).
 
@@ -320,11 +326,11 @@ interleaved in one session):
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Before task 11 (4c594a1) | 0.0475 | 0.0133 | 0.0081 | 0.0745 | 0.0215 | 0.0147 |
 | Before this task (72b51f6) | 0.0494 | 0.0144 | 0.0094 | 0.0764 | 0.0227 | 0.0157 |
-| After (b35f7f2) | 0.0479 | 0.0134 | 0.0082 | 0.0679 | 0.0208 | 0.0137 |
+| After (a44b6ee) | 0.0479 | 0.0134 | 0.0082 | 0.0679 | 0.0208 | 0.0137 |
 
 Task 11 had made the steps of runs without cells 4 % (1 process) to 16 % (8 processes) slower
 (the allocations of the interval balance); change 1 takes that back, change 2 makes adaptive
-steps 9 to 11 % faster than before task 11.
+steps 3 to 9 % faster than before task 11 (8 to 13 % faster than before this task).
 
 **The 24 h run on 8 processes** (the 281 mg/kg slide as in tasks 11 and 12, `--out` under the plan
 workspace; before and after in one session, load average 6 to 9 during the runs, the before of

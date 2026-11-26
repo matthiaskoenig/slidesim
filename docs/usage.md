@@ -58,6 +58,7 @@ the processes (PT-Scotch), and every result agrees across process counts within 
  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
  "cells": {"count": <n>, "steps": <n>, "rejected": <n>,
+           "seconds": {"mean": <s>, "max": <s>},
            "exchanged": {"<field id>": [...]},
            "amounts": {"<species id>": [...]}},
  "phases": {"setup": ..., "pressure": ..., "transport": ..., "exchange": ...,
@@ -94,9 +95,11 @@ the processes (PT-Scotch), and every result agrees across process counts within 
 
 `cells`
 :   With cells: their number, the steps and rejected steps of their integrators summed over the
-    cells and the run, and per output time the amount each linked field received from the cells
-    since t = 0 (`exchanged`) and the amount of each species of the cell compartment in all cells
-    (`amounts`), both in mM*um^2.
+    cells and the run, the time of each process in its cells over the run (`seconds`, s, without
+    the wait for the other processes: the mean and the largest over the processes, whose ratio is
+    the imbalance of the work of the cells), and per output time the amount each linked field
+    received from the cells since t = 0 (`exchanged`) and the amount of each species of the cell
+    compartment in all cells (`amounts`), both in mM*um^2.
 
 `phases`
 :   The wall time of process 0 in each phase of the run (s), separated by barriers: `setup` (from

@@ -37,13 +37,14 @@ sbmlsim-core takes (events, delays, algebraic rules) and is the reference of the
 ### Batched path
 
 The cells of a process as one libCEED operator: one point per cell, the states, the parameters
-and the step control of every cell in PETSc vectors, read and written through strided element
+and the step control of every cell in libCEED vectors, read and written through strided element
 restrictions without a basis. Its QFunction comes from sbmlsim-core's QFunction target: the
 model's point functions and the Rosenbrock integrator RODAS4 (an embedded error estimate,
-L-stable, a dense LU of the small iteration matrix per point, the analytic Jacobian), one step
-attempt per point and application. slidesim applies the operator until every cell has reached
-the end of the advance, the outputs of one application the inputs of the next; finished cells
-stay unchanged.
+L-stable, a dense LU of the small iteration matrix per point, the analytic Jacobian), which makes
+step attempts per point until the point reaches the end of the advance or fails, at most
+\(10^6\) per application. An advance applies the operator once: each cell steps to the end on
+its own, so a process reads and writes its cells once per advance and a finished cell waits for
+no other.
 
 Each cell takes its own steps with the tolerances of the study (`rtol` 1e-6, `atol` 1e-9 by
 default) and keeps its step size from one advance to the next. So a cell depends on no other
@@ -51,8 +52,9 @@ cell, on the number of processes, on the libCEED backend or on its blocking. The
 nothing but the C math functions, which is what libCEED's JIT needs to compile it for CUDA and
 HIP later. Models with events, delays or algebraic rules are refused with an error naming the
 feature; they run on the engine path. A cell fails, and the run stops naming it on every process,
-when its next step would be below 1e-10 time units of the model or after \(10^6\) step attempts in
-one advance.
+when rejected steps (an error estimate above the tolerances, values which are not finite, a
+singular iteration matrix) make its next step smaller than 1e-10 time units of the model or too
+small to advance the time, or after \(10^6\) step attempts in one advance.
 
 ## Strang splitting
 
@@ -101,8 +103,10 @@ rounding. The amount of every single coarse element is not conserved: P1 fields 
 with the neighbouring elements, so an exact per-element transfer has no unique answer.
 
 After a give-back the time integration of the field starts afresh, with the start of BDF2 as at
-t = 0; these restarts are a quarter of the transport time of the 24 h run on a real slide
-([performance results](../results/2026-11-m3-performance.md#coupled-baseline-cells-and-fields-on-a-real-slide)).
+t = 0. A restart builds no new preconditioner (the multigrid is kept while the shift stays within
+a factor of 2 of the one it was built at); its cost is the extra solve of the half step, 17 % more
+solves than steps in the 24 h run on a real slide
+([performance results](../results/2026-11-m3-performance.md#coupled-runs-faster-restarts-the-interval-balance-the-batched-cells)).
 
 ## Verification
 
@@ -129,5 +133,6 @@ P and a toxic product T; when T stays above a threshold the cell dies (`necrosis
 for slidesim is plain SBML (no `comp`, no `distrib`) with a pattern 7, in which the protein is a
 parameter `protein_ext` set from outside: from the slide's CYP2E1 readout, or by pattern 6, the
 CYP2E1 profile of control mice by zonation position, where the measured necrosis has removed the
-staining. Acetaminophen is the case behind it; the
-[dosed-slide results](../results/m3-dosed-slides.md) compare its necrosis with the measured one.
+staining. Acetaminophen is the case behind it; comparing its necrosis with the one measured on
+dosed slides is deferred to a later milestone on larger hardware
+([dosed slides](../results/m3-dosed-slides.md)).

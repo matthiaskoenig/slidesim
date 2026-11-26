@@ -13,11 +13,12 @@ are not part of CI.
 - **[M3: wall classes on dosed slides](2026-11-m3-wall-classes.md)**: whether the portal and
   central classification of the lumina from CYP2E1 holds on the dosed slides, and the scenes with
   the `cyp2e1` and `necrosis` maps.
-- **[M3: cells on dosed slides](m3-dosed-slides.md)**: the SPT cell model for 24 h on dosed
-  slides, the simulated necrosis against the measured one, both cell paths.
 - **[M3: performance](2026-11-m3-performance.md)**: profiles of the transport and the changes
   that made a step 29 times faster, the setup and output phases, and the coupled 24 h baseline of
   cells and fields on both paths.
+- **[Cells on dosed slides (deferred)](m3-dosed-slides.md)**: the SPT cell model for 24 h on
+  dosed slides, the simulated necrosis against the measured one; deferred to later, larger
+  hardware, not part of milestone 3.
 
 The [perfusion parameters](../parameters/m2-perfusion-mouse.md) of the mouse liver lobule, from
 the literature, are the parameters of these runs.

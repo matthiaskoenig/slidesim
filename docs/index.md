@@ -114,10 +114,12 @@ studies of the liver.
 | 0 | Spike: PETSc and libCEED driven from Rust in `wasm32-wasip1`, a 2D Poisson problem in wasmtime and Node, within 3.3e-16 of the native run | |
 | 1 | Diffusion-reaction on slideviz meshes, P1 on DMPlex, libCEED operators, BDF2, geometric multigrid, MPI | |
 | 2 | Maps in the scene, coefficients as tables over maps, anisotropic Darcy perfusion, advection with SUPG, mass balance | [Perfusion on a real slide](results/2026-11-m2-real-slide.md) |
-| 3 | Conservative Darcy velocity, SBML cell models on every element (engine and batched libCEED paths), Strang coupling, performance | [Wall classes](results/2026-11-m3-wall-classes.md), [cells on dosed slides](results/m3-dosed-slides.md), [performance](results/2026-11-m3-performance.md) |
+| 3 | Conservative Darcy velocity, SBML cell models on every element (engine and batched libCEED paths), Strang coupling, performance | [Wall classes](results/2026-11-m3-wall-classes.md), [performance](results/2026-11-m3-performance.md) |
 
 Later milestones bring the `result/1` output and a web viewer, the browser build, GPUs (libCEED's
-CUDA and HIP backends) and 3D meshes from stacks of serial sections.
+CUDA and HIP backends) and 3D meshes from stacks of serial sections; the cell models on the dosed
+slides, calibrated to their necrosis, wait for larger hardware
+([deferred](results/m3-dosed-slides.md)).
 
 ## Where to go next
 
