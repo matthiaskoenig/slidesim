@@ -219,3 +219,45 @@ largest term (the interval balance, exchange and resupply included). Necrosis (c
 `necrosis`, the cells of the necrosis map start with pattern 6) covers 26,848 of the 41,252
 cells after 6 h and 33,787 after 24 h; in the quarter of the cells with the highest `protein`
 its mean is 0.95 from 6 h on, in the quarter with the lowest 0 at 6 h and 0.35 at 24 h.
+
+## Coupled baseline on the batched path
+
+Task 12, the same study with `"solver": "batched"`: the cells of a process as one libCEED
+operator of the QFunction of the model (sbmlsim-core's QFunction target, RODAS4 per point,
+`crates/cells/src/batched.rs`), backend `/cpu/self/opt/blocked`, the tolerances of the spec
+(1e-6, 1e-9). Same scene, settings and command as above (`spt_batched.study.json`, 8 processes,
+`native-opt`, the generated C in the compiler cache); the machine ran no other jobs.
+
+Phases (s, `summary.json`), beside the engine path:
+
+| Phase | engine 2 h | batched 2 h | engine 24 h | batched 24 h |
+| --- | ---: | ---: | ---: | ---: |
+| `setup` | 1.2 | 1.1 | 1.1 | 1.1 |
+| `pressure` | 0.6 | 0.6 | 0.6 | 0.6 |
+| `transport` | 33.7 | 32.2 | 464.9 | 442.6 |
+| `exchange` | 2.5 | 2.5 | 34.6 | 33.3 |
+| `cells` | 27.4 | 21.3 | 166.4 | 144.5 |
+| `output` | 0.7 | 0.7 | 5.6 | 5.3 |
+| wall time of the run | 66 | 58 | 673 | 628 |
+
+**Cells.** Integrator steps per cell step (1,464 cell steps per cell in 24 h):
+
+| | engine (CVODE BDF) | batched (RODAS4) |
+| --- | ---: | ---: |
+| steps over all cells, 24 h | 1.63e9 | 5.64e8 |
+| rejected | 8.1e7 (5.0 %) | 7.9e7 (14.0 %) |
+| steps per cell step, 24 h | 27.0 | 9.3 |
+| steps per cell step, first 2 h | 89 | 32 |
+| steps per second and process | 1.2e6 | 4.9e5 |
+
+The engine starts every cell step afresh (first order, the first step of a simulation), which
+is most of its 27 steps per 60 s; a cell of the batched path keeps its step from one cell step to
+the next and takes a third of the steps. A step of RODAS4 (six stages, the Jacobian and its LU
+factors every step) costs about 2.5 times one of CVODE, so the `cells` phase is 13 % shorter, not
+three times. The phase includes the wait for the slowest process; on the batched path every
+application of the operator also passes over the cells which are done (a copy), so a process
+works as long as its slowest cell needs.
+
+**Results.** The two paths agree: at 24 h the largest difference of a cell's `necrosis` is
+3.8e-6 (mean 1.6e-9), of `S` 2.3e-5 mM (of 5 mM), of `P` 1.5e-6 mM, of `T` 1.1e-6 mM; the total
+masses of the fields differ by 1.6e-8 relative, the amounts in the cells by at most 2.2e-7.

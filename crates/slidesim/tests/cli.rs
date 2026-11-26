@@ -796,21 +796,47 @@ fn numbers(value: &Value) -> Vec<f64> {
         .collect()
 }
 
-/// The linear cell model on `cells_toy` on 2 and 3 processes, with fixed transport steps: the
-/// fields, the states of the cells and the integrals of `summary.json` agree with one process
-/// within 1e-10, and the cells take the same steps (their step control is their own).
+/// The study `study` with the cells on the path `solver` (`engine` or `batched`), written into
+/// `dir` with the paths of its scene and its model made absolute.
+fn with_solver(study: &Path, solver: &str, dir: &Path) -> PathBuf {
+    let mut json: Value = serde_json::from_str(&std::fs::read_to_string(study).unwrap()).unwrap();
+    let base = study.parent().unwrap();
+    let absolute = |v: &Value| Value::from(base.join(v.as_str().unwrap()).display().to_string());
+    json["scene"] = absolute(&json["scene"]);
+    json["cells"]["model"] = absolute(&json["cells"]["model"]);
+    json["cells"]["solver"] = Value::from(solver);
+    let path = dir.join(format!("{solver}.study.json"));
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    path
+}
+
+/// The linear cell model on `cells_toy` on 2 and 3 processes, with fixed transport steps, on
+/// both paths of the cells: the fields, the states of the cells and the integrals of
+/// `summary.json` agree with one process within 1e-10, and the cells take the same steps (their
+/// step control is their own).
 #[test]
 fn cells_parallel_matches_one() {
     let dir = scratch("cells_parallel_matches_one");
+    for solver in ["engine", "batched"] {
+        let study = with_solver(&cells_study(), solver, &dir);
+        if !cells_parallel_matches_one_on(&study, &dir.join(solver)) {
+            return;
+        }
+    }
+}
+
+/// [`cells_parallel_matches_one`] of `study`, with the outputs in `dir`; `false` without
+/// `mpiexec`.
+fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
     let serial = dir.join("serial");
-    assert_success(&slidesim(&args(&cells_study(), &serial, &[])));
+    assert_success(&slidesim(&args(study, &serial, &[])));
     let last = 3;
     let cell_values = ["A_ext", "A", "uptake_rate", "k", "Vext"];
     let one = summary_json(&serial);
     for ranks in [2, 3] {
         let parallel = dir.join(format!("parallel_{ranks}"));
-        let Some(run) = slidesim_parallel(ranks, &args(&cells_study(), &parallel, &[])) else {
-            return;
+        let Some(run) = slidesim_parallel(ranks, &args(study, &parallel, &[])) else {
+            return false;
         };
         assert_success(&run);
         let many = summary_json(&parallel);
@@ -854,14 +880,16 @@ fn cells_parallel_matches_one() {
             cells = cells.max(relative_difference(&column(&a), &column(&b)));
         }
         eprintln!(
-            "relative differences, {ranks} processes against 1: integrals {largest:e}, \
-             mass_balance {balance:e}, field {fields:e}, cells {cells:e}"
+            "{}: relative differences, {ranks} processes against 1: integrals {largest:e}, \
+             mass_balance {balance:e}, field {fields:e}, cells {cells:e}",
+            study.display()
         );
         assert!(largest < 1e-10, "{largest:e}");
         assert!(balance < 1e-10, "{balance:e}");
         assert!(fields < 1e-10, "{fields:e}");
         assert!(cells < 1e-10, "{cells:e}");
     }
+    true
 }
 
 /// Without a C compiler for the cell model, the run fails at the start, before anything is

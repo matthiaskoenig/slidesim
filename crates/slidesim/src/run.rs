@@ -70,10 +70,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ceed::Ceed;
 use cells::CellModel;
-use contracts::{CellSolverKind, Scene, Study, check_cells, check_maps};
+use contracts::{Scene, Study, check_cells, check_maps};
 use maps::Maps;
 use mesh::Mesh;
 use pde::{Flow, Inputs, MassBalance, PdeError, Problem};
@@ -235,12 +235,6 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         .as_ref()
         .map(|spec| {
             linked_fields(&study, spec)?;
-            if spec.solver == CellSolverKind::Batched {
-                bail!(
-                    "cells.solver 'batched' is not available yet: the cells run on the engine \
-                     path, 'engine'"
-                );
-            }
             let path = study_path
                 .parent()
                 .unwrap_or(Path::new("."))
@@ -284,9 +278,9 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         })
         .collect::<Result<Vec<_>>>()?;
     let mut coupled = match (&study.cells, &model) {
-        (Some(spec), Some(model)) => {
-            Some(Coupled::new(&study, spec, model, &mesh, &maps, &problems)?)
-        }
+        (Some(spec), Some(model)) => Some(Coupled::new(
+            &study, spec, model, &mesh, &maps, &problems, &ceed,
+        )?),
         _ => None,
     };
     phases.end("setup")?;

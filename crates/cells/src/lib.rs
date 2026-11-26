@@ -9,7 +9,10 @@
 //!   the blood (`pde::Exchange` gives the means of the fields and takes the changes back):
 //!   [`EngineCells`] runs one sbmlsim-core engine instance ([`sbmlsim_engine::Stepper`]) per
 //!   cell, on the model compiled to native code by sbmlsim-core's C target, without
-//!   WebAssembly.
+//!   WebAssembly; [`BatchedCells`] runs the cells of a process as one libCEED operator of the
+//!   QFunction of the model (sbmlsim-core's QFunction target, a Rosenbrock integrator per
+//!   point), the fast path, ready for GPUs. [`Cells`] is the path the spec chooses
+//!   ([`contracts::CellsSpec::solver`]).
 //!
 //! Units: time in s (the model's time unit is `CellsSpec::time_unit_s` s), concentrations in
 //! the model's units (mM for the fields of slidesim), lengths in um. The model keeps its own
@@ -22,13 +25,19 @@
 //! collective call. A cell's step control is its own: it depends on no other cell and not on
 //! the number of processes.
 
+mod batched;
 mod engine;
+mod model;
 mod parameters;
 
+use ceed::Ceed;
+use contracts::{CellSolverKind, CellsSpec};
 use petsc::Comm;
 use petsc::sys::PetscInt;
 
-pub use engine::{CellModel, EngineCells};
+pub use batched::BatchedCells;
+pub use engine::EngineCells;
+pub use model::CellModel;
 pub use parameters::CellSetup;
 
 /// A solver of the cells of a process: advances every cell over an interval, exchanging the
@@ -69,6 +78,76 @@ pub trait CellSolver {
     /// compartment, in the model's units), any other value as the model has it; the targets of
     /// assignment rules evaluated from the state of the cell.
     fn outputs(&self, out: &mut Vec<f64>);
+}
+
+/// The cells of a process on the path of their spec ([`CellsSpec::solver`]), boxed.
+#[derive(Debug)]
+pub enum Cells {
+    /// [`CellSolverKind::Engine`].
+    Engine(Box<EngineCells>),
+    /// [`CellSolverKind::Batched`].
+    Batched(Box<BatchedCells>),
+}
+
+impl Cells {
+    /// The cells of `setup` with the model `model`, compiled and checked for `spec`
+    /// ([`CellModel::new`]), on the path of `spec`: [`EngineCells::with_model`] or
+    /// [`BatchedCells::with_model`] (on `ceed`). Collective.
+    pub fn new(
+        setup: &CellSetup,
+        spec: &CellsSpec,
+        model: &CellModel,
+        ceed: &Ceed,
+    ) -> Result<Cells> {
+        Ok(match spec.solver {
+            CellSolverKind::Engine => {
+                Cells::Engine(Box::new(EngineCells::with_model(setup, spec, model)?))
+            }
+            CellSolverKind::Batched => Cells::Batched(Box::new(BatchedCells::with_model(
+                setup, spec, model, ceed,
+            )?)),
+        })
+    }
+
+    fn solver(&self) -> &dyn CellSolver {
+        match self {
+            Cells::Engine(cells) => cells.as_ref(),
+            Cells::Batched(cells) => cells.as_ref(),
+        }
+    }
+}
+
+impl CellSolver for Cells {
+    fn n_cells(&self) -> usize {
+        self.solver().n_cells()
+    }
+
+    fn species(&self) -> &[String] {
+        self.solver().species()
+    }
+
+    fn state_ids(&self) -> &[String] {
+        self.solver().state_ids()
+    }
+
+    fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
+        match self {
+            Cells::Engine(cells) => cells.advance(t0, t1, blood),
+            Cells::Batched(cells) => cells.advance(t0, t1, blood),
+        }
+    }
+
+    fn states(&self) -> &[f64] {
+        self.solver().states()
+    }
+
+    fn output_values(&self) -> &[OutputValue] {
+        self.solver().output_values()
+    }
+
+    fn outputs(&self, out: &mut Vec<f64>) {
+        self.solver().outputs(out);
+    }
 }
 
 /// A value of the cells which [`CellSolver::outputs`] writes.
@@ -116,6 +195,13 @@ pub enum CellsError {
     /// The model cannot be translated, compiled or loaded. The same on every process.
     #[error("cell model: {message}")]
     Model { message: String },
+    /// A model the batched path does not integrate: `feature` names what it has. The same on
+    /// every process.
+    #[error(
+        "cell model: cells.solver \"batched\" does not integrate {feature}; the engine path \
+         does (\"solver\": \"engine\")"
+    )]
+    Unsupported { feature: String },
     /// A failure at one element: `cell` is its global number on the coarse level of the mesh,
     /// `centroid` its centroid (um). The same on every process.
     #[error("element {cell} at ({}, {}) um: {message}", .centroid[0], .centroid[1])]
@@ -132,14 +218,16 @@ pub enum CellsError {
     Pde(#[from] pde::PdeError),
     #[error(transparent)]
     Petsc(#[from] petsc::Error),
+    #[error(transparent)]
+    Ceed(#[from] ceed::Error),
 }
 
 pub type Result<T, E = CellsError> = std::result::Result<T, E>;
 
 /// The first error of the processes of `comm`, on every process: `local` where no process has
 /// one, else the error of the lowest process with one, the same on every process (an
-/// [`CellsError::Element`] as it is, any other error as its message in a
-/// [`CellsError::Model`] or [`CellsError::Invalid`]). Collective.
+/// [`CellsError::Element`] and a [`CellsError::Unsupported`] as they are, any other error as
+/// its message in a [`CellsError::Model`] or [`CellsError::Invalid`]). Collective.
 pub(crate) fn agree<T>(comm: &Comm, local: Result<T>) -> Result<T> {
     let rank = PetscInt::try_from(comm.rank()).expect("a rank is a PETSc integer");
     // The lowest rank with an error, as the maximum of its negation.
@@ -160,6 +248,7 @@ pub(crate) fn agree<T>(comm: &Comm, local: Result<T>) -> Result<T> {
 const ELEMENT: u8 = 1;
 const MODEL: u8 = 2;
 const OTHER: u8 = 3;
+const UNSUPPORTED: u8 = 4;
 
 /// `e` as bytes for [`decode`]: its kind, an element's number and centroid, the message.
 fn encode(e: &CellsError) -> Vec<u8> {
@@ -179,6 +268,10 @@ fn encode(e: &CellsError) -> Vec<u8> {
         CellsError::Model { message } => {
             bytes.push(MODEL);
             bytes.extend(message.as_bytes());
+        }
+        CellsError::Unsupported { feature } => {
+            bytes.push(UNSUPPORTED);
+            bytes.extend(feature.as_bytes());
         }
         CellsError::Invalid(message) => {
             bytes.push(OTHER);
@@ -204,6 +297,9 @@ fn decode(bytes: &[u8]) -> CellsError {
         },
         Some(&MODEL) => CellsError::Model {
             message: text(&bytes[1..]),
+        },
+        Some(&UNSUPPORTED) => CellsError::Unsupported {
+            feature: text(&bytes[1..]),
         },
         _ => CellsError::Invalid(text(bytes.get(1..).unwrap_or_default())),
     }
@@ -238,6 +334,12 @@ mod tests {
         };
         assert!(
             matches!(decode(&encode(&model)), CellsError::Model { message } if message == "no compiler")
+        );
+        let unsupported = CellsError::Unsupported {
+            feature: "a model with events".into(),
+        };
+        assert!(
+            matches!(decode(&encode(&unsupported)), CellsError::Unsupported { feature } if feature == "a model with events")
         );
         let other = CellsError::Invalid("lengths".into());
         assert_eq!(decode(&encode(&other)).to_string(), "cells: lengths");

@@ -1,12 +1,13 @@
 [package]
 name = "cells"
-description = "Cell models per coarse element: parameters from the maps, solved on sbmlsim-core's engine"
+description = "Cell models per coarse element: parameters from the maps, solved on sbmlsim-core's engine or as a libCEED QFunction"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
+ceed = { path = "../ceed" }
 contracts = { path = "../contracts" }
 maps = { path = "../maps" }
 mesh = { path = "../mesh" }
@@ -18,5 +19,4 @@ sbmlsim-engine.workspace = true
 thiserror = "2"
 
 [dev-dependencies]
-ceed = { path = "../ceed" }
 test-support = { path = "../test-support" }

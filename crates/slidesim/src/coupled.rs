@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use cells::{CellModel, CellSetup, CellSolver, EngineCells};
+use ceed::Ceed;
+use cells::{CellModel, CellSetup, CellSolver, Cells};
 use contracts::{CellsSpec, Study};
 use maps::Maps;
 use mesh::Mesh;
@@ -36,7 +37,7 @@ use crate::run::Phases;
 /// ([`Problem::step_to`]), whose last step is shortened to end there: its steps never pass the
 /// end of a split step, whatever their size.
 pub(crate) struct Coupled {
-    solver: EngineCells,
+    solver: Cells,
     /// For each linked species (in the order of `cells.species`): the index of its field in the
     /// study and its exchange.
     links: Vec<(usize, Exchange)>,
@@ -70,9 +71,10 @@ pub(crate) struct Coupled {
 impl Coupled {
     /// The cells of `spec`, the `cells` of `study`, with the model `model` (compiled and checked
     /// at the start of the study), on `mesh` with the maps `maps`, coupled to the fields of
-    /// `problems` (those of `study.fields`, in order). Collective.
+    /// `problems` (those of `study.fields`, in order), on the path of `spec` (the batched one
+    /// on `ceed`). Collective.
     ///
-    /// Errors: those of [`linked_fields`], [`CellSetup::new`], [`EngineCells::with_model`] and
+    /// Errors: those of [`linked_fields`], [`CellSetup::new`], [`Cells::new`] and
     /// [`Exchange::new`].
     pub(crate) fn new(
         study: &Study,
@@ -81,13 +83,14 @@ impl Coupled {
         mesh: &Mesh,
         maps: &Maps,
         problems: &[Problem],
+        ceed: &Ceed,
     ) -> Result<Coupled> {
         let fields = linked_fields(study, spec)?;
         let first = fields[0];
         let porosity = &study.fields[first].porosity;
         let disc = problems[first].discretization();
         let setup = CellSetup::new(disc, mesh, spec, maps, porosity).context("cells")?;
-        let solver = EngineCells::with_model(&setup, spec, model).context("cells")?;
+        let solver = Cells::new(&setup, spec, model, ceed).context("cells")?;
         let links = fields
             .iter()
             .map(|&f| {

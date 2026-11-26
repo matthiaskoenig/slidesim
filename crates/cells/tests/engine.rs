@@ -7,14 +7,19 @@
 //! The compiled models go to a cache directory of this test binary in the temporary directory
 //! (`SBMLSIM_C_CACHE`), not to the cache of the user.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once};
+mod common;
 
-use ceed::{Ceed, DEFAULT_RESOURCE};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ceed::Ceed;
 use cells::{CellSetup, CellSolver, CellsError, EngineCells};
+use common::{
+    c_cache, ceed, finest, linear_spec, mesh, model, parameter, spt_spec, table, testdata,
+};
 use contracts::{
-    CellParameter, CellSolverKind, CellsSpec, Coefficient, LengthUnit, MapSpec, MeshFormat,
-    MeshRef, Replace, SCENE_VERSION, Scene, SpeciesLink, Study, Table, Units, VolumeLink,
+    CellParameter, CellSolverKind, CellsSpec, Coefficient, MapSpec, Replace, Scene, SpeciesLink,
+    Study, VolumeLink,
 };
 use maps::Maps;
 use mesh::Mesh;
@@ -25,48 +30,6 @@ use sbmlsim_engine::Stepper;
 
 /// The pixel size of the test maps over `two_areas.msh` (um).
 const PIXEL: f64 = 0.01;
-
-/// Sets the cache of the compiled models to a directory of this test binary, once per process
-/// (before any thread of the test reads the environment).
-fn c_cache() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let dir = std::env::temp_dir().join("slidesim-cells-tests-c-cache");
-        // SAFETY: called first in each test, before the test starts threads or reads the
-        // environment elsewhere.
-        unsafe { std::env::set_var("SBMLSIM_C_CACHE", dir) };
-    });
-}
-
-fn testdata(path: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata")
-        .join(path)
-}
-
-fn model(file: &str) -> String {
-    std::fs::read_to_string(testdata(&format!("models/{file}"))).unwrap()
-}
-
-fn mesh(p: &Petsc, file: &str, refinements: u32) -> Mesh {
-    let scene = Scene {
-        version: SCENE_VERSION.to_string(),
-        dimension: 2,
-        units: Units {
-            length: LengthUnit::Um,
-        },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
-            path: testdata(&format!("meshes/{file}")),
-        },
-        maps: Vec::new(),
-    };
-    Mesh::load(p, &scene, refinements).unwrap()
-}
-
-fn ceed() -> Ceed {
-    Ceed::new(DEFAULT_RESOURCE).unwrap()
-}
 
 /// A directory of this process for the maps of a test, removed when dropped.
 struct Scratch(PathBuf);
@@ -107,44 +70,6 @@ fn read_maps(specs: &[MapSpec], mesh: &Mesh) -> Maps {
     Maps::read(specs, &ids, mesh.local_bounds().unwrap()).unwrap()
 }
 
-fn table(map: &str, points: &[[f64; 2]]) -> Coefficient {
-    Coefficient::Table(Table {
-        map: map.to_string(),
-        points: points.to_vec(),
-    })
-}
-
-fn parameter(id: &str, value: Coefficient) -> CellParameter {
-    CellParameter {
-        id: id.to_string(),
-        value,
-        replace: None,
-    }
-}
-
-/// The cells of `linear_uptake.xml` in the area `tissue`, with `parameters`.
-fn linear_spec(parameters: Vec<CellParameter>) -> CellsSpec {
-    CellsSpec {
-        model: PathBuf::from("linear_uptake.xml"),
-        solver: CellSolverKind::Engine,
-        time_unit_s: 1.0,
-        areas: Some(vec!["tissue".to_string()]),
-        species: vec![SpeciesLink {
-            species: "A_ext".to_string(),
-            field: "a".to_string(),
-        }],
-        volumes: VolumeLink {
-            blood: "Vext".to_string(),
-            cells: "Vli".to_string(),
-        },
-        parameters,
-        split_step: 1.0,
-        rtol: 1e-8,
-        atol: 1e-12,
-        outputs: vec!["uptake_rate".to_string()],
-    }
-}
-
 /// The value of parameter `id` of cell `i` of `setup`.
 fn value(setup: &CellSetup, i: usize, id: &str) -> f64 {
     setup.parameters[i]
@@ -152,11 +77,6 @@ fn value(setup: &CellSetup, i: usize, id: &str) -> f64 {
         .find(|(p, _)| p == id)
         .unwrap_or_else(|| panic!("no parameter {id} in {:?}", setup.parameters[i]))
         .1
-}
-
-/// The discretization of the finest level of `mesh`, as the fields have it.
-fn finest(mesh: &Mesh, ceed: &Ceed) -> Discretization {
-    Discretization::new(mesh, mesh.levels().len() - 1, ceed, 1).unwrap()
 }
 
 /// The local coarse cells of `mesh` in the area `tissue`, by the area tags of level 0.
@@ -488,31 +408,7 @@ fn engine_cells_match_stepper() {
     let study = Study::load(testdata("studies/lobule_toy/study.json")).unwrap();
     let scene = Scene::load(&study.scene).unwrap();
     let maps = Maps::read(&scene.maps, &["zonation"], mesh.local_bounds().unwrap()).unwrap();
-    let spec = CellsSpec {
-        model: PathBuf::from("spt_liver_cell.xml"),
-        solver: CellSolverKind::Engine,
-        time_unit_s: 60.0,
-        areas: None,
-        species: ["S", "P"]
-            .map(|s| SpeciesLink {
-                species: format!("{s}_ext"),
-                field: s.to_string(),
-            })
-            .to_vec(),
-        volumes: VolumeLink {
-            blood: "Vext".to_string(),
-            cells: "Vli".to_string(),
-        },
-        parameters: vec![
-            parameter("pattern", Coefficient::Constant(7.0)),
-            parameter("position", table("zonation", &[[0.0, 0.0], [1.0, 1.0]])),
-            parameter("protein_ext", table("zonation", &[[0.0, 0.3], [1.0, 1.0]])),
-        ],
-        split_step: 60.0,
-        rtol: 1e-6,
-        atol: 1e-9,
-        outputs: vec!["protein".to_string()],
-    };
+    let spec = spt_spec(CellSolverKind::Engine);
     let porosity = Coefficient::Constant(0.15);
     let mut setup = CellSetup::new(&fine, &mesh, &spec, &maps, &porosity).unwrap();
     let n = 10;
