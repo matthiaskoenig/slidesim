@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 use test_support::{Mpiexec, Run, run_with_timeout};
@@ -326,14 +326,19 @@ fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
 }
 
 /// The phases of a run in `summary.json`, the wall time of process 0 in each: together the time
-/// of the run.
+/// of the run until it writes the summary. (Not until the process ends: it then still destroys
+/// its objects and finalizes PETSc and MPI, about 0.1 s, which no phase can hold, and which would
+/// be more than a tenth of this short run.)
 #[test]
 fn summary_has_phases() {
     let out = scratch("summary_has_phases");
-    let start = Instant::now();
+    let start = SystemTime::now();
     let run = slidesim(&args(&lobule_study(), &out, &[]));
-    let wall = start.elapsed().as_secs_f64();
     assert_success(&run);
+    let written = std::fs::metadata(out.join("summary.json"))
+        .and_then(|m| m.modified())
+        .unwrap();
+    let wall = written.duration_since(start).unwrap().as_secs_f64();
     let summary = summary_json(&out);
     let phases = summary["phases"]
         .as_object()
@@ -347,9 +352,10 @@ fn summary_has_phases() {
         assert!(seconds >= 0.0, "{name}: {seconds}");
         sum += seconds;
     }
+    println!("phases {phases:?} sum to {sum} s, the summary written after {wall} s");
     assert!(
         (sum - wall).abs() <= 0.1 * wall,
-        "phases {phases:?} sum to {sum} s, the run took {wall} s"
+        "phases {phases:?} sum to {sum} s, the run wrote its summary after {wall} s"
     );
 }
 
