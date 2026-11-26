@@ -108,7 +108,9 @@ def tissue_small() -> None:
     walls, section = [], []
     for _, curve in gmsh.model.getBoundary([(2, surface)], oriented=False):
         x, y, _ = occ.getCenterOfMass(1, curve)
-        on_hole = any(abs(x - cx) < HOLE_RADIUS and abs(y - cy) < HOLE_RADIUS for cx, cy in HOLE_CENTERS)
+        on_hole = any(
+            abs(x - cx) < HOLE_RADIUS and abs(y - cy) < HOLE_RADIUS for cx, cy in HOLE_CENTERS
+        )
         (walls if on_hole else section).append(curve)
     gmsh.model.addPhysicalGroup(1, walls, 11, "vessel_wall")
     gmsh.model.addPhysicalGroup(1, section, 12, "section_edge")
@@ -129,7 +131,7 @@ def lobule_toy() -> None:
     for _, curve in gmsh.model.getBoundary([(2, surface)], oriented=False):
         x, y, _ = occ.getCenterOfMass(1, curve)
         name = "section_edge"
-        for wall, (cx, cy) in zip(("portal_wall", "central_wall"), centers):
+        for wall, (cx, cy) in zip(("portal_wall", "central_wall"), centers, strict=True):
             if abs(x - cx) < LOBULE_HOLE_RADIUS and abs(y - cy) < LOBULE_HOLE_RADIUS:
                 name = wall
         walls[name].append(curve)
@@ -146,7 +148,7 @@ def pinched() -> None:
         return [geo.addPoint(x, y, 0.0, PINCHED_SIZE) for x, y in coordinates]
 
     def loop(corners):
-        lines = [geo.addLine(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+        lines = [geo.addLine(a, b) for a, b in zip(corners, corners[1:] + corners[:1], strict=True)]
         return lines, geo.addCurveLoop(lines)
 
     p0, p1, p2, p3 = points([(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)])
@@ -184,7 +186,7 @@ def island() -> None:
     def loop(x0, y0, x1, y1):
         corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         points = [geo.addPoint(x, y, 0.0, ISLAND_SIZE) for x, y in corners]
-        lines = [geo.addLine(a, b) for a, b in zip(points, points[1:] + points[:1])]
+        lines = [geo.addLine(a, b) for a, b in zip(points, points[1:] + points[:1], strict=True)]
         return lines, geo.addCurveLoop(lines)
 
     # The rest first, so that its nodes and triangles come first.
@@ -216,6 +218,7 @@ def island() -> None:
             gmsh.model.addPhysicalGroup(1, curves, tag, wall)
         gmsh.write(str(HERE / f"{name}.msh"))
     gmsh.finalize()
+
 
 def two_areas() -> None:
     start("two_areas", TWO_AREAS_SIZE)
