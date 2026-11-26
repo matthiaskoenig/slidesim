@@ -13,9 +13,9 @@ pub use scene::{
     LengthUnit, MapSpec, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units, schema_scene,
 };
 pub use study::{
-    BoundarySpec, Coefficient, Condition, Direction, FieldSpec, MeshOptions, Perfusion,
-    PressureBoundary, STUDY_VERSION, SolverOptions, Study, Table, TimeSpec, check_maps,
-    schema_study,
+    BoundarySpec, CellParameter, CellSolverKind, CellsSpec, Coefficient, Condition, Direction,
+    FieldSpec, MeshOptions, Perfusion, PressureBoundary, Replace, STUDY_VERSION, SolverOptions,
+    SpeciesLink, Study, Table, TimeSpec, VolumeLink, check_cells, check_maps, schema_study,
 };
 
 use std::path::{Path, PathBuf};

@@ -490,3 +490,108 @@ fn scene_map_rules() {
     let scene = Scene::from_value(value, &data("scene-maps.json")).unwrap();
     assert_eq!(scene.maps[0].no_value, None);
 }
+
+fn cells_study(cells: serde_json::Value) -> Study {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(data("study-perfusion.json")).unwrap())
+            .unwrap();
+    v["cells"] = cells;
+    Study::from_value(v, &data("study-perfusion.json")).unwrap()
+}
+
+fn cells_json() -> serde_json::Value {
+    serde_json::json!({
+        "model": "cell.xml",
+        "solver": "engine",
+        "time_unit_s": 60.0,
+        "areas": ["a", "b"],
+        "species": [{"species": "S", "field": "tracer"}],
+        "volumes": {"blood": "Vb", "cells": "Vc"},
+        "parameters": [
+            {"id": "pattern", "value": 7.0,
+             "replace": {"map": "zonation", "above": 0.5, "value": 6.0}},
+            {"id": "position", "value": {"map": "zonation", "points": [[0.0, 0.0], [1.0, 1.0]]}}
+        ],
+        "split_step": 1.0,
+        "rtol": 1e-5,
+        "atol": 1e-8,
+        "outputs": ["flux"]
+    })
+}
+
+#[test]
+fn cells_round_trip() {
+    let cells = cells_json();
+    let study = cells_study(cells.clone());
+    let spec = study.cells.as_ref().unwrap();
+    assert_eq!(spec.solver, contracts::CellSolverKind::Engine);
+    assert_eq!(serde_json::to_value(spec).unwrap(), cells);
+}
+
+#[test]
+fn cells_defaults() {
+    let study = cells_study(serde_json::json!({
+        "model": "cell.xml",
+        "time_unit_s": 1.0,
+        "species": [],
+        "volumes": {"blood": "Vb", "cells": "Vc"},
+        "parameters": [],
+        "split_step": 0.5
+    }));
+    let spec = study.cells.unwrap();
+    assert_eq!(spec.solver, contracts::CellSolverKind::Batched);
+    assert_eq!(spec.areas, None);
+    assert_eq!((spec.rtol, spec.atol), (1e-6, 1e-9));
+    assert!(spec.outputs.is_empty());
+}
+
+#[test]
+fn cells_unknown_field_lists_fields() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    let mut c = cells_json();
+    c["species"][0]["field"] = "nope".into();
+    let e = contracts::check_cells(&cells_study(c), &scene)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("nope") && e.contains("tracer"), "{e}");
+}
+
+#[test]
+fn cells_unknown_map_lists_maps() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    let mut c = cells_json();
+    c["parameters"][0]["replace"]["map"] = "necrosis".into();
+    let e = contracts::check_cells(&cells_study(c), &scene)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("necrosis") && e.contains("zonation"), "{e}");
+    let mut c = cells_json();
+    c["parameters"][1]["value"]["map"] = "gone".into();
+    let e = contracts::check_cells(&cells_study(c), &scene)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("gone") && e.contains("zonation"), "{e}");
+}
+
+#[test]
+fn cells_split_step_positive() {
+    let scene = Scene::load(data("scene-maps.json")).unwrap();
+    contracts::check_cells(&cells_study(cells_json()), &scene).unwrap();
+    for bad in [0.0, -1.0] {
+        let mut c = cells_json();
+        c["split_step"] = bad.into();
+        let e = contracts::check_cells(&cells_study(c), &scene)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("split_step"), "{e}");
+    }
+    // time.dt must not exceed split_step
+    let study = cells_study(cells_json());
+    let dt = study.time.dt;
+    let mut c = cells_json();
+    c["split_step"] = (dt / 2.0).into();
+    let e = contracts::check_cells(&cells_study(c), &scene)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("time.dt") && e.contains("split_step"), "{e}");
+}

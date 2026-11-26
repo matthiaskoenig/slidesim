@@ -24,6 +24,10 @@ pub struct Study {
     /// Darcy perfusion of the tissue; required for fields with `advection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perfusion: Option<Perfusion>,
+    /// Cell models coupled to the fields; their `outputs` are checked against the model's
+    /// states and assignment rule targets at study start, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cells: Option<CellsSpec>,
     pub time: TimeSpec,
     #[serde(default)]
     pub mesh: MeshOptions,
@@ -282,6 +286,154 @@ pub fn check_maps(study: &Study, scene: &Scene) -> Result<(), ContractError> {
     }
 }
 
+/// How the cell models are solved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CellSolverKind {
+    Batched,
+    Engine,
+}
+
+fn batched() -> CellSolverKind {
+    CellSolverKind::Batched
+}
+
+fn default_rtol() -> f64 {
+    1e-6
+}
+
+fn default_atol() -> f64 {
+    1e-9
+}
+
+/// Cell models at the elements of the mesh: one model instance per element, coupled to the
+/// fields by operator splitting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CellsSpec {
+    /// SBML model, relative to the study file (`Study::load` leaves it as written).
+    pub model: PathBuf,
+    /// Solver of the cell models, default `batched`.
+    #[serde(default = "batched")]
+    pub solver: CellSolverKind,
+    /// Seconds per model time unit, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub time_unit_s: f64,
+    /// Area tags of the mesh that hold cells; default all area tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub areas: Option<Vec<String>>,
+    /// Model species exchanged with fields.
+    pub species: Vec<SpeciesLink>,
+    /// Compartments of the model whose volumes follow the porosity.
+    pub volumes: VolumeLink,
+    /// Model parameters set per element.
+    pub parameters: Vec<CellParameter>,
+    /// Splitting step in s, must be > 0 and >= `time.dt`.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub split_step: f64,
+    /// Relative tolerance of the cell solver, default 1e-6.
+    #[serde(default = "default_rtol")]
+    pub rtol: f64,
+    /// Absolute tolerance of the cell solver, default 1e-9.
+    #[serde(default = "default_atol")]
+    pub atol: f64,
+    /// Extra assignment rule targets written per cell (states and rules are checked at study
+    /// start against the compiled model); default none.
+    #[serde(default)]
+    pub outputs: Vec<String>,
+}
+
+/// A model species exchanged with a field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpeciesLink {
+    /// Species id in the model.
+    pub species: String,
+    /// Id of a field of the study.
+    pub field: String,
+}
+
+/// Compartment ids of the model, set per element to the porosity (blood) and 1 - porosity
+/// (cells).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeLink {
+    pub blood: String,
+    pub cells: String,
+}
+
+/// A model parameter set per element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CellParameter {
+    /// Parameter id in the model.
+    pub id: String,
+    /// Value (a number or a table over a map).
+    #[schemars(schema_with = "any_coefficient_schema")]
+    pub value: Coefficient,
+    /// Replace the value where a map is high.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<Replace>,
+}
+
+/// Where the element mean of `map` is above `above`, the parameter takes `value` instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Replace {
+    /// Id of a map of the scene.
+    pub map: String,
+    pub above: f64,
+    #[schemars(schema_with = "any_coefficient_schema")]
+    pub value: Coefficient,
+}
+
+/// Check the `cells` section against the study and the scene: linked fields and named maps
+/// exist, `split_step > 0` and `time.dt <= split_step`. The `outputs` are checked against the
+/// compiled model at study start.
+pub fn check_cells(study: &Study, scene: &Scene) -> Result<(), ContractError> {
+    let Some(cells) = &study.cells else {
+        return Ok(());
+    };
+    let fields: Vec<String> = study.fields.iter().map(|f| f.id.clone()).collect();
+    for link in &cells.species {
+        if !fields.contains(&link.field) {
+            return Err(invalid(format!(
+                "cells.species '{}': unknown field '{}', the study defines: [{}]",
+                link.species,
+                link.field,
+                fields.join(", ")
+            )));
+        }
+    }
+    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    for p in &cells.parameters {
+        let mut named: Vec<&str> = p.value.maps().into_iter().collect();
+        if let Some(r) = &p.replace {
+            named.push(&r.map);
+            named.extend(r.value.maps());
+        }
+        if let Some(m) = named.iter().find(|m| !available.contains(&m.to_string())) {
+            return Err(ContractError::UnknownMap {
+                map: m.to_string(),
+                available,
+            });
+        }
+    }
+    if !(cells.split_step.is_finite() && cells.split_step > 0.0) {
+        return Err(invalid(format!(
+            "cells.split_step must be > 0, got {}",
+            cells.split_step
+        )));
+    }
+    if study.time.dt > cells.split_step {
+        return Err(invalid(format!(
+            "time.dt ({}) must be <= cells.split_step ({})",
+            study.time.dt, cells.split_step
+        )));
+    }
+    Ok(())
+}
+
 /// Boundary condition on one mesh tag, serialized as
 /// `{"tag": "...", "dirichlet": 0.1}` or `{"tag": "...", "flux": 1.0}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -435,7 +587,41 @@ impl Study {
                 f.id
             )));
         }
+        if let Some(c) = &self.cells {
+            c.validate()?;
+        }
         self.time.validate()
+    }
+}
+
+impl CellsSpec {
+    fn validate(&self) -> Result<(), ContractError> {
+        for (what, x) in [
+            ("time_unit_s", self.time_unit_s),
+            ("rtol", self.rtol),
+            ("atol", self.atol),
+        ] {
+            finite(&format!("cells.{what}"), x)?;
+        }
+        if self.time_unit_s <= 0.0 {
+            return Err(invalid(format!(
+                "cells.time_unit_s must be > 0, got {}",
+                self.time_unit_s
+            )));
+        }
+        for p in &self.parameters {
+            let id = &p.id;
+            p.value
+                .validate(&format!("cells.parameters '{id}': value"), Rule::Any)?;
+            if let Some(r) = &p.replace {
+                finite(&format!("cells.parameters '{id}': replace.above"), r.above)?;
+                r.value.validate(
+                    &format!("cells.parameters '{id}': replace.value"),
+                    Rule::Any,
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 

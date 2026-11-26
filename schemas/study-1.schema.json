@@ -42,6 +42,164 @@
       ],
       "type": "object"
     },
+    "CellParameter": {
+      "additionalProperties": false,
+      "description": "A model parameter set per element.",
+      "properties": {
+        "id": {
+          "description": "Parameter id in the model.",
+          "type": "string"
+        },
+        "replace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Replace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replace the value where a map is high."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Value (a number or a table over a map)."
+        }
+      },
+      "required": [
+        "id",
+        "value"
+      ],
+      "type": "object"
+    },
+    "CellSolverKind": {
+      "description": "How the cell models are solved.",
+      "enum": [
+        "batched",
+        "engine"
+      ],
+      "type": "string"
+    },
+    "CellsSpec": {
+      "additionalProperties": false,
+      "description": "Cell models at the elements of the mesh: one model instance per element, coupled to the\nfields by operator splitting.",
+      "properties": {
+        "areas": {
+          "description": "Area tags of the mesh that hold cells; default all area tags.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "atol": {
+          "default": 1e-9,
+          "description": "Absolute tolerance of the cell solver, default 1e-9.",
+          "format": "double",
+          "type": "number"
+        },
+        "model": {
+          "description": "SBML model, relative to the study file (`Study::load` leaves it as written).",
+          "type": "string"
+        },
+        "outputs": {
+          "default": [],
+          "description": "Extra assignment rule targets written per cell (states and rules are checked at study\nstart against the compiled model); default none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "parameters": {
+          "description": "Model parameters set per element.",
+          "items": {
+            "$ref": "#/$defs/CellParameter"
+          },
+          "type": "array"
+        },
+        "rtol": {
+          "default": 1e-6,
+          "description": "Relative tolerance of the cell solver, default 1e-6.",
+          "format": "double",
+          "type": "number"
+        },
+        "solver": {
+          "$ref": "#/$defs/CellSolverKind",
+          "default": "batched",
+          "description": "Solver of the cell models, default `batched`."
+        },
+        "species": {
+          "description": "Model species exchanged with fields.",
+          "items": {
+            "$ref": "#/$defs/SpeciesLink"
+          },
+          "type": "array"
+        },
+        "split_step": {
+          "description": "Splitting step in s, must be > 0 and >= `time.dt`.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "time_unit_s": {
+          "description": "Seconds per model time unit, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
+        "volumes": {
+          "$ref": "#/$defs/VolumeLink",
+          "description": "Compartments of the model whose volumes follow the porosity."
+        }
+      },
+      "required": [
+        "model",
+        "time_unit_s",
+        "species",
+        "volumes",
+        "parameters",
+        "split_step"
+      ],
+      "type": "object"
+    },
     "Direction": {
       "additionalProperties": false,
       "description": "The flow direction: that of the gradient of a scene map (e.g. a zonation coordinate).",
@@ -411,6 +569,65 @@
       ],
       "type": "object"
     },
+    "Replace": {
+      "additionalProperties": false,
+      "description": "Where the element mean of `map` is above `above`, the parameter takes `value` instead.",
+      "properties": {
+        "above": {
+          "format": "double",
+          "type": "number"
+        },
+        "map": {
+          "description": "Id of a map of the scene.",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "map": {
+                  "description": "Id of a map of the scene.",
+                  "type": "string"
+                },
+                "points": {
+                  "description": "`[value, output]` points, the values strictly increasing.",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "minItems": 2,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "map",
+                "points"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "map",
+        "above",
+        "value"
+      ],
+      "type": "object"
+    },
     "SolverOptions": {
       "additionalProperties": false,
       "properties": {
@@ -420,6 +637,25 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "SpeciesLink": {
+      "additionalProperties": false,
+      "description": "A model species exchanged with a field.",
+      "properties": {
+        "field": {
+          "description": "Id of a field of the study.",
+          "type": "string"
+        },
+        "species": {
+          "description": "Species id in the model.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "species",
+        "field"
+      ],
       "type": "object"
     },
     "TimeSpec": {
@@ -457,12 +693,40 @@
         "dt"
       ],
       "type": "object"
+    },
+    "VolumeLink": {
+      "additionalProperties": false,
+      "description": "Compartment ids of the model, set per element to the porosity (blood) and 1 - porosity\n(cells).",
+      "properties": {
+        "blood": {
+          "type": "string"
+        },
+        "cells": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blood",
+        "cells"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "`study/1`: the simulation description.",
   "properties": {
+    "cells": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CellsSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Cell models coupled to the fields; their `outputs` are checked against the model's\nstates and assignment rule targets at study start, not here."
+    },
     "fields": {
       "description": "Diffusing fields, at least one, with unique ids.",
       "items": {
