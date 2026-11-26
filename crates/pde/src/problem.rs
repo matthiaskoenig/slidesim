@@ -15,7 +15,7 @@ use petsc::{
 };
 
 use crate::balance::{Balance, Setup, State};
-use crate::integral::{Integral, Node};
+use crate::integral::Integral;
 use crate::operators::PointValues;
 use crate::{
     BoundaryInflow, Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result,
@@ -390,8 +390,11 @@ impl Problem {
 
         let mut u = disc.global_vector()?;
         u.set(field.initial)?;
+        let integral = &ts.context().integral;
         let mark = Mark {
-            node: ts.context().integral.current().duplicate()?,
+            t: 0.0,
+            integral: integral.current().c.duplicate()?,
+            source: integral.current_source(&ts.context().f),
             c: u.duplicate()?,
             mass: 0.0,
             jumps: zeros(&disc)?,
@@ -495,6 +498,7 @@ impl Problem {
         let equation = self.ts.context_mut();
         // Integrated again at the next residual.
         equation.forcing_stale = true;
+        equation.integral.source_changes(&equation.f);
         &mut equation.f
     }
 
@@ -724,7 +728,7 @@ impl Problem {
 
     /// The time the interval of [`Problem::interval_balance`] starts at (s).
     pub fn interval_start(&self) -> f64 {
-        self.mark.node.t
+        self.mark.t
     }
 
     /// Starts the interval of [`Problem::interval_balance`] at the current time. Collective.
@@ -734,8 +738,12 @@ impl Problem {
         self.ensure_usable()?;
         let mass = self.total_mass()?;
         let jumps = zeros(&self.disc)?;
+        let equation = self.ts.context();
+        let now = equation.integral.current();
         self.mark = Mark {
-            node: self.ts.context().integral.current().duplicate()?,
+            t: now.t,
+            integral: now.c.duplicate()?,
+            source: equation.integral.current_source(&equation.f),
             c: self.u.duplicate()?,
             mass,
             jumps,
@@ -759,14 +767,14 @@ impl Problem {
         self.ensure_usable()?;
         let equation = self.ts.context();
         equation.integral.check()?;
-        let (now, start) = (equation.integral.current(), &self.mark.node);
-        let duration = now.t - start.t;
+        let now = equation.integral.current();
+        let duration = now.t - self.mark.t;
         if duration <= 0.0 || duration.is_nan() {
             return Err(PdeError::NotStepped { t: self.t });
         }
         // The integrals of the solution, the Dirichlet values included, and of the source.
         let mut integral = now.c.duplicate()?;
-        integral.axpy(-1.0, &start.c)?;
+        integral.axpy(-1.0, &self.mark.integral)?;
         let scaled: Vec<(String, f64)> = self
             .dirichlet
             .iter()
@@ -774,7 +782,10 @@ impl Problem {
             .collect();
         let mut c = local_with_dirichlet(&self.disc, &scaled)?;
         self.disc.dm().global_to_local(&integral, &mut c)?;
-        let f: Vec<f64> = now.f.iter().zip(&start.f).map(|(a, b)| a - b).collect();
+        let mut f = equation.integral.current_source(&equation.f);
+        for (f, start) in f.iter_mut().zip(&self.mark.source) {
+            *f -= start;
+        }
         // The change of the steps: of the solution, but the changes between them.
         let mut change = self.u.duplicate()?;
         change.axpy(-1.0, &self.mark.c)?;
@@ -972,8 +983,12 @@ struct Advection<'a> {
 /// since then besides the steps.
 #[derive(Debug)]
 struct Mark {
-    /// The integral of the steps ([`Integral`]) at the start.
-    node: Node,
+    /// The time of the start (s).
+    t: f64,
+    /// The integrals of the steps ([`Integral`]) at the start: of the solution (a global
+    /// vector), and of the source at the quadrature points.
+    integral: Vector,
+    source: Vec<f64>,
     /// The solution at the start: a global vector.
     c: Vector,
     /// `int phi u` at the start.
@@ -1106,7 +1121,7 @@ impl Implicit for Equation {
     fn post_stage(&mut self, t: f64, y: &VecRef<'_>) -> petsc::Result<()> {
         let shift = self.rate_shift.unwrap_or(f64::NAN);
         self.integral
-            .stage(t, y, &self.f, shift)
+            .stage(t, y, shift)
             .map_err(PdeError::into_petsc)
     }
 

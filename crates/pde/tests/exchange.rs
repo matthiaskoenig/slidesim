@@ -388,6 +388,63 @@ fn interval_balance_closes_with_adaptive_steps() {
     interval_balance_closes(true);
 }
 
+/// A source which changes between steps, with changes of the solution among them: the balance
+/// over the interval closes exactly (the source integrated by the weights of the steps, as the
+/// steps apply it), also over an interval which starts between two changes of the source.
+fn interval_balance_closes_with_a_changing_source(adaptive: bool) {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let mut problem = stepped(&mesh, &maps, &field(0.0, 2.0), adaptive);
+    let exchange = exchange(&mesh, &maps, &problem);
+    let points = problem.discretization().quadrature_points().to_vec();
+    let set_source = |problem: &mut Problem, size: f64| {
+        for (f, x) in problem.source_mut().iter_mut().zip(&points) {
+            *f = size * (1.5 + (x[0] / 50.0).sin() * (x[1] / 70.0).cos());
+        }
+    };
+    let start = problem.total_mass().unwrap();
+    let mut given = 0.0;
+    for (k, t) in [1.5, 3.2, 3.3, 4.0].into_iter().enumerate() {
+        problem.step_to(t).unwrap();
+        set_source(&mut problem, 0.02 * (k as f64 + 1.0));
+        if k % 2 == 1 {
+            let delta = vec![-0.3; exchange.len()];
+            given += exchanged(&exchange, &delta, &mesh);
+            exchange.give_back(&mut problem, &delta).unwrap();
+        }
+    }
+    problem.step_to(5.0).unwrap();
+    let balance = problem.interval_balance().unwrap();
+    let (residual, scale) = closure(&balance);
+    eprintln!("{balance:?}\nresidual {residual:e} of {scale:e}");
+    assert!(residual.abs() <= 1e-9 * scale, "{residual:e} of {scale:e}");
+    assert!(balance.source > 0.0, "{balance:?}");
+    let storage = (problem.total_mass().unwrap() - start) / 5.0;
+    assert!((balance.storage_rate - storage).abs() <= 1e-12 * scale);
+    assert!((balance.exchange - given / 5.0).abs() <= 1e-12 * scale);
+    // An interval from a time between two changes of the source.
+    problem.step_to(5.5).unwrap();
+    problem.start_interval().unwrap();
+    problem.step_to(6.0).unwrap();
+    set_source(&mut problem, 0.2);
+    problem.step_to(7.25).unwrap();
+    let balance = problem.interval_balance().unwrap();
+    let (residual, scale) = closure(&balance);
+    assert!(residual.abs() <= 1e-9 * scale, "{residual:e} of {scale:e}");
+    assert!(balance.source > 0.0, "{balance:?}");
+}
+
+#[test]
+fn interval_balance_closes_with_a_changing_source_and_fixed_steps() {
+    interval_balance_closes_with_a_changing_source(false);
+}
+
+#[test]
+fn interval_balance_closes_with_a_changing_source_and_adaptive_steps() {
+    interval_balance_closes_with_a_changing_source(true);
+}
+
 /// The balance over the first step alone (the start of BDF2: a half step of the first order,
 /// then the step) closes.
 #[test]
@@ -492,6 +549,8 @@ fn parallel_on_2_processes() {
             "means_of_constant_field_are_the_constant",
             "interval_balance_closes_with_fixed_steps",
             "interval_balance_closes_with_adaptive_steps",
+            "interval_balance_closes_with_a_changing_source_and_fixed_steps",
+            "interval_balance_closes_with_a_changing_source_and_adaptive_steps",
             "give_back_conserves_total",
             "steep_uptake_stays_nonnegative",
             "uniform_change_with_resupply",

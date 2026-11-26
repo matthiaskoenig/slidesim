@@ -33,6 +33,14 @@ const SHIFT_MATCH: f64 = 1e-8;
 /// step control rejects is followed by a stage of the same step at an earlier time, which
 /// replaces it and every stage after it. Each stage checks its weight `a_0` against the shift
 /// the step took; if they differ, the integral is broken: [`Integral::check`] says why.
+///
+/// The source changes between steps only ([`Integral::source_changes`]). The integral of the
+/// source at each point is `b + s f + r g`: `f` the source the steps apply, `b` and `g` vectors
+/// fixed at its last change (the integrals at the history points then), `s` and `r` numbers of
+/// the point. The recurrence keeps this form, so a stage integrates the source by updating two
+/// numbers (a constant source adds `f` times the length of the step, the history aside), and the
+/// vectors of the solution of points which are no longer needed are used again: a stage
+/// allocates nothing.
 #[derive(Debug)]
 pub(crate) struct Integral {
     /// The history points of the next step, oldest first: the last is the current time.
@@ -43,6 +51,11 @@ pub(crate) struct Integral {
     restart: bool,
     /// Why the integral does not follow the steps, if it does not.
     broken: Option<String>,
+    /// `b` and `g` of the integrals of the source, at the quadrature points.
+    base: Vec<f64>,
+    rest: Vec<f64>,
+    /// The vectors of points no longer needed, for the next stages.
+    spare: Vec<Vector>,
 }
 
 /// The integral at a time.
@@ -52,19 +65,8 @@ pub(crate) struct Node {
     pub(crate) t: f64,
     /// Of the solution: a global vector (without the essential dofs).
     pub(crate) c: Vector,
-    /// Of the source at the quadrature points.
-    pub(crate) f: Vec<f64>,
-}
-
-impl Node {
-    /// A copy.
-    pub(crate) fn duplicate(&self) -> Result<Node> {
-        Ok(Node {
-            t: self.t,
-            c: self.c.duplicate()?,
-            f: self.f.clone(),
-        })
-    }
+    /// Of the source: `s` and `r` of `b + s f + r g` (see [`Integral`]).
+    source: [f64; 2],
 }
 
 impl Integral {
@@ -75,11 +77,14 @@ impl Integral {
             history: vec![Node {
                 t,
                 c: zero,
-                f: vec![0.0; points],
+                source: [0.0; 2],
             }],
             stages: Vec::new(),
             restart: true,
             broken: None,
+            base: vec![0.0; points],
+            rest: vec![0.0; points],
+            spare: Vec::new(),
         }
     }
 
@@ -90,15 +95,56 @@ impl Integral {
             .expect("the history has the current time")
     }
 
+    /// The integral of the source at the current time, at the quadrature points, for the source
+    /// `f` the steps apply.
+    pub(crate) fn current_source(&self, f: &[f64]) -> Vec<f64> {
+        self.source(self.current(), f)
+    }
+
+    fn source(&self, node: &Node, f: &[f64]) -> Vec<f64> {
+        let [s, r] = node.source;
+        (self.base.iter().zip(f).zip(&self.rest))
+            .map(|((b, f), g)| b + s * f + r * g)
+            .collect()
+    }
+
+    /// The source changes from `f`, the source of the steps so far, between two steps.
+    pub(crate) fn source_changes(&mut self, f: &[f64]) {
+        // Of the history points, the current one last: `b` and `g` from their integrals.
+        let current = self.current_source(f);
+        self.rest = match self.history.as_slice() {
+            [before, _] => {
+                let before = self.source(before, f);
+                before.iter().zip(&current).map(|(x, b)| x - b).collect()
+            }
+            _ => vec![0.0; current.len()],
+        };
+        self.base = current;
+        let n = self.history.len();
+        for (k, node) in self.history.iter_mut().enumerate() {
+            node.source = [0.0, if k + 1 == n { 0.0 } else { 1.0 }];
+        }
+        // None between steps; any other would be replaced by the next stage.
+        self.recycle_stages(f64::NEG_INFINITY);
+    }
+
     /// The next step starts the time integration afresh, from the current time.
     pub(crate) fn restart(&mut self) {
         let current = self
             .history
             .pop()
             .expect("the history has the current time");
-        self.history = vec![current];
-        self.stages.clear();
+        self.spare.extend(self.history.drain(..).map(|node| node.c));
+        self.history.push(current);
+        self.recycle_stages(f64::NEG_INFINITY);
         self.restart = true;
+    }
+
+    /// Drops the stages at `t` and after, keeping their vectors.
+    fn recycle_stages(&mut self, t: f64) {
+        let keep = self.stages.iter().take_while(|s| s.t < t).count();
+        self.spare
+            .extend(self.stages.drain(keep..).map(|node| node.c));
     }
 
     /// An error if the integral does not follow the steps.
@@ -111,11 +157,13 @@ impl Integral {
         }
     }
 
-    /// A stage at the time `t` with the solution `y` and the source `f`, solved with the shift
-    /// `shift` (the weight of its solution in its time derivative).
-    pub(crate) fn stage(&mut self, t: f64, y: &VecRef<'_>, f: &[f64], shift: f64) -> Result<()> {
+    /// A stage at the time `t` with the solution `y`, solved with the shift `shift` (the weight
+    /// of its solution in its time derivative), and the source of the steps.
+    pub(crate) fn stage(&mut self, t: f64, y: &VecRef<'_>, shift: f64) -> Result<()> {
         // A stage at the time of an earlier one, or before: the earlier ones were rejected.
-        self.stages.retain(|s| s.t < t);
+        // The stages are in the order of their times.
+        self.recycle_stages(t);
+        let spare = self.spare.pop();
         let points = if self.restart {
             match self.stages.as_slice() {
                 [] => Some((self.current(), None)),
@@ -145,28 +193,36 @@ impl Integral {
             }
         };
         let mismatch = (a0 - shift).abs() > SHIFT_MATCH * shift.abs() || shift.is_nan();
-        let mut c = p1.c.duplicate()?;
+        // X_0 = X_1 + (x_0 - a_2 (X_2 - X_1)) / a_0, with x_0 the solution and the source.
+        let mut c = match spare {
+            Some(c) => c,
+            None => p1.c.duplicate()?,
+        };
         c.with_array_mut(|x0| {
-            y.with_array(|y| match p2 {
-                None => {
-                    for (x0, y) in x0.iter_mut().zip(y) {
-                        *x0 += y / a0;
+            p1.c.with_array(|x1| {
+                y.with_array(|y| match p2 {
+                    None => {
+                        for ((x0, x1), y) in x0.iter_mut().zip(x1).zip(y) {
+                            *x0 = x1 + y / a0;
+                        }
+                        Ok::<(), petsc::Error>(())
                     }
-                    Ok::<(), petsc::Error>(())
-                }
-                Some(p2) => p2.c.with_array(|x2| {
-                    // x0 holds X_1.
-                    for ((x0, y), x2) in x0.iter_mut().zip(y).zip(x2) {
-                        *x0 += (y - a2 * (x2 - *x0)) / a0;
-                    }
-                }),
+                    Some(p2) => p2.c.with_array(|x2| {
+                        for (((x0, x1), y), x2) in x0.iter_mut().zip(x1).zip(y).zip(x2) {
+                            *x0 = x1 + (y - a2 * (x2 - x1)) / a0;
+                        }
+                    }),
+                })
             })
-        })???;
-        let f = match p2 {
-            None => p1.f.iter().zip(f).map(|(x1, f)| x1 + f / a0).collect(),
-            Some(p2) => (p1.f.iter().zip(f).zip(&p2.f))
-                .map(|((x1, f), x2)| x1 + (f - a2 * (x2 - x1)) / a0)
-                .collect(),
+        })????;
+        // The source is 1 * f, and 0 * b and g.
+        let [s1, r1] = p1.source;
+        let source = match p2 {
+            None => [s1 + 1.0 / a0, r1],
+            Some(p2) => {
+                let [s2, r2] = p2.source;
+                [s1 + (1.0 - a2 * (s2 - s1)) / a0, r1 - a2 * (r2 - r1) / a0]
+            }
         };
         if mismatch {
             self.broken.get_or_insert_with(|| {
@@ -176,7 +232,7 @@ impl Integral {
                 )
             });
         }
-        self.stages.push(Node { t, c, f });
+        self.stages.push(Node { t, c, source });
         Ok(())
     }
 
@@ -199,8 +255,9 @@ impl Integral {
             .history
             .pop()
             .expect("the history has the current time");
-        self.history = vec![start, end];
-        self.stages.clear();
+        self.spare.extend(self.history.drain(..).map(|node| node.c));
+        self.recycle_stages(f64::NEG_INFINITY);
+        self.history.extend([start, end]);
         self.restart = false;
     }
 }
