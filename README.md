@@ -130,3 +130,9 @@ The native dependencies are linked into slidesim (`deps/versions.env` pins their
 
 bison and flex are build tools of PT-Scotch only and are not linked. MPI, and the compression
 libraries Scotch uses, come from the system.
+
+The cell models run on [sbmlsim-core](https://github.com/matthiaskoenig/sbmlsim-core) (MIT),
+whose engine links SUNDIALS (BSD-3-Clause) and parts of SuiteSparse (KLU and BTF:
+LGPL-2.1-or-later; AMD and COLAMD: BSD-3-Clause); its
+[licenses page](https://matthiaskoenig.github.io/sbmlsim-core/licenses/) has the details.
+slidesim itself stays MIT.
