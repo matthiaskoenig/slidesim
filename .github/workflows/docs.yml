@@ -1,0 +1,59 @@
+name: docs
+
+on:
+  push:
+    # feature branches are built through their pull request
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # a newer run supersedes the running one; a cancelled deployment leaves the
+  # published site as it was, the newer run deploys
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Configure GitHub Pages
+        # a pull request builds the site but never deploys it
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v6
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Build the documentation
+        # the pages are markdown of docs/ and need nothing of the build of the crates;
+        # --strict fails on any warning, such as a link to a page that does not exist
+        run: uvx --from zensical==0.1.3 zensical build --clean --strict
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: docs
+    # only the default branch publishes to https://matthiaskoenig.github.io/slidesim
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write     # deploy to GitHub Pages
+      id-token: write  # verify the deployment originates from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
