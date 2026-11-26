@@ -40,13 +40,9 @@
 //!   with two they are determined up to a constant, chosen closest to the targets.
 //!
 //! Where the boundary touches itself at a vertex (two holes, or a hole and the outer boundary,
-//! meeting at a point), its cells are several fans, chains which share no edge, and each fan is
-//! a patch of its own. The P1 function of the vertex spans all fans, so its residual is zero (or
-//! the flow of its pressure tag) for the fans together, not for each: with a pressure condition,
-//! each fan with an edge of the tag lets its own share out through it; a fan without one (walls
-//! only) cannot pass the flow of the P1 pressure through the vertex to the others, and its last
-//! cell keeps it, a source in one fan and a sink in another (all cells of the fans together still
-//! add up to zero).
+//! meeting at a point), the cells around the vertex would be several fans which share no edge;
+//! [`mesh::Mesh::load`] splits such a vertex into one per fan, so every vertex here has one
+//! chain or cycle of cells.
 //!
 //! Hence the flux through an edge of a wall is zero, exactly, and the fluxes through the edges of
 //! a pressure tag add up to its flow from the residual. The equations of a free vertex hold up to
@@ -461,8 +457,7 @@ impl Patches {
     }
 
     /// Solves the patch of the vertex `z` (see the module documentation) and writes the moments
-    /// of its local cells into `moments`: each fan of cells around `z` (cells joined by edges at
-    /// `z`) on its own, more than one where the boundary touches itself at `z`.
+    /// of its local cells into `moments`.
     ///
     /// `Some` with the index of the pressure tag of `z` if its flow cannot leave through an edge
     /// of the boundary of the tag (the tag marks a point inside the domain); then nothing is
@@ -511,46 +506,30 @@ impl Patches {
         star.extend(corners.iter().map(|c| c.cell));
         let tag = self.tag_of(&star);
 
-        // The fans: a chain from each edge of the boundary to another, else one cycle.
-        let mut fans = Vec::new();
-        let mut used = BTreeSet::new();
-        for &edge in &boundary {
-            if used.contains(&edge) {
-                continue;
-            }
-            let fan = self.fan(z, &corners, Some(edge))?;
-            used.insert(fan.edges[0]);
-            used.insert(fan.edges[fan.walk.len()]);
-            fans.push(fan);
-        }
-        if boundary.is_empty() {
-            fans.push(self.fan(z, &corners, None)?);
-        }
-        if fans.iter().map(|f| f.walk.len()).sum::<usize>() != corners.len() {
+        // One chain from an edge of the boundary to another, or one cycle.
+        let fan = self.fan(z, &corners, boundary.first().copied())?;
+        if boundary.len() > 2 || fan.walk.len() != corners.len() {
             return Err(PdeError::Unsupported(
-                "a vertex whose cells are not chains or one cycle around it, for the conservative \
-                 flux"
+                "a vertex whose cells are not one chain or cycle around it (where the boundary \
+                 touches itself, which Mesh::load splits) for the conservative flux"
                     .into(),
             ));
         }
 
         // Which ends are free: edges of the boundary of the tag of z.
         let free = |edge: Point| tag.is_some() && self.tag_of(&[edge]) == tag;
-        let ends: Vec<(bool, bool)> = fans
-            .iter()
-            .map(|f| match f.cycle {
-                true => (false, false),
-                false => (free(f.edges[0]), free(f.edges[f.walk.len()])),
-            })
-            .collect();
+        let (free_0, free_n) = if fan.cycle {
+            (false, false)
+        } else {
+            (free(fan.edges[0]), free(fan.edges[fan.walk.len()]))
+        };
         if let Some(t) = tag
-            && ends.iter().all(|&(a, b)| !a && !b)
+            && !free_0
+            && !free_n
         {
             return Ok(Some(t));
         }
-        for (fan, (free_0, free_n)) in fans.iter().zip(ends) {
-            self.solve_fan(fan, free_0, free_n, moments);
-        }
+        self.solve_fan(&fan, free_0, free_n, moments);
         Ok(None)
     }
 
@@ -649,9 +628,8 @@ impl Patches {
 
     /// Solves the fan `fan` (see the module documentation), with its first and last edges free
     /// (`free_0`, `free_n`; neither for a cycle), and writes the moments of its local cells into
-    /// `moments`. Without a free edge, the last cell takes the residual of the fan: rounding for
-    /// a vertex of one fan; where the boundary touches itself, the flow which the P1 pressure
-    /// passes through the vertex between its fans.
+    /// `moments`. Without a free edge, the last cell takes the residual of the vertex, which the
+    /// refined pressure solve leaves at rounding.
     fn solve_fan(&self, fan: &Fan, free_0: bool, free_n: bool, moments: &mut [[[f64; 2]; 3]]) {
         let walk = &fan.walk;
         let n = walk.len();

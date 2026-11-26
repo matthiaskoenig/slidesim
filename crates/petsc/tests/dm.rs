@@ -350,6 +350,32 @@ fn overlap_holds_the_cells_around_the_vertices_of_local_cells() {
     }
 }
 
+/// A mesh from a cell list: cells first in the order given, then the vertices; interpolated,
+/// with labels set on its points.
+#[test]
+fn plex_from_cells_and_labels() {
+    let p = Petsc::init(&[]).unwrap();
+    // The unit square as two triangles, counterclockwise.
+    let cells = [0, 1, 2, 0, 2, 3];
+    let coordinates = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+    let mut dm = Dm::plex_from_cells(&p.comm(), "square", 2, 3, &cells, 2, &coordinates).unwrap();
+    assert_eq!(dm.height_stratum(0).unwrap(), 0..2);
+    assert_eq!(dm.depth_stratum(0).unwrap(), 2..6);
+    assert_eq!(dm.depth_stratum(1).unwrap().len(), 5);
+    assert_eq!(dm.local_coordinates().unwrap(), coordinates);
+    let total: f64 = (0..2).map(|c| dm.cell_volume(c).unwrap()).sum();
+    assert!((total - 1.0).abs() < 1e-14);
+    dm.create_label("empty").unwrap();
+    assert!(dm.has_label("empty").unwrap());
+    assert!(dm.label_values("empty").unwrap().is_empty());
+    dm.set_label_value("corner", 2, 7).unwrap();
+    assert_eq!(dm.label_values("corner").unwrap(), [7]);
+    assert_eq!(dm.stratum_points("corner", 7).unwrap(), [2]);
+    // A cell naming a vertex which is not there.
+    let e = Dm::plex_from_cells(&p.comm(), "bad", 2, 3, &[0, 1, 4], 2, &coordinates).unwrap_err();
+    assert_eq!(e.code, sys::PETSC_ERR_ARG_SIZ);
+}
+
 #[test]
 fn partitioner_type_is_set_and_read_from_options() {
     let p = Petsc::init(&[]).unwrap();

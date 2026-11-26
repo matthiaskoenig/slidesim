@@ -327,11 +327,116 @@ fn local_bounds_cover_the_local_cells() {
     }
 }
 
+/// The mesh file `file` as PETSc reads it, on process 0 (with the labels of the physical names),
+/// before `Mesh::load` changes anything.
+fn read_raw(p: &Petsc, file: &str) -> Dm {
+    p.with_option("-dm_plex_gmsh_use_regions", Some("true"), || {
+        Dm::plex_from_file(&p.comm(), &fixture(file), "mesh", true)
+    })
+    .unwrap()
+}
+
+/// The numbers of cells, edges and vertices of `dm` over all processes, each point counted by
+/// its owner, and for each of its tags the numbers of the cells, edges and vertices it marks.
+fn census(dm: &Dm, tags: &[Tag]) -> Vec<(String, [i32; 3])> {
+    let ghosts = dm.ghost_points().unwrap();
+    let strata = [2, 1, 0].map(|d| dm.depth_stratum(d).unwrap());
+    let count = |points: &mut dyn Iterator<Item = petsc::Point>| -> [i32; 3] {
+        let mut n = [0; 3];
+        for point in points {
+            if ghosts.binary_search(&point).is_ok() {
+                continue;
+            }
+            let d = strata.iter().position(|s| s.contains(&point)).unwrap();
+            n[d] += 1;
+        }
+        n.map(|k| dm.comm().sum_int(k).unwrap())
+    };
+    let all = strata.clone().into_iter().flatten();
+    let mut census = vec![("mesh".to_string(), count(&mut all.into_iter()))];
+    for tag in tags {
+        let mut points = Vec::new();
+        for value in dm.label_values(&tag.name).unwrap() {
+            points.extend(dm.stratum_points(&tag.name, value).unwrap());
+        }
+        census.push((tag.name.clone(), count(&mut points.into_iter())));
+    }
+    census
+}
+
+/// `pinched.msh` has a vertex at (2, 1) where two holes touch, with two fans of cells around it:
+/// loaded, it is two vertices at (2, 1), one per fan, so no vertex has more than two edges of the
+/// boundary. The cells, the edges and the tags stay: each tag marks the same numbers of cells,
+/// edges and vertices.
+#[test]
+fn pinched_vertex_is_split_per_fan() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = Mesh::load(&p, &scene("pinched.msh"), 0).unwrap();
+    let names: Vec<&str> = mesh.tags().iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["domain", "hole_wall", "inner_line", "left", "right", "rim"]
+    );
+    let raw = read_raw(&p, "pinched.msh");
+    let before = census(&raw, mesh.tags());
+    let after = census(&mesh.levels()[0], mesh.tags());
+    for ((name, b), (_, a)) in before.iter().zip(&after) {
+        println!("{name}: cells, edges, vertices {b:?} as read, {a:?} loaded");
+        // One more vertex in the mesh and on `hole_wall`, which marks the edges around it.
+        let extra = i32::from(name == "mesh");
+        assert_eq!(a, &[b[0], b[1], b[2] + extra], "{name}");
+    }
+    // Two owned vertices at (2, 1), and a vertex with at most two edges of the boundary on
+    // each process.
+    let dm = &mesh.levels()[0];
+    let vertices = dm.depth_stratum(0).unwrap();
+    let ghosts = dm.ghost_points().unwrap();
+    let dim = dm.coordinate_dimension().unwrap();
+    let coordinates = dm.local_coordinates().unwrap();
+    let at_pinch = vertices
+        .clone()
+        .filter(|v| ghosts.binary_search(v).is_err())
+        .filter(|&v| {
+            let i = (v - vertices.start) as usize * dim;
+            (coordinates[i] - 2.0).abs() < 1e-12 && (coordinates[i + 1] - 1.0).abs() < 1e-12
+        })
+        .count();
+    assert_eq!(dm.comm().sum_int(at_pinch as i32).unwrap(), 2);
+    let mut boundary_edges = std::collections::BTreeMap::new();
+    for face in dm.boundary_faces().unwrap() {
+        for v in dm.cone(face).unwrap() {
+            *boundary_edges.entry(v).or_insert(0) += 1;
+        }
+    }
+    assert!(
+        boundary_edges.values().all(|&n| n <= 2),
+        "{boundary_edges:?}"
+    );
+}
+
+/// A mesh without a vertex where the boundary touches itself is loaded as read: the same numbers
+/// of cells, edges and vertices, and of the points of each tag.
+#[test]
+fn mesh_without_pinched_vertex_is_unchanged() {
+    let p = Petsc::init(&[]).unwrap();
+    for file in ["unit_square.msh", "tissue_small.msh", "lobule_toy.msh"] {
+        let mesh = Mesh::load(&p, &scene(file), 0).unwrap();
+        let raw = read_raw(&p, file);
+        assert_eq!(
+            census(&raw, mesh.tags()),
+            census(&mesh.levels()[0], mesh.tags()),
+            "{file}"
+        );
+    }
+}
+
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 11] = [
+const PARALLEL_TESTS: [&str; 13] = [
     "mpi_world_has_the_expected_size",
+    "pinched_vertex_is_split_per_fan",
+    "mesh_without_pinched_vertex_is_unchanged",
     "local_bounds_cover_the_local_cells",
     "tissue_area",
     "refinement_quadruples_cells",

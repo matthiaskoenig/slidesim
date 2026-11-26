@@ -641,6 +641,61 @@ fn no_advection_defect_with_conservative_velocity() {
     }
 }
 
+/// A tracer carried past two holes which touch at a point (`pinched.msh` refined once: the
+/// rectangle [0, 4] x [0, 2] um, the holes walls, the flow from `left` to `right`), where the
+/// boundary touches itself: no advection defect at every step, and nothing leaves through the
+/// walls (to rounding) (`Mesh::load` splits the vertex of the point contact, so no flow passes there).
+#[test]
+fn no_advection_defect_at_a_point_contact() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = common::fixture_mesh(&p, "pinched.msh", 1);
+    let scratch = Scratch::new("no_advection_defect_at_a_point_contact");
+    let direction = scratch.map_on_grid("direction", [45, 85], 0.05, [-0.1, -0.1], |[x, y]| {
+        x + 0.5 * y
+    });
+    let maps = read_maps(&[direction], &mesh);
+    let perfusion = perfusion([3.0, 1.0], &[("left", 1.0), ("right", 0.0)]);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "").unwrap();
+    let inflow = flow.tag_flows()[0].1;
+    assert!(inflow > 0.0, "{:?}", flow.tag_flows());
+    let inputs = Inputs {
+        maps: &maps,
+        flow: Some(&flow),
+    };
+    let field = field(D, 0.0, POROSITY, vec![dirichlet("left", 1.0)]);
+    let dt = 1.0 / 8.0;
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, dt),
+        &ceed(),
+        CONSERVATIVE,
+        &inputs,
+    )
+    .unwrap();
+    for n in 1..=8 {
+        problem.step_to(f64::from(n) * dt).unwrap();
+        let balance = problem.mass_balance().unwrap();
+        assert!(imbalance(&balance) < 1e-8, "step {n}: {balance:?}");
+        assert!(
+            balance.advection_defect.abs() <= 1e-10 * inflow,
+            "step {n}: advection defect {:e} against the inflow {inflow}",
+            balance.advection_defect
+        );
+        for wall in balance
+            .boundary
+            .iter()
+            .filter(|b| ["rim", "hole_wall"].contains(&b.tag.as_str()))
+        {
+            // The normal velocity at its Gauss points is zero up to rounding.
+            assert!(
+                wall.advective.abs() <= 1e-12 * inflow,
+                "step {n}: {balance:?}"
+            );
+        }
+    }
+}
+
 /// `beta` of [`backflow_flow`].
 const BETA: f64 = 2.0;
 
@@ -835,6 +890,7 @@ fn parity(ranks: usize, test: &str) {
                     "mass_balance_closes",
                     "mass_balance_of_a_uniform_flow",
                     "no_advection_defect_with_conservative_velocity",
+                    "no_advection_defect_at_a_point_contact",
                     "backflow_without_condition",
                     "backflow_term_in_mult_diagonal_and_assembly",
                     "supg_tau_of_pure_advection",

@@ -122,6 +122,81 @@ impl Dm {
         Ok(Dm { raw })
     }
 
+    /// An interpolated DMPlex (with edges, and faces in 3D) on `comm` named `name`, of
+    /// dimension `dim`, from the cells `cells` (`corners` vertices each, as indices of the
+    /// vertices) and the coordinates `coordinates` (`space_dim` per vertex)
+    /// (`DMPlexCreateFromCellListPetsc`). As for [`Dm::plex_from_file`], process 0 holds the
+    /// whole mesh: the input of the other processes is ignored. The points are numbered cells
+    /// first, in the order of `cells`, then the vertices, in the order of `coordinates`.
+    /// Collective.
+    ///
+    /// Errors if `cells` is not a multiple of `corners`, or `coordinates` of `space_dim`, or a
+    /// cell names a vertex which is not there.
+    pub fn plex_from_cells(
+        comm: &Comm,
+        name: &str,
+        dim: usize,
+        corners: usize,
+        cells: &[Point],
+        space_dim: usize,
+        coordinates: &[f64],
+    ) -> Result<Dm> {
+        let size = |what: &str| Error::new(sys::PETSC_ERR_ARG_SIZ, format!("a cell list: {what}"));
+        if corners == 0 || !cells.len().is_multiple_of(corners) {
+            return Err(size("cells of another number of corners"));
+        }
+        if space_dim == 0 || !coordinates.len().is_multiple_of(space_dim) {
+            return Err(size("coordinates of another dimension"));
+        }
+        let num_vertices = coordinates.len() / space_dim;
+        if cells.iter().any(|&v| v < 0 || v as usize >= num_vertices) {
+            return Err(size("a vertex which is not there"));
+        }
+        let name = c_string(name, "DM name")?;
+        let mut raw = null_mut();
+        // SAFETY: the arrays hold the sizes given (checked above); PETSc copies them, and `raw`
+        // receives a new DM.
+        chk!(unsafe {
+            sys::DMPlexCreateFromCellListPetsc(
+                comm.as_raw(),
+                to_int(dim, "dimension")?,
+                to_int(cells.len() / corners, "number of cells")?,
+                to_int(num_vertices, "number of vertices")?,
+                to_int(corners, "number of corners")?,
+                true,
+                cells.as_ptr(),
+                to_int(space_dim, "coordinate dimension")?,
+                coordinates.as_ptr(),
+                &mut raw,
+            )
+        });
+        let dm = Dm { raw };
+        // SAFETY: a valid DM and a NUL terminated name, which PETSc copies.
+        chk!(unsafe { sys::PetscObjectSetName(raw as sys::PetscObject, name.as_ptr()) });
+        Ok(dm)
+    }
+
+    /// Sets the label `name` (created if missing, `DMCreateLabel`) to `value` at `point`
+    /// (`DMSetLabelValue`).
+    pub fn set_label_value(
+        &mut self,
+        name: &str,
+        point: Point,
+        value: sys::PetscInt,
+    ) -> Result<()> {
+        let name = c_string(name, "label name")?;
+        chk!(unsafe { sys::DMCreateLabel(self.raw, name.as_ptr()) });
+        chk!(unsafe { sys::DMSetLabelValue(self.raw, name.as_ptr(), point, value) });
+        Ok(())
+    }
+
+    /// Creates the label `name` if the DM has none of that name (`DMCreateLabel`).
+    pub fn create_label(&mut self, name: &str) -> Result<()> {
+        let name = c_string(name, "label name")?;
+        chk!(unsafe { sys::DMCreateLabel(self.raw, name.as_ptr()) });
+        Ok(())
+    }
+
     /// `DMSetFromOptions`.
     pub fn set_from_options(&mut self) -> Result<()> {
         chk!(unsafe { sys::DMSetFromOptions(self.raw) });

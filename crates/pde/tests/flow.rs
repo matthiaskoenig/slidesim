@@ -787,9 +787,9 @@ fn tag_flows_equal_edge_flux_sums() {
 }
 
 /// `pinched.msh` refined once: the rectangle [0, 4] x [0, 2] um with two triangular holes
-/// (`hole_wall`) which touch at (2, 1), where the boundary touches itself: around that vertex two
-/// fans of cells, above and below, which share no edge. The anisotropic permeability of the
-/// oblique flow (map `x + 0.5 y`), with the pressures `pressures`.
+/// (`hole_wall`) which touch at (2, 1), where the boundary touches itself (two vertices there
+/// after `Mesh::load`, one per fan of cells). The anisotropic permeability of the oblique flow
+/// (map `x + 0.5 y`), with the pressures `pressures`.
 fn pinched_flow(
     p: &Petsc,
     test: &str,
@@ -806,99 +806,57 @@ fn pinched_flow(
     Ok((mesh, flow))
 }
 
-/// Asserts on every level of `mesh`: the flux through each edge of the tags `walls` is zero, the
-/// edge fluxes through each pressure tag add up to its flow, and the fluxes out of each cell add
-/// up to zero, but for the cells at the pinch vertex (2, 1) if `pinch_transfer`: there the
-/// cells of each fan add up to the flow through the vertex from one fan to the other (which the
-/// P1 pressure has, its function of the vertex spanning both fans), returned per level, and
-/// all of them to zero.
-fn assert_pinched_conservation(
-    mesh: &Mesh,
-    flow: &Flow,
-    walls: &[&str],
-    pinch_transfer: bool,
-) -> Vec<f64> {
-    let mut transfers = Vec::new();
-    for level in 0..mesh.levels().len() {
-        let edges = Edges::new(mesh, level);
-        let fluxes = edges.fluxes(flow);
-        let start = edges.disc.dm().depth_stratum(1).unwrap().start;
-        for wall in walls {
-            for edge in edges.tagged(wall) {
-                assert_eq!(
-                    fluxes[(edge - start) as usize],
-                    0.0,
-                    "level {level}, {wall}"
-                );
-            }
-        }
-        if level == mesh.levels().len() - 1 {
-            for (tag, q) in flow.tag_flows() {
-                let sum = edges.inflow(flow, tag);
-                assert!(
-                    (sum - q).abs() <= 1e-10 * q.abs(),
-                    "{tag}: {sum} against {q}"
-                );
-            }
-        }
-        let dm = edges.disc.dm();
-        let vertices = dm.depth_stratum(0).unwrap();
-        let at_pinch = |cell: Point| {
-            dm.closure(cell).unwrap().into_iter().any(|v| {
-                let x = vertices.contains(&v).then(|| edges.at(v));
-                x.is_some_and(|[x, y]| (x - 2.0).abs() < 1e-12 && (y - 1.0).abs() < 1e-12)
-            })
-        };
-        let cells = edges.cell_fluxes(flow);
-        let scale = cells.iter().flatten().fold(0.0_f64, |m, f| m.max(f.abs()));
-        let mut pinch = Vec::new();
-        for (cell, f) in dm.height_stratum(0).unwrap().zip(&cells) {
-            let sum = f[0] + f[1] + f[2];
-            if pinch_transfer && at_pinch(cell) {
-                pinch.push(sum);
-            } else {
-                assert!(
-                    sum.abs() <= 1e-12 * scale,
-                    "level {level}: cell {cell} sum {sum:e}"
-                );
-            }
-        }
-        let comm = dm.comm();
-        let total = comm.sum_real(pinch.iter().sum()).unwrap();
-        let transfer = comm
-            .sum_real(pinch.iter().filter(|s| **s > 0.0).sum())
-            .unwrap();
-        println!("level {level}: largest flux {scale:e}, flow through the pinch {transfer:e}");
-        assert!(total.abs() <= 1e-12 * scale, "level {level}: {pinch:?}");
-        transfers.push(transfer);
-    }
-    transfers
-}
+/// The pressures of the flows of `pinched_boundary`: through the holes, and past them.
+const PINCHED_PRESSURES: [&[(&str, f64)]; 2] = [
+    &[("hole_wall", 1.0), ("left", 0.0), ("right", 0.0)],
+    &[("left", 1.0), ("right", 0.0)],
+];
 
-/// A vertex where the boundary touches itself (two holes touching): each fan of cells around it
-/// is a patch of its own. With a pressure condition on both holes, each fan lets the flow at the
-/// vertex out through its own edges of the holes: every cell conserves mass. With walls as holes,
-/// the flow which the P1 pressure passes through the vertex from one fan to the other stays a
-/// source and a sink in a cell of each fan at the vertex (no edge joins them); every other cell
-/// conserves mass. In both cases the walls have no flux, and the pressure tags their flows.
+/// A vertex where the boundary touches itself (two holes touching): with a pressure condition
+/// on the holes, and with the holes as walls, on every level every cell conserves mass, the
+/// walls have no flux, and the edge fluxes of each pressure tag add up to its flow.
 #[test]
 fn pinched_boundary() {
     let p = Petsc::init(&[]).unwrap();
-    let test = "pinched_boundary";
-    let pressures = [("hole_wall", 1.0), ("left", 0.0), ("right", 0.0)];
-    let (mesh, flow) = pinched_flow(&p, test, &pressures).unwrap();
-    assert_pinched_conservation(&mesh, &flow, &["rim"], false);
-
-    let pressures = [("left", 1.0), ("right", 0.0)];
-    let (mesh, flow) = pinched_flow(&p, test, &pressures).unwrap();
-    let transfers = assert_pinched_conservation(&mesh, &flow, &["rim", "hole_wall"], true);
-    // Small against the flow through the domain (measured 5 % and 4 % on the two levels).
-    let q = flow.tag_flows()[0].1;
-    println!("flow {q:e}, through the pinch by level {transfers:?}");
-    assert!(
-        transfers.iter().all(|t| *t < 0.1 * q),
-        "{transfers:?} of {q}"
-    );
+    for (pressures, walls) in PINCHED_PRESSURES
+        .iter()
+        .zip([&["rim"][..], &["rim", "hole_wall"]])
+    {
+        let (mesh, flow) = pinched_flow(&p, "pinched_boundary", pressures).unwrap();
+        for level in 0..mesh.levels().len() {
+            let edges = Edges::new(&mesh, level);
+            let fluxes = edges.fluxes(&flow);
+            let start = edges.disc.dm().depth_stratum(1).unwrap().start;
+            for wall in walls {
+                for edge in edges.tagged(wall) {
+                    assert_eq!(
+                        fluxes[(edge - start) as usize],
+                        0.0,
+                        "level {level}, {wall}"
+                    );
+                }
+            }
+            let cells = edges.cell_fluxes(&flow);
+            let scale = cells.iter().flatten().fold(0.0_f64, |m, f| m.max(f.abs()));
+            let worst = cells
+                .iter()
+                .map(|f| (f[0] + f[1] + f[2]).abs())
+                .fold(0.0, f64::max);
+            println!("{pressures:?}, level {level}: largest flux {scale:e}, cell sum {worst:e}");
+            assert!(
+                worst <= 1e-12 * scale,
+                "level {level}: {worst:e} of {scale:e}"
+            );
+        }
+        let edges = Edges::new(&mesh, mesh.levels().len() - 1);
+        for (tag, q) in flow.tag_flows() {
+            let sum = edges.inflow(&flow, tag);
+            assert!(
+                (sum - q).abs() <= 1e-10 * q.abs(),
+                "{tag}: {sum} against {q}"
+            );
+        }
+    }
 }
 
 /// A pressure tag inside the domain (here on edges embedded in the mesh) is an error, naming the
@@ -1023,15 +981,21 @@ fn unknown_pressure_tag_lists_tags() {
     }
 }
 
-/// The results `parallel_on_*_processes` compares between process counts: of [`uniform`] and
-/// of the flow through `lobule_toy.msh` ([`lobule_flow`]), the L2 norm of the pressure, the
+/// The results `parallel_on_*_processes` compares between process counts: of [`uniform`], of
+/// the flow through `lobule_toy.msh` ([`lobule_flow`]) and of the flows of `pinched_boundary`
+/// ([`pinched_flow`]), the L2 norm of the pressure, the
 /// L2 norms of the velocity (conservative and primal) and the sum of the absolute edge fluxes
 /// on every level, the flows through the tags, and the sums of the edge fluxes through them on
 /// the finest level; and those of the anisotropic manufactured solution (see
 /// [`Manufactured::errors`]).
 fn parity_results(p: &Petsc) -> Vec<f64> {
     let mut results = Vec::new();
-    for (mesh, flow) in [uniform(p), lobule_flow(p, "parity_lobule", 1)] {
+    let pinched =
+        PINCHED_PRESSURES.map(|pressures| pinched_flow(p, "parity_pinched", pressures).unwrap());
+    for (mesh, flow) in [uniform(p), lobule_flow(p, "parity_lobule", 1)]
+        .into_iter()
+        .chain(pinched)
+    {
         results.push(flow.pressure_l2_error(|_| 0.0).unwrap());
         for level in 0..mesh.levels().len() {
             for velocity in [flow.velocity(level), flow.primal_velocity(level)] {
