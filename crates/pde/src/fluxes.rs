@@ -39,6 +39,15 @@
 //!   edges of the boundary at it are zero. With one such edge the chain determines the moments,
 //!   with two they are determined up to a constant, chosen closest to the targets.
 //!
+//! Where the boundary touches itself at a vertex (two holes, or a hole and the outer boundary,
+//! meeting at a point), its cells are several fans, chains which share no edge, and each fan is
+//! a patch of its own. The P1 function of the vertex spans all fans, so its residual is zero (or
+//! the flow of its pressure tag) for the fans together, not for each: with a pressure condition,
+//! each fan with an edge of the tag lets its own share out through it; a fan without one (walls
+//! only) cannot pass the flow of the P1 pressure through the vertex to the others, and its last
+//! cell keeps it, a source in one fan and a sink in another (all cells of the fans together still
+//! add up to zero).
+//!
 //! Hence the flux through an edge of a wall is zero, exactly, and the fluxes through the edges of
 //! a pressure tag add up to its flow from the residual. The equations of a free vertex hold up to
 //! its residual, which the iterative refinement of the pressure solve takes to rounding
@@ -102,10 +111,10 @@ impl Fluxes {
     /// Dirichlet values), for the diffusion tensors `diffusion` (`[D00, D01, D11]`) and the
     /// source `source` at the quadrature points of `disc`. Collective.
     ///
-    /// Errors (on every process): [`PdeError::Unsupported`] for a vertex whose cells are not one
-    /// chain or cycle around it (the boundary touches itself there), or with a pressure condition
-    /// whose flow cannot leave through an edge of the boundary of its tag (a pressure tag on
-    /// edges inside the domain, on cells, or on vertices alone).
+    /// Errors (on every process): [`PdeError::Unsupported`] for a vertex with a pressure
+    /// condition whose flow cannot leave through an edge of the boundary of its tag (a pressure
+    /// tag on edges inside the domain, on cells, or on vertices alone), naming the tag, or for a
+    /// vertex whose cells are not fans around it (an edge of more than two cells).
     pub(crate) fn equilibrate(
         disc: &Discretization,
         diffusion: &[[f64; 3]],
@@ -332,6 +341,15 @@ struct Patches {
     first_cell: Point,
 }
 
+/// A fan of cells around a vertex: the cells `K_1..K_n` of the walk, each with the indices
+/// among its two edges at the vertex of the one it is entered through and the one it is left
+/// by, and the edges `E_0..E_n` (`E_n = E_0` for a cycle).
+struct Fan {
+    walk: Vec<(Corner, usize, usize)>,
+    edges: Vec<Point>,
+    cycle: bool,
+}
+
 /// A cell of a patch and the two edges of it at the vertex of the patch: their indices in its
 /// cone, and the end of each edge which is the vertex.
 #[derive(Clone, Copy)]
@@ -382,6 +400,8 @@ impl Patches {
         let mut moments = vec![[[f64::NAN; 2]; 3]; self.num_local];
         let mut done = vec![false; vertices.len()];
         let mut failure = None;
+        // The first pressure tag found inside the domain, the same error on every process.
+        let mut inside: Option<usize> = None;
         for (oc, local) in self.local.iter().enumerate() {
             if local.is_none() {
                 continue;
@@ -394,11 +414,28 @@ impl Patches {
                         continue;
                     }
                     *seen = true;
-                    if let Err(e) = self.solve_patch(z, &mut moments) {
-                        failure.get_or_insert(e);
+                    match self.solve_patch(z, &mut moments) {
+                        Ok(None) => {}
+                        Ok(Some(tag)) => inside = Some(inside.map_or(tag, |t| t.min(tag))),
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                        }
                     }
                 }
             }
+        }
+        // The smallest index of such a tag on any process, as the largest of its complement.
+        let count = self.tags.len() as petsc::sys::PetscInt;
+        let first = count
+            - dm.comm()
+                .max_int(inside.map_or(0, |t| count - t as petsc::sys::PetscInt))?;
+        if first < count {
+            return Err(PdeError::Unsupported(format!(
+                "pressure tag '{}' marks a point inside the domain (an edge, a cell or a vertex \
+                 not on an edge of the boundary marked by it): the equilibrated fluxes of the \
+                 conservative velocity need the pressure tags on edges of the boundary",
+                self.tags[first as usize].0
+            )));
         }
         if dm.comm().max_int(failure.is_some().into())? > 0 {
             return Err(failure.unwrap_or_else(|| {
@@ -424,11 +461,16 @@ impl Patches {
     }
 
     /// Solves the patch of the vertex `z` (see the module documentation) and writes the moments
-    /// of its local cells into `moments`.
-    fn solve_patch(&self, z: Point, moments: &mut [[[f64; 2]; 3]]) -> Result<()> {
+    /// of its local cells into `moments`: each fan of cells around `z` (cells joined by edges at
+    /// `z`) on its own, more than one where the boundary touches itself at `z`.
+    ///
+    /// `Some` with the index of the pressure tag of `z` if its flow cannot leave through an edge
+    /// of the boundary of the tag (the tag marks a point inside the domain); then nothing is
+    /// written.
+    fn solve_patch(&self, z: Point, moments: &mut [[[f64; 2]; 3]]) -> Result<Option<usize>> {
         let dm = &self.dm;
         let edges_at = dm.support(z)?;
-        // The cells around z, each with its two edges at z.
+        // The cells around z, each with its two edges at z, and the edges of the boundary at z.
         let mut corners: Vec<Corner> = Vec::new();
         let mut boundary = Vec::new();
         for &edge in &edges_at {
@@ -464,95 +506,155 @@ impl Patches {
                 });
             }
         }
+        let mut star: Vec<Point> = vec![z];
+        star.extend(&edges_at);
+        star.extend(corners.iter().map(|c| c.cell));
+        let tag = self.tag_of(&star);
+
+        // The fans: a chain from each edge of the boundary to another, else one cycle.
+        let mut fans = Vec::new();
+        let mut used = BTreeSet::new();
+        for &edge in &boundary {
+            if used.contains(&edge) {
+                continue;
+            }
+            let fan = self.fan(z, &corners, Some(edge))?;
+            used.insert(fan.edges[0]);
+            used.insert(fan.edges[fan.walk.len()]);
+            fans.push(fan);
+        }
+        if boundary.is_empty() {
+            fans.push(self.fan(z, &corners, None)?);
+        }
+        if fans.iter().map(|f| f.walk.len()).sum::<usize>() != corners.len() {
+            return Err(PdeError::Unsupported(
+                "a vertex whose cells are not chains or one cycle around it, for the conservative \
+                 flux"
+                    .into(),
+            ));
+        }
+
+        // Which ends are free: edges of the boundary of the tag of z.
+        let free = |edge: Point| tag.is_some() && self.tag_of(&[edge]) == tag;
+        let ends: Vec<(bool, bool)> = fans
+            .iter()
+            .map(|f| match f.cycle {
+                true => (false, false),
+                false => (free(f.edges[0]), free(f.edges[f.walk.len()])),
+            })
+            .collect();
+        if let Some(t) = tag
+            && ends.iter().all(|&(a, b)| !a && !b)
+        {
+            return Ok(Some(t));
+        }
+        for (fan, (free_0, free_n)) in fans.iter().zip(ends) {
+            self.solve_fan(fan, free_0, free_n, moments);
+        }
+        Ok(None)
+    }
+
+    /// The fan of the cells `corners` around `z` from the edge of the boundary `start`, or the
+    /// cycle of all of them without one; the walk starts at the end of the fan whose cell (then
+    /// edge in its cone) comes first, or for a cycle at the cell of the smallest global number
+    /// towards its neighbour of the smaller one.
+    fn fan(&self, z: Point, corners: &[Corner], start: Option<Point>) -> Result<Fan> {
+        let dm = &self.dm;
         let number = |cell: Point| self.records[self.index(cell)][0];
+        let corner_of = |cell: Point| *corners.iter().find(|c| c.cell == cell).expect("a corner");
         let edge_of = |corner: &Corner, k: usize| -> Result<Point> {
             Ok(dm.cone(corner.cell)?[corner.edges[k].0])
         };
         let other_cell = |edge: Point, cell: Point| -> Result<Option<Point>> {
             Ok(dm.support(edge)?.into_iter().find(|&c| c != cell))
         };
-
-        // The walk: the first cell and the edge it is entered through.
-        let (first, entry) = match boundary.as_slice() {
-            [] => {
-                // A cycle: from the cell of the smallest number, towards its neighbour of the
-                // smaller number; entered from the other.
-                let start = *corners
+        // The walk from `first`, entered through `entry`.
+        let walk_from = |first: Corner, entry: Point| -> Result<Fan> {
+            let mut walk: Vec<(Corner, usize, usize)> = Vec::new();
+            let mut edges = vec![entry];
+            let (mut corner, mut entered) = (first, entry);
+            loop {
+                let k_in = (0..2)
+                    .find(|&k| edge_of(&corner, k).ok() == Some(entered))
+                    .expect("entered through an edge at z");
+                let k_out = 1 - k_in;
+                let leave = edge_of(&corner, k_out)?;
+                walk.push((corner, k_in, k_out));
+                edges.push(leave);
+                match other_cell(leave, corner.cell)? {
+                    Some(next) if next == first.cell => {
+                        return Ok(Fan {
+                            walk,
+                            edges,
+                            cycle: true,
+                        });
+                    }
+                    Some(next) => {
+                        corner = corner_of(next);
+                        entered = leave;
+                    }
+                    None => {
+                        return Ok(Fan {
+                            walk,
+                            edges,
+                            cycle: false,
+                        });
+                    }
+                }
+                if walk.len() > corners.len() {
+                    return Err(PdeError::Unsupported(format!(
+                        "vertex {z}: cells which are not chains or one cycle around it"
+                    )));
+                }
+            }
+        };
+        match start {
+            None => {
+                let first = *corners
                     .iter()
                     .min_by(|a, b| number(a.cell).total_cmp(&number(b.cell)))
                     .expect("a vertex has a cell");
                 let neighbours =
-                    [0, 1].map(|k| edge_of(&start, k).and_then(|e| other_cell(e, start.cell)));
+                    [0, 1].map(|k| edge_of(&first, k).and_then(|e| other_cell(e, first.cell)));
                 let [Ok(Some(n0)), Ok(Some(n1))] = neighbours else {
                     return Err(PdeError::Unsupported(
                         "an inner vertex with an edge of one cell".into(),
                     ));
                 };
                 let toward = if number(n0) <= number(n1) { 0 } else { 1 };
-                (start, edge_of(&start, 1 - toward)?)
+                walk_from(first, edge_of(&first, 1 - toward)?)
             }
-            &[b0, b1] => {
-                // A chain: from the end whose cell (then edge in its cone) comes first.
-                let key = |edge: Point| -> Result<(f64, usize, Corner)> {
-                    let cell = dm.support(edge)?[0];
-                    let corner = *corners.iter().find(|c| c.cell == cell).expect("a corner");
-                    let k = (0..2)
-                        .find(|&k| edge_of(&corner, k).ok() == Some(edge))
-                        .expect("an edge of the corner");
-                    Ok((number(cell), corner.edges[k].0, corner))
-                };
-                let (k0, k1) = (key(b0)?, key(b1)?);
-                if (k0.0, k0.1) <= (k1.0, k1.1) {
-                    (k0.2, b0)
+            Some(edge) => {
+                let corner = corner_of(dm.support(edge)?[0]);
+                let fan = walk_from(corner, edge)?;
+                if fan.cycle {
+                    return Err(PdeError::Unsupported(format!(
+                        "vertex {z}: an edge of the boundary in a cycle of cells"
+                    )));
+                }
+                // The key of an end: the number of its cell, then the index of its edge in the
+                // cone of the cell.
+                let n = fan.walk.len();
+                let key = |(corner, k): (&Corner, usize)| (number(corner.cell), corner.edges[k].0);
+                let first = key((&fan.walk[0].0, fan.walk[0].1));
+                let last = key((&fan.walk[n - 1].0, fan.walk[n - 1].2));
+                if first <= last {
+                    Ok(fan)
                 } else {
-                    (k1.2, b1)
+                    walk_from(fan.walk[n - 1].0, fan.edges[n])
                 }
             }
-            _ => {
-                return Err(PdeError::Unsupported(format!(
-                    "a vertex with {} edges of the boundary (where the boundary touches itself) \
-                     for the conservative flux",
-                    boundary.len()
-                )));
-            }
-        };
+        }
+    }
 
-        // The cells K_1..K_n and the edges E_0..E_n of the walk (E_n = E_0 for a cycle), with
-        // the index in the cone of each cell of the edge it is entered through and left by.
-        let mut walk: Vec<(Corner, usize, usize)> = Vec::new();
-        let mut edges = vec![entry];
-        let (mut corner, mut entered) = (first, entry);
-        loop {
-            let k_in = (0..2)
-                .find(|&k| edge_of(&corner, k).ok() == Some(entered))
-                .expect("entered through an edge at z");
-            let k_out = 1 - k_in;
-            let leave = edge_of(&corner, k_out)?;
-            walk.push((corner, k_in, k_out));
-            edges.push(leave);
-            match other_cell(leave, corner.cell)? {
-                Some(next) if next != first.cell => {
-                    corner = *corners.iter().find(|c| c.cell == next).expect("a corner");
-                    entered = leave;
-                }
-                _ => break,
-            }
-            if walk.len() > corners.len() {
-                return Err(PdeError::Unsupported(
-                    "a vertex whose cells are not one chain or cycle".into(),
-                ));
-            }
-        }
-        if walk.len() != corners.len() {
-            return Err(PdeError::Unsupported(
-                "a vertex whose cells are not one chain or cycle (the boundary touches itself) \
-                 for the conservative flux"
-                    .into(),
-            ));
-        }
+    /// Solves the fan `fan` (see the module documentation), with its first and last edges free
+    /// (`free_0`, `free_n`; neither for a cycle), and writes the moments of its local cells into
+    /// `moments`. Without a free edge, the last cell takes the residual of the fan: rounding for
+    /// a vertex of one fan; where the boundary touches itself, the flow which the P1 pressure
+    /// passes through the vertex between its fans.
+    fn solve_fan(&self, fan: &Fan, free_0: bool, free_n: bool, moments: &mut [[[f64; 2]; 3]]) {
+        let walk = &fan.walk;
         let n = walk.len();
-        let cycle = boundary.is_empty();
-
         // The residuals and the targets of the moments mu_i from K_i into K_(i+1) through E_i.
         let record = |corner: &Corner| &self.records[self.index(corner.cell)];
         let residual = |(corner, k_in, _): &(Corner, usize, usize)| {
@@ -567,7 +669,7 @@ impl Patches {
             targets[i] = 0.5 * (target_out(&before.0, before.2) - target_out(&after.0, after.1));
         }
         targets[n] = target_out(&walk[n - 1].0, walk[n - 1].2);
-        if cycle {
+        if fan.cycle {
             // E_n is E_0: one target, from both cells.
             let t = 0.5 * (targets[n] + targets[0]);
             targets[0] = t;
@@ -578,34 +680,20 @@ impl Patches {
             prefix[i] = prefix[i - 1] + residual(&walk[i - 1]);
         }
 
-        // Which ends are free: edges of the boundary of the tag of z.
-        let mut star: Vec<Point> = vec![z];
-        star.extend(&edges_at);
-        star.extend(corners.iter().map(|c| c.cell));
-        let tag = self.tag_of(&star);
-        let free = |edge: Point| !cycle && tag.is_some() && self.tag_of(&[edge]) == tag;
-        let (free_0, free_n) = (free(edges[0]), free(edges[n]));
         let mut mu = vec![0.0; n + 1];
-        match (cycle, free_0, free_n) {
-            (true, _, _) | (false, false, false) => {
-                if let Some(t) = tag {
-                    return Err(PdeError::Unsupported(format!(
-                        "pressure tag '{}' at a vertex with no edge of the boundary of the tag \
-                         (a pressure condition inside the domain, on cells or on vertices) for \
-                         the conservative flux",
-                        self.tags[t].0
-                    )));
-                }
-                // mu_i = c + P_i; the last cell takes the residual of the vertex (rounding).
-                let c = if cycle {
-                    (0..n).map(|i| targets[i] - prefix[i]).sum::<f64>() / n as f64
-                } else {
-                    0.0
-                };
+        match (fan.cycle, free_0, free_n) {
+            (true, _, _) => {
+                // mu_i = c + P_i, c closest to the targets; the last cell takes the residual of
+                // the vertex (rounding).
+                let c = (0..n).map(|i| targets[i] - prefix[i]).sum::<f64>() / n as f64;
                 for i in 0..n {
                     mu[i] = c + prefix[i];
                 }
-                mu[n] = if cycle { mu[0] } else { 0.0 };
+                mu[n] = mu[0];
+            }
+            (false, false, false) => {
+                mu[..n].copy_from_slice(&prefix[..n]);
+                mu[n] = 0.0;
             }
             (false, true, false) => {
                 for i in 0..n {
@@ -613,9 +701,7 @@ impl Patches {
                 }
                 mu[n] = 0.0;
             }
-            (false, false, true) => {
-                mu.copy_from_slice(&prefix);
-            }
+            (false, false, true) => mu.copy_from_slice(&prefix),
             (false, true, true) => {
                 let c = (0..=n).map(|i| targets[i] - prefix[i]).sum::<f64>() / (n + 1) as f64;
                 for i in 0..=n {
@@ -634,7 +720,6 @@ impl Patches {
             moments[c][e_in][j_in] = -mu[i];
             moments[c][e_out][j_out] = mu[i + 1];
         }
-        Ok(())
     }
 }
 

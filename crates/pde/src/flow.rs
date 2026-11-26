@@ -68,8 +68,10 @@ const VELOCITY_UNIT: &str = "um/s";
 /// from the residual of the discrete equations vertex patch by vertex patch (as Ladeveze, and
 /// Ainsworth and Oden; Larson and Niklasson 2004), so that the fluxes out of every cell add up
 /// to zero, the flux through each edge of a wall without pressure condition is zero, and the
-/// fluxes through the edges of each pressure tag add up to its flow ([`Flow::tag_flows`]). It
-/// converges at the order of the primal velocity, 1. Both are at the quadrature points, not
+/// fluxes through the edges of each pressure tag add up to its flow ([`Flow::tag_flows`]).
+/// (Where the boundary touches itself at a vertex between walls, the flow the P1 pressure passes
+/// through the vertex stays a source and a sink in a cell at it on either side.) It converges at
+/// the order of the primal velocity, 1. Both are at the quadrature points, not
 /// projected onto a finite element space.
 ///
 /// Discretization: P1 on every level of the mesh, with the pressure tags essential, and the
@@ -147,8 +149,9 @@ impl Flow {
     /// Errors: [`PdeError::Unsupported`] without pressure boundaries (the pressure is not
     /// determined), for a viscosity or `g0` which is not positive, or (on every process) for a
     /// pressure tag whose flow cannot leave through edges of the boundary of the tag (a tag on
-    /// edges inside the domain, on cells or on vertices alone) or a vertex where the boundary
-    /// touches itself, where the conservative velocity is not defined; [`PdeError::Mesh`] for a
+    /// edges inside the domain, on cells or on vertices alone), naming the tag: the
+    /// equilibrated fluxes of the conservative velocity need it on edges of the boundary;
+    /// [`PdeError::Mesh`] for a
     /// pressure tag the mesh does not have, listing its tags; [`PdeError::Map`] (on every
     /// process) if a map cannot be evaluated at a quadrature point of a level, naming the
     /// coefficient (`k_along`, `k_across` or `direction`); [`PdeError::SolveFailed`] if a
@@ -318,7 +321,8 @@ impl Flow {
     /// direction of the reference normal of the edge: the vector from its first vertex to its
     /// second (in the order of its cone) turned by -90 degrees. The fluxes out of each cell add
     /// up to zero, to rounding (with a source, as for [`Flow::solve_manufactured`], to its
-    /// integral over the cell); through an edge of a wall without pressure condition the flux is
+    /// integral over the cell; at a vertex where the boundary touches itself between walls, see
+    /// [`Flow`]); through an edge of a wall without pressure condition the flux is
     /// zero; the fluxes through the edges of a pressure tag add up to its flow
     /// ([`Flow::tag_flows`]). An edge on several processes has the same flux on each.
     ///

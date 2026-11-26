@@ -786,6 +786,135 @@ fn tag_flows_equal_edge_flux_sums() {
     }
 }
 
+/// `pinched.msh` refined once: the rectangle [0, 4] x [0, 2] um with two triangular holes
+/// (`hole_wall`) which touch at (2, 1), where the boundary touches itself: around that vertex two
+/// fans of cells, above and below, which share no edge. The anisotropic permeability of the
+/// oblique flow (map `x + 0.5 y`), with the pressures `pressures`.
+fn pinched_flow(
+    p: &Petsc,
+    test: &str,
+    pressures: &[(&str, f64)],
+) -> Result<(Mesh, Flow), PdeError> {
+    let mesh = common::fixture_mesh(p, "pinched.msh", 1);
+    let scratch = Scratch::new(test);
+    let direction = scratch.map_on_grid("direction", [45, 85], 0.05, [-0.1, -0.1], |[x, y]| {
+        x + 0.5 * y
+    });
+    let maps = read_maps(&[direction], &mesh);
+    let perfusion = perfusion(1.0, [3.0, 1.0], G0, pressures);
+    let flow = Flow::solve(&mesh, &perfusion, &maps, &ceed(), "")?;
+    Ok((mesh, flow))
+}
+
+/// Asserts on every level of `mesh`: the flux through each edge of the tags `walls` is zero, the
+/// edge fluxes through each pressure tag add up to its flow, and the fluxes out of each cell add
+/// up to zero, but for the cells at the pinch vertex (2, 1) if `pinch_transfer`: there the
+/// cells of each fan add up to the flow through the vertex from one fan to the other (which the
+/// P1 pressure has, its function of the vertex spanning both fans), returned per level, and
+/// all of them to zero.
+fn assert_pinched_conservation(
+    mesh: &Mesh,
+    flow: &Flow,
+    walls: &[&str],
+    pinch_transfer: bool,
+) -> Vec<f64> {
+    let mut transfers = Vec::new();
+    for level in 0..mesh.levels().len() {
+        let edges = Edges::new(mesh, level);
+        let fluxes = edges.fluxes(flow);
+        let start = edges.disc.dm().depth_stratum(1).unwrap().start;
+        for wall in walls {
+            for edge in edges.tagged(wall) {
+                assert_eq!(
+                    fluxes[(edge - start) as usize],
+                    0.0,
+                    "level {level}, {wall}"
+                );
+            }
+        }
+        if level == mesh.levels().len() - 1 {
+            for (tag, q) in flow.tag_flows() {
+                let sum = edges.inflow(flow, tag);
+                assert!(
+                    (sum - q).abs() <= 1e-10 * q.abs(),
+                    "{tag}: {sum} against {q}"
+                );
+            }
+        }
+        let dm = edges.disc.dm();
+        let vertices = dm.depth_stratum(0).unwrap();
+        let at_pinch = |cell: Point| {
+            dm.closure(cell).unwrap().into_iter().any(|v| {
+                let x = vertices.contains(&v).then(|| edges.at(v));
+                x.is_some_and(|[x, y]| (x - 2.0).abs() < 1e-12 && (y - 1.0).abs() < 1e-12)
+            })
+        };
+        let cells = edges.cell_fluxes(flow);
+        let scale = cells.iter().flatten().fold(0.0_f64, |m, f| m.max(f.abs()));
+        let mut pinch = Vec::new();
+        for (cell, f) in dm.height_stratum(0).unwrap().zip(&cells) {
+            let sum = f[0] + f[1] + f[2];
+            if pinch_transfer && at_pinch(cell) {
+                pinch.push(sum);
+            } else {
+                assert!(
+                    sum.abs() <= 1e-12 * scale,
+                    "level {level}: cell {cell} sum {sum:e}"
+                );
+            }
+        }
+        let comm = dm.comm();
+        let total = comm.sum_real(pinch.iter().sum()).unwrap();
+        let transfer = comm
+            .sum_real(pinch.iter().filter(|s| **s > 0.0).sum())
+            .unwrap();
+        println!("level {level}: largest flux {scale:e}, flow through the pinch {transfer:e}");
+        assert!(total.abs() <= 1e-12 * scale, "level {level}: {pinch:?}");
+        transfers.push(transfer);
+    }
+    transfers
+}
+
+/// A vertex where the boundary touches itself (two holes touching): each fan of cells around it
+/// is a patch of its own. With a pressure condition on both holes, each fan lets the flow at the
+/// vertex out through its own edges of the holes: every cell conserves mass. With walls as holes,
+/// the flow which the P1 pressure passes through the vertex from one fan to the other stays a
+/// source and a sink in a cell of each fan at the vertex (no edge joins them); every other cell
+/// conserves mass. In both cases the walls have no flux, and the pressure tags their flows.
+#[test]
+fn pinched_boundary() {
+    let p = Petsc::init(&[]).unwrap();
+    let test = "pinched_boundary";
+    let pressures = [("hole_wall", 1.0), ("left", 0.0), ("right", 0.0)];
+    let (mesh, flow) = pinched_flow(&p, test, &pressures).unwrap();
+    assert_pinched_conservation(&mesh, &flow, &["rim"], false);
+
+    let pressures = [("left", 1.0), ("right", 0.0)];
+    let (mesh, flow) = pinched_flow(&p, test, &pressures).unwrap();
+    let transfers = assert_pinched_conservation(&mesh, &flow, &["rim", "hole_wall"], true);
+    // Small against the flow through the domain (measured 5 % and 4 % on the two levels).
+    let q = flow.tag_flows()[0].1;
+    println!("flow {q:e}, through the pinch by level {transfers:?}");
+    assert!(
+        transfers.iter().all(|t| *t < 0.1 * q),
+        "{transfers:?} of {q}"
+    );
+}
+
+/// A pressure tag inside the domain (here on edges embedded in the mesh) is an error, naming the
+/// tag: the equilibrated fluxes of the conservative velocity need the pressure tags on edges of
+/// the boundary.
+#[test]
+fn pressure_tag_inside_the_domain_is_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let pressures = [("left", 1.0), ("right", 0.0), ("inner_line", 0.5)];
+    let e = pinched_flow(&p, "pressure_tag_inside_the_domain_is_error", &pressures).unwrap_err();
+    let message = e.to_string();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{message}");
+    assert!(message.contains("'inner_line'"), "{message}");
+    assert!(message.contains("edges of the boundary"), "{message}");
+}
+
 /// The velocity of every level is at the quadrature points of that level, in the layout of any
 /// discretization of it (here one with the essential tags of a species): against the exact
 /// velocity of the anisotropic manufactured flow there, the error falls with the mesh size
@@ -943,6 +1072,8 @@ fn parity(ranks: usize, test: &str) {
                     "element_fluxes_sum_to_zero",
                     "no_flux_through_walls_without_pressure",
                     "tag_flows_equal_edge_flux_sums",
+                    "pinched_boundary",
+                    "pressure_tag_inside_the_domain_is_error",
                     "velocity_of_every_level_at_its_points",
                     "isotropic_where_gradient_vanishes",
                     "divergence_is_error",

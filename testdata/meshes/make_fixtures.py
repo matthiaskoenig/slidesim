@@ -14,6 +14,11 @@ Run from the repository root:
   `LOBULE_HOLE_RADIUS` um at each of `LOBULE_PORTAL` and `LOBULE_CENTRAL` (near opposite corners):
   area `tissue` (3), edges `portal_wall` (11), `central_wall` (12) and `section_edge` (13, the outer
   boundary). Mesh size about `LOBULE_SIZE` um.
+- `pinched.msh`: the rectangle [0, 4] x [0, 2] um with two triangular holes which touch at the
+  point (2, 1), where the boundary of the domain touches itself: area `domain` (1), edges `left`
+  (11), `right` (12), `rim` (13, top and bottom), `hole_wall` (14, both holes) and `inner_line`
+  (15, the segment from (3.5, 0.5) to (3.5, 1.5) inside the domain, embedded in its mesh). Mesh
+  size about `PINCHED_SIZE` um.
 
 Written by hand, not by this script:
 
@@ -39,6 +44,7 @@ LOBULE_HOLE_RADIUS = 20.0
 LOBULE_PORTAL = (90.0, 90.0)
 LOBULE_CENTRAL = (310.0, 310.0)
 LOBULE_SIZE = 20.0
+PINCHED_SIZE = 0.25
 
 
 def start(name: str, size: float) -> None:
@@ -116,7 +122,47 @@ def lobule_toy() -> None:
     finish("lobule_toy")
 
 
+def pinched() -> None:
+    start("pinched", PINCHED_SIZE)
+    geo = gmsh.model.geo
+
+    def points(coordinates):
+        return [geo.addPoint(x, y, 0.0, PINCHED_SIZE) for x, y in coordinates]
+
+    def loop(corners):
+        lines = [geo.addLine(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+        return lines, geo.addCurveLoop(lines)
+
+    p0, p1, p2, p3 = points([(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)])
+    outer, outer_loop = loop([p0, p1, p2, p3])
+    (pinch,) = points([(2.0, 1.0)])
+    a0, a1 = points([(1.0, 0.5), (1.0, 1.5)])
+    b0, b1 = points([(3.0, 0.5), (3.0, 1.5)])
+    hole_a, loop_a = loop([a0, pinch, a1])
+    hole_b, loop_b = loop([b0, b1, pinch])
+    surface = geo.addPlaneSurface([outer_loop, loop_a, loop_b])
+    c0, c1 = points([(3.5, 0.5), (3.5, 1.5)])
+    inner = geo.addLine(c0, c1)
+    geo.synchronize()
+    gmsh.model.mesh.embed(1, [inner], 2, surface)
+    gmsh.model.addPhysicalGroup(2, [surface], 1, "domain")
+    bottom, right, top, left = outer
+    for tag, (name, curves) in enumerate(
+        (
+            ("left", [left]),
+            ("right", [right]),
+            ("rim", [top, bottom]),
+            ("hole_wall", hole_a + hole_b),
+            ("inner_line", [inner]),
+        ),
+        start=11,
+    ):
+        gmsh.model.addPhysicalGroup(1, curves, tag, name)
+    finish("pinched")
+
+
 if __name__ == "__main__":
     unit_square()
     tissue_small()
     lobule_toy()
+    pinched()
