@@ -145,8 +145,8 @@ impl Petsc {
         Ok(petsc)
     }
 
-    /// `PETSC_COMM_WORLD`.
-    pub fn comm(&self) -> Comm {
+    /// `PETSC_COMM_WORLD`, borrowed from `self`: valid until PETSc is finalized.
+    pub fn comm(&self) -> Comm<'_> {
         Comm::new(unsafe { sys::PETSC_COMM_WORLD })
     }
 
@@ -170,8 +170,8 @@ impl Petsc {
         std::process::exit(code)
     }
 
-    /// `PETSC_COMM_SELF`: this process alone.
-    pub fn comm_self(&self) -> Comm {
+    /// `PETSC_COMM_SELF`: this process alone. Borrowed from `self`, as [`Petsc::comm`].
+    pub fn comm_self(&self) -> Comm<'_> {
         Comm::self_()
     }
 
@@ -253,19 +253,40 @@ impl Drop for Petsc {
     }
 }
 
-/// An MPI communicator. Valid while PETSc is initialized. Not `Send` or `Sync` (on every MPI:
-/// MPICH's handle is an integer).
+/// An MPI communicator, borrowed for `'a` from what keeps it alive: [`Petsc`] for
+/// `PETSC_COMM_WORLD` and `PETSC_COMM_SELF`, a [`Dm`] for PETSc's communicator of the mesh (freed
+/// with the last object on it), an [`OwnedComm`]. To keep a communicator beyond its source, own
+/// a reference to it with [`Comm::duplicate`]. Not `Send` or `Sync` (on every MPI: MPICH's
+/// handle is an integer).
+///
+/// ```compile_fail
+/// let petsc = petsc::Petsc::init(&[]).unwrap();
+/// let comm = petsc.comm();
+/// drop(petsc);
+/// comm.rank();
+/// ```
 #[derive(Clone, Copy, Debug)]
-pub struct Comm(sys::MPI_Comm, PhantomData<*const ()>);
+pub struct Comm<'a>(sys::MPI_Comm, PhantomData<(&'a (), *const ())>);
 
-impl Comm {
-    fn new(raw: sys::MPI_Comm) -> Comm {
+impl<'a> Comm<'a> {
+    /// The communicator `raw`, valid for `'a` (the caller's contract).
+    fn new(raw: sys::MPI_Comm) -> Comm<'a> {
         Comm(raw, PhantomData)
     }
 
-    /// `PETSC_COMM_SELF`.
-    pub(crate) fn self_() -> Comm {
+    /// `PETSC_COMM_SELF`, for a call within this crate while PETSc is initialized.
+    pub(crate) fn self_() -> Comm<'static> {
         Comm::new(unsafe { sys::petsc_sys_comm_self() })
+    }
+
+    /// A reference of its own to PETSc's inner communicator of this one, valid until it is
+    /// dropped, whatever happens to the objects it came from (`PetscCommDuplicate`). Collective:
+    /// PETSc built with debugging waits for every process of the communicator here.
+    pub fn duplicate(&self) -> Result<OwnedComm> {
+        error::ensure_alive("PetscCommDuplicate")?;
+        let mut inner = self.0;
+        chk!(unsafe { sys::PetscCommDuplicate(self.0, &mut inner, null_mut()) });
+        Ok(OwnedComm(std::rc::Rc::new(Reference(inner))))
     }
 
     /// The rank of this process.
@@ -410,5 +431,36 @@ impl Comm {
 
     pub fn as_raw(&self) -> sys::MPI_Comm {
         self.0
+    }
+}
+
+/// A communicator owned for as long as it lives, from [`Comm::duplicate`]: a reference to
+/// PETSc's inner communicator, released when the last clone is dropped (`PetscCommDestroy`; MPI
+/// frees the communicator with its last reference). Clones share the reference, so that cloning
+/// is not collective. Not `Send` or `Sync`.
+#[derive(Clone, Debug)]
+pub struct OwnedComm(std::rc::Rc<Reference>);
+
+impl OwnedComm {
+    /// The communicator, borrowed from `self`.
+    pub fn comm(&self) -> Comm<'_> {
+        Comm::new(self.0.0)
+    }
+}
+
+/// One reference counted by PETSc to an inner communicator.
+#[derive(Debug)]
+struct Reference(sys::MPI_Comm);
+
+impl Drop for Reference {
+    fn drop(&mut self) {
+        if !alive() {
+            // MPI is finalized and its communicators with it.
+            return;
+        }
+        crate::error::destroyed(
+            unsafe { sys::PetscCommDestroy(&mut self.0) },
+            "PetscCommDestroy",
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use contracts::CellsSpec;
-use petsc::Comm;
+use petsc::OwnedComm;
 use sbmlsim_abi::{IntegratorSettings, Tolerance};
 use sbmlsim_engine::Stepper;
 
@@ -32,7 +32,7 @@ pub struct EngineCells {
     time_unit_s: f64,
     global: Vec<i64>,
     centroids: Vec<[f64; 2]>,
-    comm: Comm,
+    comm: OwnedComm,
     /// The state of a cell during an advance.
     work: Vec<f64>,
     outputs: Outputs,
@@ -69,8 +69,8 @@ impl EngineCells {
         spec: &CellsSpec,
         model: &CellModel,
     ) -> Result<EngineCells> {
-        let comm = setup.comm();
-        agree(&comm, setup.check())?;
+        let comm = setup.owned_comm();
+        agree(&comm.comm(), setup.check())?;
         let outputs = Outputs::new(model, spec);
         let CellModel {
             model,
@@ -102,7 +102,7 @@ impl EngineCells {
                 })
             })
             .collect::<Result<Vec<Stepper>>>();
-        let steppers = agree(&comm, created)?;
+        let steppers = agree(&comm.comm(), created)?;
         let states = steppers
             .iter()
             .flat_map(|s| s.state().iter().copied())
@@ -196,7 +196,7 @@ impl CellSolver for EngineCells {
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
         let local = self.advance_local(t0, t1, blood);
-        agree(&self.comm, local)
+        agree(&self.comm.comm(), local)
     }
 
     fn states(&self) -> &[f64] {

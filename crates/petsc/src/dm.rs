@@ -203,8 +203,9 @@ impl Dm {
         Ok(())
     }
 
-    /// The communicator of the DM (`PetscObjectGetComm`).
-    pub fn comm(&self) -> Comm {
+    /// The communicator of the DM (`PetscObjectGetComm`), borrowed from it: PETSc frees it with
+    /// the last object on it. [`Comm::duplicate`] keeps it beyond the DM.
+    pub fn comm(&self) -> Comm<'_> {
         let mut comm = unsafe { sys::petsc_sys_comm_self() };
         // Cannot fail on a valid object.
         unsafe { sys::PetscObjectGetComm(self.raw as sys::PetscObject, &mut comm) };

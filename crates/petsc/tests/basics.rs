@@ -379,7 +379,9 @@ fn objects_outliving_petsc_are_safe() {
 #[test]
 fn use_after_finalize_is_error() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let mut v = Vector::create_seq(&p, 3).unwrap();
     drop(p);
     let e = v.set(1.0).unwrap_err();
@@ -414,7 +416,9 @@ impl ShellOperator for OwnsPetsc {
 #[test]
 fn petsc_dropped_by_matrix_destroy_stays_initialized() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let x = seq(&p, &[1.0, 2.0, 3.0]);
     let mut y = Vector::create_seq(&p, 3).unwrap();
     let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();
@@ -430,7 +434,9 @@ fn petsc_dropped_by_matrix_destroy_stays_initialized() {
 #[test]
 fn petsc_dropped_during_mult_stays_initialized() {
     let p = Petsc::init(&[]).unwrap();
-    let comm = p.comm();
+    // Owned: the communicator outlives `p`.
+    let owned = p.comm().duplicate().unwrap();
+    let comm = owned.comm();
     let x = seq(&p, &[1.0, 2.0, 3.0]);
     let mut y = Vector::create_seq(&p, 3).unwrap();
     let a = Matrix::shell(&comm, 3, 3, Box::new(OwnsPetsc(RefCell::new(Some(p))))).unwrap();

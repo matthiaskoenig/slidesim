@@ -182,7 +182,7 @@ impl Coupled {
         study: &Study,
         problems: &mut [Problem],
         t_end: f64,
-        phases: &mut Phases,
+        phases: &mut Phases<'_>,
     ) -> Result<()> {
         let t0 = self.t;
         if t_end <= t0 {
@@ -224,7 +224,12 @@ impl Coupled {
 
     /// One step of the cells from where they are to `t1`, with the exchange before and after
     /// it. Collective.
-    fn cell_step(&mut self, problems: &mut [Problem], t1: f64, phases: &mut Phases) -> Result<()> {
+    fn cell_step(
+        &mut self,
+        problems: &mut [Problem],
+        t1: f64,
+        phases: &mut Phases<'_>,
+    ) -> Result<()> {
         let n = self.solver.n_cells();
         let ns = self.links.len();
         for (s, (field, exchange)) in self.links.iter().enumerate() {

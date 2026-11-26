@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ceed::Ceed;
-use cells::{CellSetup, CellSolver, CellsError, EngineCells};
+use cells::{BatchedCells, CellSetup, CellSolver, CellsError, EngineCells};
 use common::{
     c_cache, ceed, finest, linear_spec, mesh, model, parameter, spt_spec, table, testdata,
 };
@@ -608,6 +608,48 @@ fn invalid_setup_on_one_process_is_an_error_everywhere() {
     assert!(e.to_string().contains("centroids"), "{e}");
 }
 
+/// The cells keep the communicator of the mesh: dropped with the mesh, the setup and the
+/// discretization before them, both paths still advance (each advance agrees on errors by an
+/// `MPI_Allreduce` on the communicator, which PETSc frees with its last object).
+#[test]
+fn cells_outlive_the_mesh() {
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let spec = |solver| CellsSpec {
+        areas: None,
+        solver,
+        ..linear_spec(vec![
+            parameter("k", Coefficient::Constant(0.1)),
+            parameter("d", Coefficient::Constant(0.01)),
+        ])
+    };
+    let (engine_spec, batched_spec) = (spec(CellSolverKind::Engine), spec(CellSolverKind::Batched));
+    let setup = CellSetup::new(
+        &fine,
+        &mesh,
+        &engine_spec,
+        &Maps::default(),
+        &Coefficient::Constant(0.2),
+    )
+    .unwrap();
+    let sbml = model("linear_uptake.xml");
+    let mut engine = EngineCells::new(&setup, &engine_spec, &sbml).unwrap();
+    let mut batched = BatchedCells::new(&setup, &batched_spec, &sbml, &ceed).unwrap();
+    drop(setup);
+    drop(fine);
+    drop(mesh);
+    let n = engine.n_cells();
+    let mut blood = vec![1.0; n];
+    engine.advance(0.0, 600.0, &mut blood).unwrap();
+    assert!(blood.iter().all(|b| b.is_finite() && *b < 1.0), "{blood:?}");
+    let mut blood = vec![1.0; n];
+    batched.advance(0.0, 600.0, &mut blood).unwrap();
+    assert!(blood.iter().all(|b| b.is_finite() && *b < 1.0), "{blood:?}");
+}
+
 #[test]
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();
@@ -616,8 +658,9 @@ fn mpi_world_has_the_expected_size() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (cells on every process, errors one process finds).
-const PARALLEL_TESTS: [&str; 7] = [
+const PARALLEL_TESTS: [&str; 8] = [
     "mpi_world_has_the_expected_size",
+    "cells_outlive_the_mesh",
     "parameters_are_area_means",
     "replace_rule_switches_value",
     "no_value_in_tissue_is_an_error",

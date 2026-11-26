@@ -9,7 +9,7 @@ use std::time::Instant;
 use ceed::sys::{CeedInt, CeedScalar};
 use ceed::{CVector, Ceed, ElemRestriction, EvalMode, FieldVector, Operator, QFunction};
 use contracts::CellsSpec;
-use petsc::Comm;
+use petsc::OwnedComm;
 use sbmlsim_abi::{IntegratorSettings, Tolerance};
 use sbmlsim_c::{
     CONTROL, CONTROL_DONE, CONTROL_FAILED, CONTROL_T, COUNTS, INPUTS, Library, OUTPUTS,
@@ -82,7 +82,7 @@ pub struct BatchedCells {
     atol: f64,
     global: Vec<i64>,
     centroids: Vec<[f64; 2]>,
-    comm: Comm,
+    comm: OwnedComm,
     /// None where this process has no cells.
     batch: Option<Batch>,
     /// The time the cells reached (s).
@@ -255,8 +255,8 @@ impl BatchedCells {
         model: &CellModel,
         ceed: &Ceed,
     ) -> Result<BatchedCells> {
-        let comm = setup.comm();
-        agree(&comm, setup.check())?;
+        let comm = setup.owned_comm();
+        agree(&comm.comm(), setup.check())?;
         let Some(qmodel) = &model.qfunction else {
             return Err(CellsError::Invalid(
                 "the cell model is compiled for the engine path, not for the batched path"
@@ -288,7 +288,7 @@ impl BatchedCells {
                 Ok((stepper.state().to_vec(), stepper.parameters().to_vec()))
             })
             .collect::<Result<Vec<_>>>();
-        let initialized = agree(&comm, initialized)?;
+        let initialized = agree(&comm.comm(), initialized)?;
         let n = initialized.len();
         let states: Vec<f64> = initialized.iter().flat_map(|c| c.0.clone()).collect();
         let parameters: Vec<f64> = initialized.iter().flat_map(|c| c.1.clone()).collect();
@@ -300,7 +300,7 @@ impl BatchedCells {
             attempts: f64::from(MAX_ATTEMPTS),
         };
         let batch = (n > 0).then(|| Batch::new(ceed, qmodel, &parameters, n, &context));
-        let batch = agree(&comm, batch.transpose())?;
+        let batch = agree(&comm.comm(), batch.transpose())?;
         Ok(BatchedCells {
             species: spec.species.iter().map(|l| l.species.clone()).collect(),
             state_ids: qmodel.q.state_ids.clone(),
@@ -463,7 +463,7 @@ impl CellSolver for BatchedCells {
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
         let local = self.advance_local(t0, t1, blood);
-        agree(&self.comm, local)
+        agree(&self.comm.comm(), local)
     }
 
     fn states(&self) -> &[f64] {

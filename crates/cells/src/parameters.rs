@@ -4,7 +4,7 @@ use contracts::{CellsSpec, Coefficient};
 use maps::Maps;
 use mesh::Mesh;
 use pde::Discretization;
-use petsc::Comm;
+use petsc::{Comm, OwnedComm};
 
 use crate::{CellsError, Result, agree};
 
@@ -39,8 +39,9 @@ pub struct CellSetup {
     pub global: Vec<i64>,
     /// For each cell, the centroid of its element (um).
     pub centroids: Vec<[f64; 2]>,
-    /// The communicator of the mesh, for errors on every process.
-    comm: Comm,
+    /// The communicator of the mesh, for errors on every process: owned, so that it outlives
+    /// the mesh.
+    comm: OwnedComm,
 }
 
 impl CellSetup {
@@ -162,13 +163,18 @@ impl CellSetup {
             parameters,
             global,
             centroids,
-            comm,
+            comm: comm.duplicate()?,
         })
     }
 
     /// The communicator of the cells.
-    pub fn comm(&self) -> Comm {
-        self.comm
+    pub fn comm(&self) -> Comm<'_> {
+        self.comm.comm()
+    }
+
+    /// The communicator of the cells, owned: for cells which outlive the mesh and the setup.
+    pub(crate) fn owned_comm(&self) -> OwnedComm {
+        self.comm.clone()
     }
 
     /// [`CellsError::Invalid`] unless the lists of the setup are one entry per cell.

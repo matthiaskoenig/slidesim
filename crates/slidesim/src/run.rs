@@ -99,16 +99,16 @@ struct Summary {
 /// The wall time of process 0 in each phase of a run, the phases separated by barriers, so that
 /// a phase ends when every process ended it.
 #[derive(Debug)]
-pub(crate) struct Phases {
-    comm: Comm,
+pub(crate) struct Phases<'a> {
+    comm: Comm<'a>,
     /// The end of the last phase.
     last: Instant,
     seconds: BTreeMap<&'static str, f64>,
 }
 
-impl Phases {
+impl<'a> Phases<'a> {
     /// The phases of a run started at `started`, each at zero seconds.
-    fn new(comm: Comm, started: Instant) -> Phases {
+    fn new(comm: Comm<'a>, started: Instant) -> Phases<'a> {
         let seconds = [
             "setup",
             "pressure",
@@ -392,7 +392,7 @@ fn advance(
     problems: &mut [Problem],
     coupled: Option<&mut Coupled>,
     t: f64,
-    phases: &mut Phases,
+    phases: &mut Phases<'_>,
 ) -> Result<()> {
     match coupled {
         Some(coupled) => coupled.advance(study, problems, t, phases),
