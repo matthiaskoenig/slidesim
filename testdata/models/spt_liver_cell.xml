@@ -1,0 +1,1042 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copied from pkdb_models (https://github.com/matthiaskoenig/pkdb_models), branch feat/spt-liver-cell, commit 54f1661c4: pkdb_models/tpm/spt/models/output/models/spt_liver_cell.xml. -->
+<sbml xmlns="http://www.sbml.org/sbml/level3/version2/core" level="3" version="2">
+  <notes>
+    <body xmlns="http://www.w3.org/1999/xhtml">
+      <p>Created with <a href="https://github.com/matthiaskoenig/sbmlutils">https://github.com/matthiaskoenig/sbmlutils</a>.
+<a href="https://doi.org/10.5281/zenodo.5525390">
+        <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.5525390.svg" alt="DOI"/></a></p>
+      </body>
+    </notes>
+  <model metaid="meta_spt_liver_cell" id="spt_liver_cell" name="Model for hepatic S -&gt; P + T metabolism in the liver" substanceUnits="mmole" timeUnits="min" volumeUnits="litre" areaUnits="m2" lengthUnits="metre" extentUnits="mmole">
+    <notes>
+      <body xmlns="http://www.w3.org/1999/xhtml">
+        <p>Model for hepatic metabolism of substrate (S) to product (P) and toxic byproduct (T)
+encoded in <a href="http://sbml.org">SBML</a> format.</p>
+        <p>The model consists of of a single liver compartment with single metabolic conversion
+reaction which converts the substrate S to the product P and a toxic byproduct T <code>S -&gt; P + T</code>.
+The product P can be exported from the liver with the toxic side product T being confined to
+the liver.</p>
+        <p>If the hepatic concentration of the toxic substance T reaches a critical threshold necrosis is
+initiated. The necrosis is smooth and irreversible and stops the rates of the cell.</p>
+        <p>
+          <strong>version:</strong> 0.10.0</p>
+          <h2>Changelog</h2>
+          <p>
+            <strong>version 0.10.0</strong>
+          </p>
+          <ul>
+            <li>pattern 7 is the protein set from outside, <code>protein = protein_ext</code>, so that
+a simulator can feed in the protein per cell (e.g. the CYP2E1 amount measured
+on a slide)</li>
+            <li>the cell variant <code>spt_liver_cell</code> has the elements of the liver model
+without the <code>comp</code> and <code>distrib</code> packages: no ports, and the constant
+<code>protein_random</code> = 0.5 instead of the random initial assignment</li>
+          </ul>
+          <p>
+            <strong>version 0.9.0</strong>
+          </p>
+          <ul>
+            <li>pattern 6 is the measured CYP2E1 zonation profile of the mouse liver, the
+mean profile of three control mice, and no longer the piecewise linear
+interpolation of twelve digitized bins. How the pattern was formed:
+<ul>
+              <li>measured: the brown of the CYP2E1 immunostaining of three whole
+sections, read every 1.8 µm against the clear glass and set against its
+500 µm surroundings (palest tenth 0, darkest tenth 1); the lobules are
+the watershed of the blurred brown (604 lobules), the position is
+<code>p = dp/(dp + dc)</code> of Albadry et al. 2024 with the distances to the
+nearest portal and central point; one curve per mouse from 0 at its
+portal end to 1 at its top, the three averaged
+(<code>data/mouse_cyp2e1_profile.csv</code>, the forty positions of the pattern
+scan)</li>
+              <li>fitted: the Hill rise of pattern 2 minus its periportal value, so the
+protein is 0 at the periportal pole, with the measured <code>K</code> = 0.5847 and
+<code>n</code> = 1.954 (half of the rise at <code>position</code> 0.55, pattern 2 is almost a
+step at 0.75); the fitted equation is off the measured mean by 0.013
+(root mean square) and at most 0.024 on the 0 to 1 scale of the
+measurement, 0.015 and 0.029 as the pattern is normalized</li>
+              <li>normalized: the profile is divided by its perivenous value
+<code>1/(1 + K^n)</code> = 0.7405, so that the pattern runs from 0 at the
+periportal to 1 at the perivenous pole, as the other patterns of a
+profile do</li>
+            </ul></li>
+          </ul>
+          <p>
+            <strong>version 0.8.0</strong>
+          </p>
+          <ul>
+            <li>the zonation patterns are normalized to a maximum of 1 instead of the protein
+content of the lobulus geometry: the random pattern draws in [0, 1], the
+linear and sharp patterns are unscaled, the CYP2E1 pattern is divided by the
+largest of its medians, the constant pattern is 0.5</li>
+          </ul>
+          <p>
+            <strong>version 0.7.0</strong>
+          </p>
+          <ul>
+            <li>experimental CYP2E1 zonation pattern of the mouse liver (pattern 6)</li>
+            <li>the scaling factors of the patterns are computed on the geometry of the
+lobulus, the factors of the patterns 1-4 change by 1.1% to 4.5%</li>
+          </ul>
+          <p>
+            <strong>version 0.6.0</strong>
+          </p>
+          <ul>
+            <li>inflows and outflows for model coupling added</li>
+            <li>necrosis is smooth and irreversible, the dead fraction of the cells in [0, 1]</li>
+          </ul>
+          <p>
+            <strong>version 0.5.4</strong>
+          </p>
+          <ul>
+            <li>typo fix: <code>TDETOX_Km_napqi</code> -&gt; <code>TDETOX_Km_T</code></li>
+          </ul>
+          <p>
+            <strong>version 0.5.3</strong>
+          </p>
+          <ul>
+            <li>fixed switching thresholds for C++ export</li>
+            <li>additional annotations and documentation</li>
+            <li>removed source reactions</li>
+          </ul>
+          <p>
+            <strong>version 0.5</strong>
+          </p>
+          <ul>
+            <li>updated gamma thresholds</li>
+          </ul>
+          <p>
+            <strong>version 0.1</strong>
+          </p>
+          <ul>
+            <li>initial model version based on minimal apap model</li>
+          </ul>
+          <p>The content of this model has been carefully created in a manual research effort.</p>
+          <h2>Terms of use</h2>
+          <p>Copyright © 2026 <a href="https://livermetabolism.com" title="Matthias König" target="_blank">Matthias König</a>.</p>
+          <a rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">
+            <img alt="Creative Commons License" style="border-width:0" src="https://mirrors.creativecommons.org/presskit/buttons/88x31/png/by-sa.png"/>
+          </a>
+          <br/>This work is licensed under a <a rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.
+<p>Redistribution and use of any part of this model, with or without modification, are permitted provided
+that the following conditions are met:</p>
+          <ul>
+            <li>Redistributions of this SBML file must retain the above copyright notice, this list of conditions and the following disclaimer.</li>
+            <li>Redistributions in a different form must reproduce the above copyright notice, this list of conditions
+and the following disclaimer in the documentation and/or other materials provided
+with the distribution.</li>
+          </ul>
+          <p>This model is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.</p></body>
+        </notes>
+    <annotation>
+      <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+        <rdf:Description rdf:about="#meta_spt_liver_cell">
+          <dcterms:creator>
+            <rdf:Bag>
+              <rdf:li rdf:parseType="Resource">
+                <vCard4:hasName rdf:parseType="Resource">
+                  <vCard4:family-name>König</vCard4:family-name>
+                  <vCard4:given-name>Matthias</vCard4:given-name>
+                </vCard4:hasName>
+                <vCard4:hasEmail>matthias.koenig@uni-luebeck.de</vCard4:hasEmail>
+                <vCard4:organization-name>University of Lübeck, Lübeck, Germany; University Hospital Schleswig-Holstein, Campus Lübeck, First Department of Medicine, Lübeck, Germany; Humboldt-Universität zu Berlin, Faculty of Life Sciences, Department of Biology, Institute of Theoretical Biology, Berlin, Germany</vCard4:organization-name>
+              </rdf:li>
+            </rdf:Bag>
+          </dcterms:creator>
+          <dcterms:created rdf:parseType="Resource">
+            <dcterms:W3CDTF>2026-11-26T08:30:26Z</dcterms:W3CDTF>
+          </dcterms:created>
+          <dcterms:modified rdf:parseType="Resource">
+            <dcterms:W3CDTF>2026-11-26T08:30:26Z</dcterms:W3CDTF>
+          </dcterms:modified>
+        </rdf:Description>
+      </rdf:RDF>
+    </annotation>
+    <listOfUnitDefinitions>
+      <unitDefinition id="g_per_mole" name="g/mole">
+        <listOfUnits>
+          <unit kind="gram" exponent="1" scale="0" multiplier="1"/>
+          <unit kind="mole" exponent="-1" scale="0" multiplier="1"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="l_per_min" name="l/min">
+        <listOfUnits>
+          <unit kind="litre" exponent="1" scale="0" multiplier="1"/>
+          <unit kind="second" exponent="-1" scale="0" multiplier="60"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="m2" name="meter^2">
+        <listOfUnits>
+          <unit kind="metre" exponent="2" scale="0" multiplier="1"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mM" name="mmole/liter">
+        <listOfUnits>
+          <unit kind="mole" exponent="1" scale="0" multiplier="0.001"/>
+          <unit kind="litre" exponent="-1" scale="0" multiplier="1"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mg" name="mg">
+        <listOfUnits>
+          <unit kind="gram" exponent="1" scale="0" multiplier="0.001"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mg_per_s_l" name="mg/s/l">
+        <listOfUnits>
+          <unit kind="gram" exponent="1" scale="0" multiplier="0.001"/>
+          <unit kind="second" exponent="-1" scale="0" multiplier="1"/>
+          <unit kind="litre" exponent="-1" scale="0" multiplier="1"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="min" name="min">
+        <listOfUnits>
+          <unit kind="second" exponent="1" scale="0" multiplier="60"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="min_per_hr" name="min/hour">
+        <listOfUnits>
+          <unit kind="second" exponent="1" scale="0" multiplier="60"/>
+          <unit kind="second" exponent="-1" scale="0" multiplier="3600"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="ml" name="ml">
+        <listOfUnits>
+          <unit kind="litre" exponent="1" scale="0" multiplier="0.001"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mmole" name="mmole">
+        <listOfUnits>
+          <unit kind="mole" exponent="1" scale="0" multiplier="0.001"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mmole_per_min" name="mmole/min">
+        <listOfUnits>
+          <unit kind="mole" exponent="1" scale="0" multiplier="0.001"/>
+          <unit kind="second" exponent="-1" scale="0" multiplier="60"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mmole_per_min_l" name="mmole/min/l">
+        <listOfUnits>
+          <unit kind="mole" exponent="1" scale="0" multiplier="0.001"/>
+          <unit kind="second" exponent="-1" scale="0" multiplier="60"/>
+          <unit kind="litre" exponent="-1" scale="0" multiplier="1"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="mumole" name="µmole">
+        <listOfUnits>
+          <unit kind="mole" exponent="1" scale="0" multiplier="1e-06"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="per_min" name="1/min">
+        <listOfUnits>
+          <unit kind="second" exponent="-1" scale="0" multiplier="60"/>
+        </listOfUnits>
+      </unitDefinition>
+      <unitDefinition id="per_mmole" name="1/mmole">
+        <listOfUnits>
+          <unit kind="mole" exponent="-1" scale="0" multiplier="0.001"/>
+        </listOfUnits>
+      </unitDefinition>
+    </listOfUnitDefinitions>
+    <listOfCompartments>
+      <compartment metaid="meta_Vext" sboTerm="SBO:0000290" id="Vext" name="plasma" size="1.5" units="litre" constant="true">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_Vext">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C13356"/>
+                  <rdf:li rdf:resource="https://identifiers.org/BTO:0000131"/>
+                  <rdf:li rdf:resource="https://identifiers.org/UBERON:0001969"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </compartment>
+      <compartment metaid="meta_Vli" sboTerm="SBO:0000290" id="Vli" name="liver" size="1.5" units="litre" constant="true">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_Vli">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/FMA:7197"/>
+                  <rdf:li rdf:resource="https://identifiers.org/BTO:0000759"/>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C12392"/>
+                  <rdf:li rdf:resource="https://identifiers.org/UBERON:0002107"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </compartment>
+    </listOfCompartments>
+    <listOfSpecies>
+      <species metaid="meta_S_ext" sboTerm="SBO:0000247" id="S_ext" name="substrate S (plasma)" compartment="Vext" initialConcentration="0" substanceUnits="mmole" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>Molecular entity which serves as input for an enzymatic reaction that generates a product.</p>
+          </body>
+        </notes>
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_S_ext">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/SBO:0000015"/>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C120264"/>
+                  <rdf:li rdf:resource="https://identifiers.org/bao:0003063"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+      <species metaid="meta_P_ext" sboTerm="SBO:0000247" id="P_ext" name="product P (plasma)" compartment="Vext" initialConcentration="0" substanceUnits="mmole" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>Product which is generated by an enzymatic reaction.</p>
+          </body>
+        </notes>
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_P_ext">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/SBO:0000011"/>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C51980"/>
+                  <rdf:li rdf:resource="https://identifiers.org/bao:0003067"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+      <species metaid="meta_S" sboTerm="SBO:0000247" id="S" name="substrate S" compartment="Vli" initialConcentration="0" substanceUnits="mmole" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_S">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/SBO:0000015"/>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C120264"/>
+                  <rdf:li rdf:resource="https://identifiers.org/bao:0003063"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+      <species metaid="meta_P" sboTerm="SBO:0000247" id="P" name="product P" compartment="Vli" initialConcentration="0" substanceUnits="mmole" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_P">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/SBO:0000011"/>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C51980"/>
+                  <rdf:li rdf:resource="https://identifiers.org/bao:0003067"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+      <species metaid="meta_T" sboTerm="SBO:0000247" id="T" name="toxic product T" compartment="Vli" initialConcentration="0" substanceUnits="mmole" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false">
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_T">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C28004"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+      <species metaid="meta_protein" sboTerm="SBO:0000245" id="protein" name="protein (enzyme)" compartment="Vli" initialConcentration="1" substanceUnits="dimensionless" hasOnlySubstanceUnits="true" boundaryCondition="false" constant="false" conversionFactor="cf_protein">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>Enzyme that catalyzes the reactions of S -&gt; P + T (e.g. cytochrome P450).</p>
+          </body>
+        </notes>
+        <annotation>
+          <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:vCard="http://www.w3.org/2001/vcard-rdf/3.0#" xmlns:vCard4="http://www.w3.org/2006/vcard/ns#" xmlns:bqbiol="http://biomodels.net/biology-qualifiers/" xmlns:bqmodel="http://biomodels.net/model-qualifiers/">
+            <rdf:Description rdf:about="#meta_protein">
+              <bqbiol:is>
+                <rdf:Bag>
+                  <rdf:li rdf:resource="https://identifiers.org/ncit:C17021"/>
+                  <rdf:li rdf:resource="https://identifiers.org/FMA:67257"/>
+                </rdf:Bag>
+              </bqbiol:is>
+            </rdf:Description>
+          </rdf:RDF>
+        </annotation>
+      </species>
+    </listOfSpecies>
+    <listOfParameters>
+      <parameter sboTerm="SBO:0000002" id="f_metabolism" name="flag to change rate of metabolism" value="1" units="dimensionless" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="position" name="position within the lobulus in [0, 1] (pp, pv)" value="0.5" units="dimensionless" constant="true">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>position:
+0: periportal
+1: perivenous/pericentral</p>
+          </body>
+        </notes>
+      </parameter>
+      <parameter sboTerm="SBO:0000002" id="pattern" name="flag for zonation pattern" value="0" units="dimensionless" constant="true">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>pattern:
+0: constant (constant 0.5 over the position)
+1: linear_increase (increase from periportal 0 to perivenous 1)
+2: sharp_perivenous (high perivenous 1, low otherwise 0)
+3: linear_decrease (decrease from periportal 1 to perivenous 0)
+4: sharp_periportal (high periportal 1, low otherwise 0)
+5: random (uniform draw in [0, 1] per cell)
+6: cyp2e1_mouse (measured CYP2E1 profile of the mouse liver, the Hill rise of pattern 2 with K = 0.5847 and n = 1.954, normalized to a maximum of 1)
+7: external (protein set from outside via the parameter <code>protein_ext</code> in [0, 1], e.g. the measured CYP2E1 amount per cell)</p>
+          </body>
+        </notes>
+      </parameter>
+      <parameter sboTerm="SBO:0000002" id="protein_random" name="constant random value of the cell variant" value="0.5" units="dimensionless" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="protein_ext" name="protein set from outside, in [0, 1]" value="0.5" units="dimensionless" constant="true">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>Protein of the pattern 7, set from outside, e.g. the CYP2E1 amount
+measured on a slide per cell.</p>
+          </body>
+        </notes>
+      </parameter>
+      <parameter sboTerm="SBO:0000002" id="cf_protein" name="conversion factor for dimensionless species" value="1" units="per_mmole" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="T_threshold" name="T threshold for necrosis [mM]" value="5" units="mM" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="tsim" name="simulation time" value="0" units="min" constant="false">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>debug parameter to track time in model coupling</p>
+          </body>
+        </notes>
+      </parameter>
+      <parameter sboTerm="SBO:0000002" id="necrosis_k" name="rate of the necrosis" value="1" units="per_min" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="necrosis_w" name="relative width of the ramp of the necrosis trigger" value="0.05" units="dimensionless" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="necrosis" name="necrosis, dead fraction of the cells [0, 1]" value="0" units="dimensionless" constant="false">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>Dead fraction of the cells at a point, irreversible: 1 for a trigger
+which lasts, a stable value between 0 and 1 after a transient one. The
+trigger is 0 below its threshold, so that a living cell accumulates no
+necrosis.</p>
+          </body>
+        </notes>
+      </parameter>
+      <parameter sboTerm="SBO:0000002" id="f_tpm" name="global flag for porous media modifications" value="0" units="dimensionless" constant="true"/>
+      <parameter sboTerm="SBO:0000002" id="necrosis_trigger" name="condition for necrosis" units="dimensionless" constant="false"/>
+      <parameter sboTerm="SBO:0000186" id="SIM_Vmax" name="Vmax for S import" value="NaN" units="mmole_per_min_l" constant="false"/>
+      <parameter sboTerm="SBO:0000027" id="SIM_Km_S" name="Km for S import" value="0.5" units="mM" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="PEX_Vmax" name="Vmax for P export" value="NaN" units="mmole_per_min_l" constant="false"/>
+      <parameter sboTerm="SBO:0000027" id="PEX_Km_P" name="Km for P export" value="0.5" units="mM" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="S2PT_Vmax" name="Vmax for S to P + T conversion" value="0.05" units="mmole_per_min_l" constant="true"/>
+      <parameter sboTerm="SBO:0000027" id="S2PT_Km_S" name="Km for S to P + T conversion" value="0.5" units="mM" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="TDETOX_Vmax" name="Vmax for T detoxification" value="0.005" units="mmole_per_min_l" constant="true"/>
+      <parameter sboTerm="SBO:0000027" id="TDETOX_Km_T" name="Km for T detoxification" value="0.5" units="mM" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="BODY2LIVER_S_flux" name="BODY2LIVER_S_flux" value="0" units="mmole_per_min" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="LIVER2BODY_S_flux" name="LIVER2BODY_S_flux" value="0" units="mmole_per_min" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="BODY2LIVER_P_flux" name="BODY2LIVER_P_flux" value="0" units="mmole_per_min" constant="true"/>
+      <parameter sboTerm="SBO:0000186" id="LIVER2BODY_P_flux" name="LIVER2BODY_P_flux" value="0" units="mmole_per_min" constant="true"/>
+    </listOfParameters>
+    <listOfRules>
+      <assignmentRule variable="SIM_Vmax">
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <apply>
+            <times/>
+            <ci> S2PT_Vmax </ci>
+            <cn sbml:units="dimensionless" type="integer"> 100 </cn>
+          </apply>
+        </math>
+      </assignmentRule>
+      <assignmentRule variable="PEX_Vmax">
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <apply>
+            <times/>
+            <ci> S2PT_Vmax </ci>
+            <cn sbml:units="dimensionless" type="integer"> 100 </cn>
+          </apply>
+        </math>
+      </assignmentRule>
+      <assignmentRule name="condition for necrosis" variable="necrosis_trigger">
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <piecewise>
+            <piece>
+              <cn sbml:units="dimensionless" type="integer"> 0 </cn>
+              <apply>
+                <leq/>
+                <ci> T </ci>
+                <ci> T_threshold </ci>
+              </apply>
+            </piece>
+            <piece>
+              <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+              <apply>
+                <geq/>
+                <ci> T </ci>
+                <apply>
+                  <times/>
+                  <ci> T_threshold </ci>
+                  <apply>
+                    <plus/>
+                    <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                    <ci> necrosis_w </ci>
+                  </apply>
+                </apply>
+              </apply>
+            </piece>
+            <otherwise>
+              <apply>
+                <times/>
+                <apply>
+                  <power/>
+                  <apply>
+                    <divide/>
+                    <apply>
+                      <minus/>
+                      <ci> T </ci>
+                      <ci> T_threshold </ci>
+                    </apply>
+                    <apply>
+                      <times/>
+                      <ci> necrosis_w </ci>
+                      <ci> T_threshold </ci>
+                    </apply>
+                  </apply>
+                  <cn sbml:units="dimensionless" type="integer"> 2 </cn>
+                </apply>
+                <apply>
+                  <minus/>
+                  <cn sbml:units="dimensionless" type="integer"> 3 </cn>
+                  <apply>
+                    <times/>
+                    <cn sbml:units="dimensionless" type="integer"> 2 </cn>
+                    <apply>
+                      <divide/>
+                      <apply>
+                        <minus/>
+                        <ci> T </ci>
+                        <ci> T_threshold </ci>
+                      </apply>
+                      <apply>
+                        <times/>
+                        <ci> necrosis_w </ci>
+                        <ci> T_threshold </ci>
+                      </apply>
+                    </apply>
+                  </apply>
+                </apply>
+              </apply>
+            </otherwise>
+          </piecewise>
+        </math>
+      </assignmentRule>
+      <assignmentRule name="protein depending on position" variable="protein">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>The protein of every pattern lies in [0, 1]: the random pattern draws in
+[0, 1], the patterns of a profile are normalized to a maximum of 1, the
+constant pattern is 0.5. The patterns and their profiles are in
+<code>pkdb_models/tpm/spt/models/zonation.py</code>.</p>
+            <p>The patterns 1 to 4 are generic profiles, pattern 6 is the measured
+CYP2E1 profile of the mouse liver
+(<code>pkdb_models/tpm/spt/data/mouse_cyp2e1_profile.csv</code>, see the changelog
+of the model and <code>pkdb_models/tpm/spt/data/README.md</code>).</p>
+          </body>
+        </notes>
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <piecewise>
+            <piece>
+              <cn sbml:units="dimensionless"> 0.5 </cn>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 0 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <ci> position </ci>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <apply>
+                  <divide/>
+                  <apply>
+                    <power/>
+                    <apply>
+                      <minus/>
+                      <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                      <ci> position </ci>
+                    </apply>
+                    <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                  </apply>
+                  <apply>
+                    <plus/>
+                    <apply>
+                      <power/>
+                      <apply>
+                        <minus/>
+                        <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                        <ci> position </ci>
+                      </apply>
+                      <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                    </apply>
+                    <apply>
+                      <power/>
+                      <cn sbml:units="dimensionless"> 0.25 </cn>
+                      <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                    </apply>
+                  </apply>
+                </apply>
+              </apply>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 2 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless"> 1 </cn>
+                <ci> position </ci>
+              </apply>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 3 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <apply>
+                  <divide/>
+                  <apply>
+                    <power/>
+                    <ci> position </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                  </apply>
+                  <apply>
+                    <plus/>
+                    <apply>
+                      <power/>
+                      <ci> position </ci>
+                      <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                    </apply>
+                    <apply>
+                      <power/>
+                      <cn sbml:units="dimensionless"> 0.25 </cn>
+                      <cn sbml:units="dimensionless" type="integer"> 10 </cn>
+                    </apply>
+                  </apply>
+                </apply>
+              </apply>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 4 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <ci> protein_random </ci>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 5 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <apply>
+                  <divide/>
+                  <apply>
+                    <times/>
+                    <apply>
+                      <plus/>
+                      <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                      <apply>
+                        <power/>
+                        <cn sbml:units="dimensionless"> 0.5847 </cn>
+                        <cn sbml:units="dimensionless"> 1.954 </cn>
+                      </apply>
+                    </apply>
+                    <apply>
+                      <power/>
+                      <apply>
+                        <minus/>
+                        <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                        <ci> position </ci>
+                      </apply>
+                      <cn sbml:units="dimensionless"> 1.954 </cn>
+                    </apply>
+                  </apply>
+                  <apply>
+                    <plus/>
+                    <apply>
+                      <power/>
+                      <apply>
+                        <minus/>
+                        <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                        <ci> position </ci>
+                      </apply>
+                      <cn sbml:units="dimensionless"> 1.954 </cn>
+                    </apply>
+                    <apply>
+                      <power/>
+                      <cn sbml:units="dimensionless"> 0.5847 </cn>
+                      <cn sbml:units="dimensionless"> 1.954 </cn>
+                    </apply>
+                  </apply>
+                </apply>
+              </apply>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 6 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <piece>
+              <ci> protein_ext </ci>
+              <apply>
+                <lt/>
+                <apply>
+                  <abs/>
+                  <apply>
+                    <minus/>
+                    <ci> pattern </ci>
+                    <cn sbml:units="dimensionless" type="integer"> 7 </cn>
+                  </apply>
+                </apply>
+                <cn sbml:units="dimensionless" type="e-notation"> 1 <sep/> -6 </cn>
+              </apply>
+            </piece>
+            <otherwise>
+              <ci> protein_random </ci>
+            </otherwise>
+          </piecewise>
+        </math>
+      </assignmentRule>
+      <rateRule name="tsim rate rule" variable="tsim">
+        <notes>
+          <body xmlns="http://www.w3.org/1999/xhtml">
+            <p>debug rule to track time in model coupling</p>
+          </body>
+        </notes>
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <cn sbml:units="dimensionless"> 1 </cn>
+        </math>
+      </rateRule>
+      <rateRule name="rate of the necrosis" variable="necrosis">
+        <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+          <apply>
+            <times/>
+            <ci> necrosis_k </ci>
+            <apply>
+              <minus/>
+              <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+              <ci> necrosis </ci>
+            </apply>
+            <ci> necrosis_trigger </ci>
+          </apply>
+        </math>
+      </rateRule>
+    </listOfRules>
+    <listOfReactions>
+      <reaction sboTerm="SBO:0000655" id="SIM" name="substrate import (SIM)" reversible="true" compartment="Vli">
+        <listOfReactants>
+          <speciesReference species="S_ext" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="S" stoichiometry="1" constant="true"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+            <apply>
+              <divide/>
+              <apply>
+                <times/>
+                <apply>
+                  <divide/>
+                  <apply>
+                    <times/>
+                    <ci> f_metabolism </ci>
+                    <apply>
+                      <minus/>
+                      <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                      <ci> necrosis </ci>
+                    </apply>
+                    <ci> Vli </ci>
+                    <ci> SIM_Vmax </ci>
+                  </apply>
+                  <ci> SIM_Km_S </ci>
+                </apply>
+                <apply>
+                  <minus/>
+                  <ci> S_ext </ci>
+                  <ci> S </ci>
+                </apply>
+              </apply>
+              <apply>
+                <plus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <apply>
+                  <divide/>
+                  <ci> S_ext </ci>
+                  <ci> SIM_Km_S </ci>
+                </apply>
+                <apply>
+                  <divide/>
+                  <ci> S </ci>
+                  <ci> SIM_Km_S </ci>
+                </apply>
+              </apply>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000655" id="PEX" name="product export (PEX)" reversible="true" compartment="Vli">
+        <listOfReactants>
+          <speciesReference species="P" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="P_ext" stoichiometry="1" constant="true"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+            <apply>
+              <divide/>
+              <apply>
+                <times/>
+                <apply>
+                  <divide/>
+                  <apply>
+                    <times/>
+                    <ci> f_metabolism </ci>
+                    <apply>
+                      <minus/>
+                      <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                      <ci> necrosis </ci>
+                    </apply>
+                    <ci> Vli </ci>
+                    <ci> PEX_Vmax </ci>
+                  </apply>
+                  <ci> PEX_Km_P </ci>
+                </apply>
+                <apply>
+                  <minus/>
+                  <ci> P </ci>
+                  <ci> P_ext </ci>
+                </apply>
+              </apply>
+              <apply>
+                <plus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <apply>
+                  <divide/>
+                  <ci> P_ext </ci>
+                  <ci> PEX_Km_P </ci>
+                </apply>
+                <apply>
+                  <divide/>
+                  <ci> P </ci>
+                  <ci> PEX_Km_P </ci>
+                </apply>
+              </apply>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="S2PT" name="substrate to product conversion (S2PT)" reversible="false" compartment="Vli">
+        <listOfReactants>
+          <speciesReference species="S" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <listOfProducts>
+          <speciesReference species="P" stoichiometry="1" constant="true"/>
+          <speciesReference species="T" stoichiometry="1" constant="true"/>
+        </listOfProducts>
+        <listOfModifiers>
+          <modifierSpeciesReference species="protein"/>
+        </listOfModifiers>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+            <apply>
+              <times/>
+              <ci> f_metabolism </ci>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <ci> necrosis </ci>
+              </apply>
+              <ci> Vli </ci>
+              <ci> protein </ci>
+              <ci> S2PT_Vmax </ci>
+              <apply>
+                <divide/>
+                <ci> S </ci>
+                <apply>
+                  <plus/>
+                  <ci> S </ci>
+                  <ci> S2PT_Km_S </ci>
+                </apply>
+              </apply>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="TDETOX" name="detoxification T (TDETOX)" reversible="false" compartment="Vli">
+        <listOfReactants>
+          <speciesReference species="T" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML" xmlns:sbml="http://www.sbml.org/sbml/level3/version2/core">
+            <apply>
+              <times/>
+              <ci> f_metabolism </ci>
+              <apply>
+                <minus/>
+                <cn sbml:units="dimensionless" type="integer"> 1 </cn>
+                <ci> necrosis </ci>
+              </apply>
+              <ci> Vli </ci>
+              <ci> TDETOX_Vmax </ci>
+              <apply>
+                <divide/>
+                <ci> T </ci>
+                <apply>
+                  <plus/>
+                  <ci> T </ci>
+                  <ci> TDETOX_Km_T </ci>
+                </apply>
+              </apply>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="BODY2LIVER_S" name="BODY2LIVER_S" reversible="false" compartment="Vext">
+        <listOfProducts>
+          <speciesReference species="S_ext" stoichiometry="1" constant="true"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply>
+              <times/>
+              <ci> f_tpm </ci>
+              <ci> BODY2LIVER_S_flux </ci>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="LIVER2BODY_S" name="LIVER2BODY_S" reversible="false" compartment="Vext">
+        <listOfReactants>
+          <speciesReference species="S_ext" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply>
+              <times/>
+              <ci> f_tpm </ci>
+              <ci> LIVER2BODY_S_flux </ci>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="BODY2LIVER_P" name="BODY2LIVER_P" reversible="false" compartment="Vext">
+        <listOfProducts>
+          <speciesReference species="P_ext" stoichiometry="1" constant="true"/>
+        </listOfProducts>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply>
+              <times/>
+              <ci> f_tpm </ci>
+              <ci> BODY2LIVER_P_flux </ci>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+      <reaction sboTerm="SBO:0000176" id="LIVER2BODY_P" name="LIVER2BODY_P" reversible="false" compartment="Vext">
+        <listOfReactants>
+          <speciesReference species="P_ext" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+        <kineticLaw>
+          <math xmlns="http://www.w3.org/1998/Math/MathML">
+            <apply>
+              <times/>
+              <ci> f_tpm </ci>
+              <ci> LIVER2BODY_P_flux </ci>
+            </apply>
+          </math>
+        </kineticLaw>
+      </reaction>
+    </listOfReactions>
+  </model>
+</sbml>

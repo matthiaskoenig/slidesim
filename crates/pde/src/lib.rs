@@ -23,6 +23,10 @@
 //! the quadrature points of every level: diffusion and reaction, and advection by the velocity
 //! of a [`Flow`], stabilized by SUPG. Its [`MassBalance`] comes from its discrete equations.
 //!
+//! An [`Exchange`] couples the field of a [`Problem`] to cell models on the coarse elements of the
+//! mesh: the means of the field over the elements, and the changes of the cell models given back
+//! to the field, conserving its amount of substance ([`Problem::modify`]).
+//!
 //! A [`Flow`] solves the steady Darcy perfusion of a study once: the pressure with an
 //! anisotropic permeability along the gradient of a map, the equilibrated fluxes through the
 //! edges and their conservative (Raviart-Thomas) velocity at the quadrature points of every
@@ -38,6 +42,7 @@ mod balance;
 mod coefficients;
 mod components;
 mod discretization;
+mod exchange;
 mod flow;
 mod fluxes;
 mod multigrid;
@@ -47,6 +52,7 @@ mod problem;
 pub use balance::{BoundaryInflow, MassBalance, UNTAGGED};
 pub use coefficients::{PointData, coefficient_values};
 pub use discretization::{Discretization, Floating};
+pub use exchange::Exchange;
 pub use flow::Flow;
 pub use multigrid::{Multigrid, configure_multigrid};
 pub use operators::{SharedOperator, SourceField, Terms, Transport};

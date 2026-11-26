@@ -399,11 +399,41 @@ impl Problem {
     /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
     pub fn set_initial_condition(&mut self, f: impl Fn([f64; 2]) -> f64) -> Result<()> {
         self.ensure_usable()?;
-        self.disc.interpolate(f, &mut self.u)?;
+        let set = self.disc.interpolate(f, &mut self.u);
+        self.restart()?;
+        set
+    }
+
+    /// Changes the solution between two steps: `f` changes the global vector of the solution
+    /// ([`Problem::solution`], without the essential dofs) in place, at the current time, and the
+    /// time integration starts afresh from it, as after [`Problem::set_initial_condition`]: BDF2
+    /// starts again with its first step, without the history of the steps before, and the rate of
+    /// change is unknown until the next step ([`Problem::mass_balance`]). The operators, their
+    /// matrices and the multigrid do not depend on the solution and are kept. Collective if `f`
+    /// is.
+    ///
+    /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`] (then `f` is not
+    /// called), and the error of `f` (the solution may be changed in part, and the time
+    /// integration starts afresh from it all the same).
+    pub fn modify(&mut self, f: impl FnOnce(&mut Vector) -> Result<()>) -> Result<()> {
+        self.ensure_usable()?;
+        let changed = f(&mut self.u);
+        self.restart()?;
+        changed
+    }
+
+    /// Starts the time integration afresh from the solution: without the history of the steps
+    /// before, and with the rate of change unknown until the next step.
+    fn restart(&mut self) -> Result<()> {
         self.ts.restart_step()?;
-        // The rate of change is unknown until the next step.
         self.ts.context_mut().rate_shift = None;
         Ok(())
+    }
+
+    /// The porosity of the field at the quadrature points of the local cells, in the layout of
+    /// [`Discretization::quadrature_points`].
+    pub(crate) fn porosity(&self) -> &[f64] {
+        &self.ts.context().porosity
     }
 
     /// The source `f` (mM/s) at the quadrature points of the local cells, in the layout of

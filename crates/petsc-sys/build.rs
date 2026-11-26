@@ -157,7 +157,7 @@ fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String]) {
         // The PETSc API: everything declared in PETSc's headers (`petsc*.h`), plus the MPI
         // functions used directly and the shim.
         .allowlist_file(r".*/petsc[^/]*\.h")
-        .allowlist_function("MPI_(Comm_rank|Comm_size|Allreduce|Barrier|Abort)")
+        .allowlist_function("MPI_(Comm_rank|Comm_size|Allreduce|Bcast|Barrier|Abort)")
         .allowlist_function("petsc_sys_.*")
         .prepend_enum_name(false)
         .layout_tests(false)

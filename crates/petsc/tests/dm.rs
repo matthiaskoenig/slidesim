@@ -442,9 +442,10 @@ fn partitioner_random_reset_repeats_the_partition() {
 
 /// The tests `parallel_on_*_processes` run on several processes: points shared between them, and
 /// partitions.
-const PARALLEL_TESTS: [&str; 6] = [
+const PARALLEL_TESTS: [&str; 7] = [
     "mpi_world_has_the_expected_size",
     "barrier_waits_for_every_process",
+    "broadcast_bytes_of_the_root",
     "ghost_points_of_a_distributed_mesh",
     "boundary_faces_and_supports",
     "overlap_holds_the_cells_around_the_vertices_of_local_cells",
@@ -481,6 +482,29 @@ fn barrier_waits_for_every_process() {
         comm.rank()
     );
     comm.barrier().unwrap();
+}
+
+/// The bytes of the root replace those of every other process, whatever their length.
+#[test]
+fn broadcast_bytes_of_the_root() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let root = comm.size() - 1;
+    let mut data = if comm.rank() == root {
+        b"the message of the last process".to_vec()
+    } else {
+        vec![7; comm.rank() + 2]
+    };
+    comm.broadcast_bytes(root, &mut data).unwrap();
+    assert_eq!(data, b"the message of the last process");
+    // Nothing: the others' bytes are cleared.
+    let mut data = if comm.rank() == root {
+        Vec::new()
+    } else {
+        vec![1, 2, 3]
+    };
+    comm.broadcast_bytes(root, &mut data).unwrap();
+    assert!(data.is_empty());
 }
 
 #[test]

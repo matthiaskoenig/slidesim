@@ -97,6 +97,8 @@ pub struct Mesh {
     tags: Vec<Tag>,
     /// See [`Mesh::local_bounds`].
     bounds: Option<[[f64; 2]; 2]>,
+    /// The topological dimension.
+    dim: usize,
 }
 
 impl Mesh {
@@ -157,6 +159,7 @@ impl Mesh {
             levels,
             tags,
             bounds,
+            dim,
         })
     }
 
@@ -177,6 +180,24 @@ impl Mesh {
     /// of a raster this process needs (see `maps::Maps::read`).
     pub fn local_bounds(&self) -> Option<[[f64; 2]; 2]> {
         self.bounds
+    }
+
+    /// The local cell of the coarse level (level 0) which contains the local cell `cell` of the
+    /// level `level` (cells numbered from 0 in the order of the cells of the level).
+    ///
+    /// The regular refinement (`DMRefine`) splits each cell into `2^dim` children (4 triangles
+    /// in 2D), numbered consecutively in the order of their parents (the cells of a mesh of one
+    /// cell type), and keeps them on the process of their parent: the parent of cell `c` is cell
+    /// `c / 2^dim` of the level before. Not collective.
+    ///
+    /// Panics if the mesh has no level `level`.
+    pub fn coarse_cell(&self, level: usize, cell: usize) -> usize {
+        assert!(
+            level < self.levels.len(),
+            "mesh has no level {level} (it has {})",
+            self.levels.len()
+        );
+        cell >> (self.dim * level)
     }
 
     /// The tags, sorted by name.

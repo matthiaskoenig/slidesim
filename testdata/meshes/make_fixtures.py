@@ -26,6 +26,9 @@ Run from the repository root:
   and of the island). No pressure wall reaches the island. Mesh size about `ISLAND_SIZE` um.
 - `island_removed.msh`: `island.msh` without the island: the same mesh of the rest, its nodes and
   triangles in the same order.
+- `two_areas.msh`: the rectangle [0, 2] x [0, 1] um in two areas which share the edge x = 1:
+  `tissue` (3, x < 1) and `lumen` (4, x > 1), edges `left` (11), `right` (12) and `rim` (13, top
+  and bottom). Mesh size about `TWO_AREAS_SIZE` um.
 
 Written by hand, not by this script:
 
@@ -53,6 +56,7 @@ LOBULE_CENTRAL = (310.0, 310.0)
 LOBULE_SIZE = 20.0
 PINCHED_SIZE = 0.25
 ISLAND_SIZE = 0.25
+TWO_AREAS_SIZE = 0.25
 # The outer rectangle, the hole and the island of `island.msh`: corners (x0, y0, x1, y1), um.
 ISLAND_OUTER = (0.0, 0.0, 6.0, 4.0)
 ISLAND_HOLE = (2.0, 1.0, 4.0, 3.0)
@@ -213,9 +217,31 @@ def island() -> None:
         gmsh.write(str(HERE / f"{name}.msh"))
     gmsh.finalize()
 
+def two_areas() -> None:
+    start("two_areas", TWO_AREAS_SIZE)
+    geo = gmsh.model.geo
+    corners = ((0, 0), (1, 0), (2, 0), (2, 1), (1, 1), (0, 1))
+    p = [geo.addPoint(x, y, 0.0, TWO_AREAS_SIZE) for x, y in corners]
+    bottom_left, bottom_right = geo.addLine(p[0], p[1]), geo.addLine(p[1], p[2])
+    right = geo.addLine(p[2], p[3])
+    top_right, top_left = geo.addLine(p[3], p[4]), geo.addLine(p[4], p[5])
+    left = geo.addLine(p[5], p[0])
+    middle = geo.addLine(p[1], p[4])
+    tissue = geo.addPlaneSurface([geo.addCurveLoop([bottom_left, middle, top_left, left])])
+    lumen = geo.addPlaneSurface([geo.addCurveLoop([bottom_right, right, top_right, -middle])])
+    geo.synchronize()
+    gmsh.model.addPhysicalGroup(2, [tissue], 3, "tissue")
+    gmsh.model.addPhysicalGroup(2, [lumen], 4, "lumen")
+    gmsh.model.addPhysicalGroup(1, [left], 11, "left")
+    gmsh.model.addPhysicalGroup(1, [right], 12, "right")
+    gmsh.model.addPhysicalGroup(1, [bottom_left, bottom_right, top_right, top_left], 13, "rim")
+    finish("two_areas")
+
+
 if __name__ == "__main__":
     unit_square()
     tissue_small()
     lobule_toy()
     pinched()
     island()
+    two_areas()

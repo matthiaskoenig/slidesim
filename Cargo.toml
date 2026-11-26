@@ -12,3 +12,8 @@ bindgen = "0.73.2"
 cc = "1.2.41"
 ceed-sys = { path = "crates/ceed-sys" }
 petsc-sys = { path = "crates/petsc-sys" }
+# sbmlsim-core's C target and engine, from the branch `feat/c-target` (pull request #111) until
+# its release: the cell models as native code, without WebAssembly.
+sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "57672b47046616fa51960be9493268c81ae74f60" }
+sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "57672b47046616fa51960be9493268c81ae74f60" }
+sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "57672b47046616fa51960be9493268c81ae74f60" }

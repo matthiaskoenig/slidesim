@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError, Tag};
-use petsc::{Dm, Petsc};
+use petsc::{Dm, Petsc, Point};
 
 /// The radius in um of the two holes of `tissue_small.msh` (`HOLE_RADIUS` of
 /// `testdata/meshes/make_fixtures.py`).
@@ -430,11 +430,68 @@ fn mesh_without_pinched_vertex_is_unchanged() {
     }
 }
 
+/// The vertices of cell `cell` of `dm` (its local coordinates, set up).
+fn cell_vertices(dm: &Dm, cell: Point) -> Vec<[f64; 2]> {
+    let vertices = dm.depth_stratum(0).unwrap();
+    let dim = dm.coordinate_dimension().unwrap();
+    let coordinates = dm.local_coordinates().unwrap();
+    dm.closure(cell)
+        .unwrap()
+        .into_iter()
+        .filter(|p| vertices.contains(p))
+        .map(|v| {
+            let i = (v - vertices.start) as usize * dim;
+            [coordinates[i], coordinates[i + 1]]
+        })
+        .collect()
+}
+
+/// Whether `x` lies in the triangle `t`, up to `tolerance` (um) outside its edges.
+fn in_triangle(x: [f64; 2], t: &[[f64; 2]], tolerance: f64) -> bool {
+    let cross = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+        let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
+        ((p[0] - a[0]) * ey - (p[1] - a[1]) * ex) / ex.hypot(ey)
+    };
+    let sides: Vec<f64> = (0..3).map(|i| cross(t[i], t[(i + 1) % 3], x)).collect();
+    sides.iter().all(|&s| s <= tolerance) || sides.iter().all(|&s| s >= -tolerance)
+}
+
+/// The coarse cell of every cell of every level contains its centroid: the numbering of the
+/// regular refinement, on the distributed mesh.
+#[test]
+fn coarse_cell_contains_fine_centroids() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = Mesh::load(&p, &scene("lobule_toy.msh"), 2).unwrap();
+    let coarse = &mesh.levels()[0];
+    let coarse_cells = coarse.height_stratum(0).unwrap();
+    for (level, dm) in mesh.levels().iter().enumerate() {
+        let cells = dm.height_stratum(0).unwrap();
+        assert_eq!(cells.len(), coarse_cells.len() << (2 * level));
+        for cell in cells.clone() {
+            let fine = cell_vertices(dm, cell);
+            assert_eq!(fine.len(), 3);
+            let centroid = [0, 1].map(|i| fine.iter().map(|v| v[i]).sum::<f64>() / 3.0);
+            let parent = mesh.coarse_cell(level, (cell - cells.start) as usize);
+            assert!(parent < coarse_cells.len());
+            if level == 0 {
+                assert_eq!(parent, (cell - cells.start) as usize);
+            }
+            let triangle = cell_vertices(coarse, coarse_cells.start + parent as Point);
+            assert!(
+                in_triangle(centroid, &triangle, 1e-9),
+                "level {level} cell {cell}: centroid {centroid:?} outside its coarse cell \
+                 {parent} {triangle:?}"
+            );
+        }
+    }
+}
+
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 13] = [
+const PARALLEL_TESTS: [&str; 14] = [
     "mpi_world_has_the_expected_size",
+    "coarse_cell_contains_fine_centroids",
     "pinched_vertex_is_split_per_fan",
     "mesh_without_pinched_vertex_is_unchanged",
     "local_bounds_cover_the_local_cells",

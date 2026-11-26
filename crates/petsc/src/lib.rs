@@ -303,6 +303,65 @@ impl Comm {
         self.all_reduce(x, unsafe { sys::petsc_sys_mpiu_real() }, op)
     }
 
+    /// The bytes `data` of the process `root`, on every process (`MPI_Bcast`): the others'
+    /// `data` is replaced, whatever its length. For messages of errors which one process found,
+    /// so that every process reports the same.
+    pub fn broadcast_bytes(&self, root: usize, data: &mut Vec<u8>) -> Result<()> {
+        let root_rank = c_int::try_from(root)
+            .map_err(|_| Error::new(sys::PETSC_ERR_ARG_OUTOFRANGE, format!("rank {root}")))?;
+        let mut length = sys::PetscInt::try_from(data.len()).map_err(|_| {
+            Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                format!("{} bytes to broadcast", data.len()),
+            )
+        })?;
+        self.broadcast(
+            (&raw mut length).cast(),
+            1,
+            unsafe { sys::petsc_sys_mpiu_int() },
+            root_rank,
+        )?;
+        let length = usize::try_from(length).expect("a length is not negative");
+        data.resize(length, 0);
+        if length == 0 {
+            // MPICH refuses the dangling buffer of an empty vector.
+            return Ok(());
+        }
+        let count = c_int::try_from(length).map_err(|_| {
+            Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                format!("{length} bytes to broadcast"),
+            )
+        })?;
+        self.broadcast(
+            data.as_mut_ptr().cast(),
+            count,
+            unsafe { sys::petsc_sys_mpi_byte() },
+            root_rank,
+        )
+    }
+
+    /// `MPI_Bcast` of `count` values of `datatype` at `buffer` from `root`.
+    fn broadcast(
+        &self,
+        buffer: *mut std::ffi::c_void,
+        count: c_int,
+        datatype: sys::MPI_Datatype,
+        root: c_int,
+    ) -> Result<()> {
+        error::ensure_alive("MPI_Bcast")?;
+        // SAFETY: `buffer` holds `count` values of `datatype` (the caller's contract); MPI aborts
+        // on errors by default, and any other return is reported.
+        let ierr = unsafe { sys::MPI_Bcast(buffer, count, datatype, root, self.0) };
+        if ierr != 0 {
+            return Err(Error::new(
+                sys::PETSC_ERR_MPI,
+                format!("MPI_Bcast failed with MPI error {ierr}"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Waits until every process has called it (`MPI_Barrier`).
     pub fn barrier(&self) -> Result<()> {
         error::ensure_alive("MPI_Barrier")?;
