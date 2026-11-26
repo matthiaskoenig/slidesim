@@ -10,7 +10,9 @@ use mesh::Mesh;
 use petsc::Vector;
 
 use crate::operators::PointValues;
-use crate::{Discretization, PdeError, Problem, Result, SourceField, UNTAGGED, coefficient_values};
+use crate::{
+    Discretization, Exchanged, PdeError, Problem, Result, SourceField, UNTAGGED, coefficient_values,
+};
 
 /// The exchange of the field of a [`Problem`] with cell models on coarse elements of the mesh
 /// ("cells", one model each).
@@ -211,17 +213,19 @@ impl Exchange {
 
     /// Gives the change `delta[i]` of the concentration of each cell back to the field of
     /// `problem`: the amount `delta[i] V_i`, distributed over the nodes of the cell's element as
-    /// [`Exchange`] describes. Returns the resupply: per Dirichlet tag
-    /// ([`Exchange::dirichlet_tags`], in that order) the amount its Dirichlet values supplied to
-    /// the field (mM*um^2, negative where they took it away), summed over every process, so
-    /// that `int phi u` changes by exactly `sum_i delta[i] V_i` (over every process) plus the
-    /// sum of the resupply. The time integration of `problem` starts afresh
-    /// ([`Problem::modify`]). Collective.
+    /// [`Exchange`] describes. Returns what it exchanged ([`Exchanged`], summed over every
+    /// process): the amount the cells gave, `sum_i delta[i] V_i` (mM*um^2), and the resupply,
+    /// per Dirichlet tag ([`Exchange::dirichlet_tags`], in that order) the amount its Dirichlet
+    /// values supplied to the field (negative where they took it away), so that `int phi u`
+    /// changes by exactly the amount plus the sum of the resupply. The time integration of
+    /// `problem` starts afresh ([`Problem::modify`]), which books the amount as the exchange of
+    /// the mass balance over an interval and the resupply as inflow through the tags
+    /// ([`Problem::interval_balance`]). Collective.
     ///
     /// Errors (on every process): [`PdeError::Unsupported`] if `problem` is not the problem of
     /// the exchange, `delta` is not one value per cell, or a value is not finite;
     /// [`PdeError::Poisoned`] after a failed step of `problem`.
-    pub fn give_back(&self, problem: &mut Problem, delta: &[f64]) -> Result<Vec<(String, f64)>> {
+    pub fn give_back(&self, problem: &mut Problem, delta: &[f64]) -> Result<Exchanged> {
         self.collective(self.check(problem, delta.len()).and_then(|()| {
             match delta.iter().position(|d| !d.is_finite()) {
                 Some(i) => Err(PdeError::Unsupported(format!(
@@ -262,26 +266,36 @@ impl Exchange {
         }
         let b_increase = self.integrate(&increase)?;
         let b_share = self.integrate(&share)?;
-        problem.modify(|u| {
-            b_increase.with_array(|increase| {
-                b_share.with_array(|share| {
-                    self.lumped.with_array(|lumped| {
-                        u.with_array_mut(|u| {
-                            for (j, u) in u.iter_mut().enumerate() {
-                                *u += (increase[j] - u.max(0.0) * share[j]) / lumped[j];
-                            }
-                        })
-                    })
-                })
-            })????;
-            Ok(())
-        })?;
         let comm = self.disc.dm().comm();
-        self.tags
+        let amount: f64 = delta.iter().zip(&self.volumes).map(|(d, v)| d * v).sum();
+        let resupply = self
+            .tags
             .iter()
             .zip(resupply)
             .map(|(tag, r)| Ok((tag.clone(), comm.sum_real(r)?)))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        let exchanged = Exchanged {
+            exchange: comm.sum_real(amount)?,
+            resupply,
+        };
+        problem.modify(
+            |u| {
+                b_increase.with_array(|increase| {
+                    b_share.with_array(|share| {
+                        self.lumped.with_array(|lumped| {
+                            u.with_array_mut(|u| {
+                                for (j, u) in u.iter_mut().enumerate() {
+                                    *u += (increase[j] - u.max(0.0) * share[j]) / lumped[j];
+                                }
+                            })
+                        })
+                    })
+                })????;
+                Ok(())
+            },
+            &exchanged,
+        )?;
+        Ok(exchanged)
     }
 
     /// `local` on every process if no process has an error, else an error on every process:

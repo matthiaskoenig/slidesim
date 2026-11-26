@@ -7,9 +7,9 @@ use contracts::CellsSpec;
 use petsc::Comm;
 use sbmlsim_abi::{EntityKind, IntegratorSettings, ModelDescription, Tolerance};
 use sbmlsim_c::{CModel, Library};
-use sbmlsim_engine::Stepper;
+use sbmlsim_engine::{ModelFns, Stepper};
 
-use crate::{CellSetup, CellSolver, CellStats, CellsError, Result, agree};
+use crate::{CellSetup, CellSolver, CellStats, CellsError, OutputValue, Result, agree};
 
 /// The cells of a process on sbmlsim-core's engine: the model translated to C and compiled
 /// once per process (`sbmlsim_c`, cached across processes and runs, see
@@ -35,6 +35,26 @@ pub struct EngineCells {
     comm: Comm,
     /// The state of a cell during an advance.
     work: Vec<f64>,
+    /// The model, for the assignment rules of the outputs.
+    model: CModel,
+    /// The number of constants behind the parameters.
+    n_constants: usize,
+    /// The values of the outputs and how each is computed.
+    outputs: Vec<OutputValue>,
+    sources: Vec<Source>,
+    /// Whether an output is the target of an assignment rule.
+    rules: bool,
+    /// The time the cells reached (s).
+    t: f64,
+}
+
+/// How an output is computed from a cell.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// A state, divided by a volume.
+    State(usize, Volume),
+    /// A parameter after the assignment rules.
+    Parameter(usize),
 }
 
 impl std::fmt::Debug for EngineCells {
@@ -77,33 +97,78 @@ impl Volume {
     }
 }
 
-impl EngineCells {
-    /// The cells of `setup` with the model `model_sbml` (an SBML document) as `spec` describes
-    /// it. Collective.
+/// A cell model compiled to native code for [`EngineCells`], and checked against a
+/// [`CellsSpec`]: at the start of a study, before anything is solved.
+pub struct CellModel {
+    model: CModel,
+    description: Arc<ModelDescription>,
+    links: Vec<Link>,
+}
+
+impl std::fmt::Debug for CellModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CellModel")
+            .field("id", &self.description.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CellModel {
+    /// The model `model_sbml` (an SBML document), translated to C and compiled once per process
+    /// (`sbmlsim_c`, cached across processes and runs, see [`sbmlsim_c::Library::build`]), and
+    /// checked as `spec` uses it: every linked species is a species state of the model in the
+    /// blood compartment, both volumes are settable compartments, every parameter a settable
+    /// entity, every output a state or the target of an assignment rule, and both tolerances
+    /// positive. Collective.
     ///
-    /// The checks at study start, against the compiled model: every linked species is a species
-    /// state of the model in the blood compartment, both volumes are settable compartments,
-    /// every parameter a settable entity, every output a state or the target of an assignment
-    /// rule, and both tolerances positive.
-    ///
-    /// Errors: [`CellsError::Tolerance`], [`CellsError::UnknownId`] (listing what the model has)
-    /// and [`CellsError::Invalid`] for the checks; on every process, [`CellsError::Model`] if
-    /// the model cannot be translated, compiled or loaded, and [`CellsError::Element`] for a cell
-    /// whose model does not initialize.
-    pub fn new(setup: &CellSetup, spec: &CellsSpec, model_sbml: &str) -> Result<EngineCells> {
-        let comm = setup.comm();
-        agree(&comm, setup.check())?;
+    /// Errors: [`CellsError::Tolerance`], [`CellsError::UnknownId`] (listing what the model
+    /// has) and [`CellsError::Invalid`] for the checks; on every process, [`CellsError::Model`]
+    /// if the model cannot be translated, compiled or loaded.
+    pub fn new(comm: &Comm, spec: &CellsSpec, model_sbml: &str) -> Result<CellModel> {
         for (what, value) in [("rtol", spec.rtol), ("atol", spec.atol)] {
             if !(value.is_finite() && value > 0.0) {
                 return Err(CellsError::Tolerance { what, value });
             }
         }
-        let (model, description) = agree(&comm, compile(model_sbml))?;
+        let (model, description) = agree(comm, compile(model_sbml))?;
         let links = links(&description, spec)?;
         check_volumes(&description, spec)?;
         check_parameters(&description, spec)?;
         check_outputs(&description, spec)?;
+        Ok(CellModel {
+            model,
+            description,
+            links,
+        })
+    }
+}
 
+impl EngineCells {
+    /// The cells of `setup` with the model `model_sbml` (an SBML document) as `spec` describes
+    /// it: [`CellModel::new`], then [`EngineCells::with_model`]. Collective.
+    pub fn new(setup: &CellSetup, spec: &CellsSpec, model_sbml: &str) -> Result<EngineCells> {
+        let model = CellModel::new(&setup.comm(), spec, model_sbml)?;
+        EngineCells::with_model(setup, spec, &model)
+    }
+
+    /// The cells of `setup` with the model `model`, compiled and checked for `spec`.
+    /// Collective.
+    ///
+    /// Errors: [`CellsError::Invalid`] for a setup whose lists are not one entry per cell; on
+    /// every process, [`CellsError::Element`] for a cell whose model does not initialize.
+    pub fn with_model(
+        setup: &CellSetup,
+        spec: &CellsSpec,
+        model: &CellModel,
+    ) -> Result<EngineCells> {
+        let comm = setup.comm();
+        agree(&comm, setup.check())?;
+        let CellModel {
+            model,
+            description,
+            links,
+        } = model;
+        let links = links.clone();
         let settings = IntegratorSettings {
             relative_tolerance: spec.rtol,
             absolute_tolerance: Tolerance::Scalar(spec.atol),
@@ -116,7 +181,7 @@ impl EngineCells {
             .map(|(i, changes)| {
                 Stepper::new(
                     Box::new(model.clone()),
-                    Arc::clone(&description),
+                    Arc::clone(description),
                     settings.clone(),
                     changes,
                 )
@@ -132,6 +197,8 @@ impl EngineCells {
             .iter()
             .flat_map(|s| s.state().iter().copied())
             .collect();
+        let (outputs, sources) = outputs(description, spec);
+        let rules = sources.iter().any(|s| matches!(s, Source::Parameter(_)));
         Ok(EngineCells {
             steppers,
             species: spec.species.iter().map(|l| l.species.clone()).collect(),
@@ -143,6 +210,12 @@ impl EngineCells {
             centroids: setup.centroids.clone(),
             comm,
             work: Vec::with_capacity(description.states.len()),
+            model: model.clone(),
+            n_constants: description.n_constants as usize,
+            outputs,
+            sources,
+            rules,
+            t: 0.0,
         })
     }
 
@@ -199,6 +272,7 @@ impl EngineCells {
             }
         }
         stats.seconds = start.elapsed().as_secs_f64();
+        self.t = t1;
         Ok(stats)
     }
 }
@@ -224,6 +298,112 @@ impl CellSolver for EngineCells {
     fn states(&self) -> &[f64] {
         &self.states
     }
+
+    fn output_values(&self) -> &[OutputValue] {
+        &self.outputs
+    }
+
+    fn outputs(&self, out: &mut Vec<f64>) {
+        out.clear();
+        let ns = self.state_ids.len();
+        let t = self.t / self.time_unit_s;
+        let mut y = Vec::with_capacity(ns);
+        let mut p = Vec::new();
+        for (stepper, state) in self
+            .steppers
+            .iter()
+            .zip(self.states.chunks_exact(ns.max(1)))
+        {
+            y.clear();
+            y.extend_from_slice(state);
+            p.clear();
+            p.extend_from_slice(stepper.parameters());
+            if self.rules {
+                p.resize(p.len() + self.n_constants, 0.0);
+                // The first call writes the constants behind the parameters, which the rules
+                // may read; the second evaluates the rules with them.
+                for _ in 0..2 {
+                    self.model.begin_parameters(&p);
+                    self.model.assign(t, &mut y, &mut p);
+                    self.model.end_parameters();
+                }
+                // The rules may write states too; the outputs of the states stay those of the
+                // integration.
+                y.copy_from_slice(state);
+            }
+            for source in &self.sources {
+                out.push(match *source {
+                    Source::State(i, volume) => y[i] / volume.of(&p, &y),
+                    Source::Parameter(i) => p[i],
+                });
+            }
+        }
+    }
+}
+
+/// The outputs of the cells (see [`CellSolver::output_values`]) and how each is computed: the
+/// states, a species of a concentration stored as its amount divided by its compartment, then
+/// the outputs of `spec` which are parameters (targets of assignment rules; the check of the
+/// outputs makes sure every output is a state or one of these).
+fn outputs(description: &ModelDescription, spec: &CellsSpec) -> (Vec<OutputValue>, Vec<Source>) {
+    let mut values = Vec::new();
+    let mut sources = Vec::new();
+    for (i, state) in description.states.iter().enumerate() {
+        let (compartment, volume) = match &state.kind {
+            EntityKind::Species {
+                compartment,
+                has_only_substance_units: false,
+                stores_concentration,
+            } => {
+                let volume = if *stores_concentration {
+                    Some(Volume::None)
+                } else if let Some(k) = description
+                    .parameters
+                    .iter()
+                    .position(|p| &p.id == compartment)
+                {
+                    Some(Volume::Parameter(k))
+                } else {
+                    description
+                        .states
+                        .iter()
+                        .position(|s| &s.id == compartment)
+                        .map(Volume::State)
+                };
+                match volume {
+                    Some(volume) => (Some(compartment.clone()), volume),
+                    None => (None, Volume::None),
+                }
+            }
+            _ => (None, Volume::None),
+        };
+        values.push(OutputValue {
+            id: state.id.clone(),
+            compartment,
+        });
+        sources.push(Source::State(i, volume));
+    }
+    for id in &spec.outputs {
+        if description.states.iter().any(|s| &s.id == id) {
+            continue;
+        }
+        if let Some(k) = description.parameters.iter().position(|p| &p.id == id) {
+            let compartment = match &description.parameters[k].kind {
+                EntityKind::Species {
+                    compartment,
+                    has_only_substance_units: false,
+                    ..
+                } => Some(compartment.clone()),
+                _ => None,
+            };
+            values.push(OutputValue {
+                id: id.clone(),
+                compartment,
+            });
+            sources.push(Source::Parameter(k));
+        }
+    }
+    (values, sources)
 }
 
 /// The model of `sbml` compiled to native code, and its description.

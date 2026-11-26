@@ -1714,6 +1714,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ceed",
+ "cells",
  "clap",
  "contracts",
  "maps",

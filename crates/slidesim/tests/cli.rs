@@ -1,13 +1,17 @@
 //! End to end tests of `slidesim run`: the binary as a user runs it, on one process and under
 //! `mpiexec`, on `testdata/studies/tissue_oxygen` (oxygen from the vessel walls of
 //! `tissue_small.msh`) and `testdata/studies/lobule_toy` (a tracer carried by the Darcy flow
-//! between two holes, with a map). The binary runs without `LD_LIBRARY_PATH`: it finds PETSc and
-//! libCEED by its rpath.
+//! between two holes, with a map), and with cell models on `testdata/studies/cells_toy`. The
+//! binary runs without `LD_LIBRARY_PATH`: it finds PETSc and libCEED by its rpath. The cell
+//! models are compiled into a cache in the target directory (`SBMLSIM_C_CACHE`).
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use common::{cells_by_centroid, points_by_position, relative_difference, vtu_array};
 use serde_json::Value;
 use test_support::{Mpiexec, Run, run_with_timeout};
 
@@ -49,8 +53,21 @@ fn args(study: &Path, out: &Path, petsc_options: &[&str]) -> Vec<String> {
 }
 
 fn slidesim(args: &[String]) -> Run {
+    slidesim_with_env(args, &[])
+}
+
+/// The C compiler cache of the tests: in the target directory, not the user's cache.
+fn c_cache() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("sbmlsim-c-cache")
+}
+
+/// [`slidesim`] with the environment variables `env` (name, value).
+fn slidesim_with_env(args: &[String], env: &[(&str, &Path)]) -> Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_slidesim"));
-    cmd.args(args).env_remove("LD_LIBRARY_PATH");
+    cmd.args(args)
+        .env_remove("LD_LIBRARY_PATH")
+        .env("SBMLSIM_C_CACHE", c_cache())
+        .envs(env.iter().copied());
     finished(run_with_timeout(cmd, TIMEOUT))
 }
 
@@ -61,7 +78,9 @@ fn slidesim_parallel(ranks: usize, args: &[String]) -> Option<Run> {
         return None;
     };
     let mut cmd = mpiexec.command(ranks, env!("CARGO_BIN_EXE_slidesim"));
-    cmd.args(args).env_remove("LD_LIBRARY_PATH");
+    cmd.args(args)
+        .env_remove("LD_LIBRARY_PATH")
+        .env("SBMLSIM_C_CACHE", c_cache());
     Some(finished(run_with_timeout(cmd, TIMEOUT)))
 }
 
@@ -119,35 +138,6 @@ fn lobule_study() -> PathBuf {
 /// The centre of the central hole of `lobule_toy.msh`, um.
 const CENTRAL: [f64; 2] = [310.0, 310.0];
 
-/// The data array `name` of the `.vtu` file `path` (raw appended data, 64 bit headers): the
-/// values, `components` per point.
-fn vtu_array(path: &Path, name: &str, components: usize) -> Vec<f64> {
-    let bytes = std::fs::read(path).unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-    let tag = text
-        .find(&format!("Name=\"{name}\""))
-        .unwrap_or_else(|| panic!("no array {name} in {}", path.display()));
-    let rest = &text[tag..];
-    let offset: usize = rest[rest.find("offset=\"").unwrap() + 8..]
-        .split('"')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let marker = text.find("<AppendedData").unwrap();
-    // The data starts after the underscore which follows the tag.
-    let data = marker + text[marker..].find('_').unwrap() + 1 + offset;
-    let len = u64::from_le_bytes(bytes[data..data + 8].try_into().unwrap()) as usize;
-    let values: Vec<f64> = bytes[data + 8..data + 8 + len]
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|b| f64::from_le_bytes(*b))
-        .collect();
-    assert_eq!(values.len() % components, 0);
-    values
-}
-
 /// `<out>/summary.json` as JSON.
 fn summary_json(out: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(out.join("summary.json")).unwrap()).unwrap()
@@ -170,8 +160,9 @@ fn point_data(path: &Path) -> Vec<String> {
 }
 
 /// The mass balances of the field `field` of `<out>/summary.json`, one per output time: `None`
-/// before the first step, else the terms by name (`storage_rate`, `source`, `advection_defect`,
-/// `<tag>.advective`, `<tag>.diffusive`), in the order of the file.
+/// for an interval of no length, else the terms by name (`storage_rate`, `source`,
+/// `advection_defect`, `exchange`, `<tag>.advective`, `<tag>.diffusive`, `<tag>.resupply`), in
+/// the order of the file.
 fn balances(out: &Path, field: &str) -> Vec<Option<Vec<(String, f64)>>> {
     let summary = summary_json(out);
     let balances = summary["fields"][field]["mass_balance"]
@@ -185,12 +176,13 @@ fn balances(out: &Path, field: &str) -> Vec<Option<Vec<(String, f64)>>> {
                 return None;
             }
             let number = |v: &Value| v.as_f64().unwrap_or_else(|| panic!("{balance}"));
-            let mut terms: Vec<(String, f64)> = ["storage_rate", "source", "advection_defect"]
-                .iter()
-                .map(|key| (key.to_string(), number(&balance[key])))
-                .collect();
+            let mut terms: Vec<(String, f64)> =
+                ["storage_rate", "source", "advection_defect", "exchange"]
+                    .iter()
+                    .map(|key| (key.to_string(), number(&balance[key])))
+                    .collect();
             for (tag, inflow) in balance["boundary"].as_object().unwrap() {
-                for part in ["advective", "diffusive"] {
+                for part in ["advective", "diffusive", "resupply"] {
                     terms.push((format!("{tag}.{part}"), number(&inflow[part])));
                 }
             }
@@ -213,16 +205,21 @@ fn scale(terms: &[(String, f64)]) -> f64 {
     terms.iter().fold(0.0, |m, (_, x)| m.max(x.abs()))
 }
 
-/// Asserts that the balance `terms` closes, `storage_rate = source + inflows -
+/// Asserts that the balance `terms` closes, `storage_rate = source + inflows + exchange -
 /// advection_defect`, within 1e-8 of its largest term.
 fn assert_closes(terms: &[(String, f64)]) {
     let inflows: f64 = terms
         .iter()
-        .filter(|(name, _)| name.ends_with(".advective") || name.ends_with(".diffusive"))
+        .filter(|(name, _)| {
+            [".advective", ".diffusive", ".resupply"]
+                .iter()
+                .any(|part| name.ends_with(part))
+        })
         .map(|(_, x)| x)
         .sum();
-    let residual = term(terms, "storage_rate") - term(terms, "source") - inflows
-        + term(terms, "advection_defect");
+    let residual =
+        term(terms, "storage_rate") - term(terms, "source") - inflows - term(terms, "exchange")
+            + term(terms, "advection_defect");
     assert!(
         residual.abs() <= 1e-8 * scale(terms),
         "residual {residual:e}: {terms:?}"
@@ -314,8 +311,8 @@ fn lobule_toy_flows_from_portal_to_central() {
 
 /// The mean of the tracer in the output `path` over the nodes within `radius` um of `centre`.
 fn mean_near(path: &Path, centre: [f64; 2], radius: f64) -> f64 {
-    let points = vtu_array(path, "Position", 3);
-    let sucrose = vtu_array(path, "sucrose.mM", 1);
+    let points = vtu_array(path, "Position");
+    let sucrose = vtu_array(path, "sucrose.mM");
     assert_eq!(points.len(), 3 * sucrose.len());
     let near: Vec<f64> = points
         .as_chunks::<3>()
@@ -398,9 +395,21 @@ fn island_reports_pressure_islands() {
 /// be more than a tenth of this short run.)
 #[test]
 fn summary_has_phases() {
-    let out = scratch("summary_has_phases");
+    phases_sum_to_the_run(&lobule_study(), "summary_has_phases");
+}
+
+/// As [`summary_has_phases`], with cells: the phases of the exchange and the cells.
+#[test]
+fn summary_has_phases_with_cells() {
+    phases_sum_to_the_run(&cells_study(), "summary_has_phases_with_cells");
+}
+
+fn phases_sum_to_the_run(study: &Path, name: &str) {
+    let out = scratch(name);
+    // The cell model compiled before the clock starts.
+    assert_success(&slidesim(&args(study, &out, &[])));
     let start = SystemTime::now();
-    let run = slidesim(&args(&lobule_study(), &out, &[]));
+    let run = slidesim(&args(study, &out, &[]));
     assert_success(&run);
     let written = std::fs::metadata(out.join("summary.json"))
         .and_then(|m| m.modified())
@@ -411,7 +420,14 @@ fn summary_has_phases() {
         .as_object()
         .unwrap_or_else(|| panic!("no phases in {summary}"));
     let mut sum = 0.0;
-    for name in ["setup", "pressure", "transport", "output"] {
+    for name in [
+        "setup",
+        "pressure",
+        "transport",
+        "exchange",
+        "cells",
+        "output",
+    ] {
         let seconds = phases
             .get(name)
             .and_then(Value::as_f64)
@@ -764,4 +780,151 @@ fn two_ranks_match_one_with_perfusion() {
     assert!(total_mass < 1e-10, "{total_mass_1:?}\n{total_mass_2:?}");
     assert!(flow < 1e-10, "{flow}");
     assert!(balance < 1e-10, "{balance:e}");
+}
+
+fn cells_study() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/cells_toy/cells.study.json")
+}
+
+/// The numbers of the JSON array `value`.
+fn numbers(value: &Value) -> Vec<f64> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("not an array: {value}"))
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect()
+}
+
+/// The linear cell model on `cells_toy` on 2 and 3 processes, with fixed transport steps: the
+/// fields, the states of the cells and the integrals of `summary.json` agree with one process
+/// within 1e-10, and the cells take the same steps (their step control is their own).
+#[test]
+fn cells_parallel_matches_one() {
+    let dir = scratch("cells_parallel_matches_one");
+    let serial = dir.join("serial");
+    assert_success(&slidesim(&args(&cells_study(), &serial, &[])));
+    let last = 3;
+    let cell_values = ["A_ext", "A", "uptake_rate", "k", "Vext"];
+    let one = summary_json(&serial);
+    for ranks in [2, 3] {
+        let parallel = dir.join(format!("parallel_{ranks}"));
+        let Some(run) = slidesim_parallel(ranks, &args(&cells_study(), &parallel, &[])) else {
+            return;
+        };
+        assert_success(&run);
+        let many = summary_json(&parallel);
+        let field = |s: &Value, key: &str| numbers(&s["fields"]["substrate"][key]);
+        let mut largest = 0.0_f64;
+        for key in ["l2_norm", "total_mass"] {
+            largest = largest.max(relative_difference(&field(&one, key), &field(&many, key)));
+        }
+        for (group, key) in [("amounts", "A"), ("exchanged", "substrate")] {
+            let (a, b) = (&one["cells"][group][key], &many["cells"][group][key]);
+            largest = largest.max(relative_difference(&numbers(a), &numbers(b)));
+        }
+        let balance = max_balance_difference(
+            &balances(&serial, "substrate"),
+            &balances(&parallel, "substrate"),
+        );
+        for key in ["count", "steps", "rejected"] {
+            assert_eq!(one["cells"][key], many["cells"][key], "{key}");
+        }
+        // The fields, point by point.
+        let path = |out: &Path| out.join(format!("substrate_{last}.vtu"));
+        let (a, b) = (
+            points_by_position(&path(&serial), "substrate.mM"),
+            points_by_position(&path(&parallel), "substrate.mM"),
+        );
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.0 == y.0));
+        let values = |p: &[([i64; 2], f64)]| p.iter().map(|x| x.1).collect::<Vec<_>>();
+        let fields = relative_difference(&values(&a), &values(&b));
+        // The cells, element by element.
+        let path = |out: &Path| out.join(format!("cells_{last}.vtu"));
+        let (a, b) = (
+            cells_by_centroid(&path(&serial), &cell_values),
+            cells_by_centroid(&path(&parallel), &cell_values),
+        );
+        assert_eq!(a.len(), b.len());
+        let mut cells = 0.0_f64;
+        for k in 0..cell_values.len() {
+            assert!(a.iter().zip(&b).all(|(x, y)| x.0 == y.0));
+            let column = |c: &[([i64; 2], Vec<f64>)]| c.iter().map(|x| x.1[k]).collect::<Vec<_>>();
+            cells = cells.max(relative_difference(&column(&a), &column(&b)));
+        }
+        eprintln!(
+            "relative differences, {ranks} processes against 1: integrals {largest:e}, \
+             mass_balance {balance:e}, field {fields:e}, cells {cells:e}"
+        );
+        assert!(largest < 1e-10, "{largest:e}");
+        assert!(balance < 1e-10, "{balance:e}");
+        assert!(fields < 1e-10, "{fields:e}");
+        assert!(cells < 1e-10, "{cells:e}");
+    }
+}
+
+/// Without a C compiler for the cell model, the run fails at the start, before anything is
+/// solved or written: exit code 1, an error naming the compiler.
+#[test]
+fn run_without_compiler_fails_before_solving() {
+    let dir = scratch("run_without_compiler_fails_before_solving");
+    let out = dir.join("out");
+    // A cache of its own, so that the model is compiled.
+    let cache = dir.join("cache");
+    let run = slidesim_with_env(
+        &args(&cells_study(), &out, &[]),
+        &[
+            ("CC", Path::new("/nonexistent/cc")),
+            ("SBMLSIM_C_CACHE", &cache),
+        ],
+    );
+    assert_eq!(
+        run.status.unwrap().code(),
+        Some(1),
+        "{}\n{}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(run.stderr.contains("/nonexistent/cc"), "{}", run.stderr);
+    assert!(
+        !out.exists(),
+        "{:?}",
+        std::fs::read_dir(&out).map(|d| d.count())
+    );
+}
+
+/// The SPT cell model on `cells_toy` for 60 min, 5 mM of substrate at the portal wall: necrosis
+/// starts in the cells of high protein (the central end of the zonation) and has not reached
+/// those of low protein by the end.
+#[test]
+fn spt_toy_runs() {
+    let study = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/cells_toy/spt.study.json");
+    let out = scratch("spt_toy_runs");
+    assert_success(&slidesim(&args(&study, &out, &[])));
+    let summary = summary_json(&out);
+    assert_eq!(numbers(&summary["fields"]["S"]["times"]).len(), 5);
+    let mut started = None;
+    for index in 0..5 {
+        let path = out.join(format!("cells_{index}.vtu"));
+        let protein = vtu_array(&path, "protein");
+        let necrosis = vtu_array(&path, "necrosis");
+        let mut cells: Vec<(f64, f64)> = protein.into_iter().zip(necrosis).collect();
+        cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let quarter = cells.len() / 4;
+        let mean = |c: &[(f64, f64)]| c.iter().map(|x| x.1).sum::<f64>() / c.len() as f64;
+        let (low, high) = (
+            mean(&cells[..quarter]),
+            mean(&cells[cells.len() - quarter..]),
+        );
+        eprintln!("output {index}: necrosis {low} in low protein, {high} in high protein");
+        assert!(low <= high, "output {index}: {low} against {high}");
+        if high > 0.1 && started.is_none() {
+            started = Some(index);
+            assert!(low < 0.01 * high, "output {index}: {low} against {high}");
+        }
+    }
+    assert!(started.is_some(), "no necrosis");
+    assert!(summary["cells"]["amounts"]["T"].as_array().is_some());
 }

@@ -21,11 +21,14 @@
 //! A [`Problem`] steps one field of a study in time (BDF2, PETSc `TS`) on the finest level,
 //! preconditioned by that multigrid, with the coefficients of the field (and its porosity) at
 //! the quadrature points of every level: diffusion and reaction, and advection by the velocity
-//! of a [`Flow`], stabilized by SUPG. Its [`MassBalance`] comes from its discrete equations.
+//! of a [`Flow`], stabilized by SUPG. Its [`MassBalance`] comes from its discrete equations: at
+//! the end of a step, or over an interval of steps with the terms integrated by the weights of
+//! the BDF steps, the changes between steps (the exchange with cells) included.
 //!
 //! An [`Exchange`] couples the field of a [`Problem`] to cell models on the coarse elements of the
 //! mesh: the means of the field over the elements, and the changes of the cell models given back
-//! to the field, conserving its amount of substance ([`Problem::modify`]).
+//! to the field, conserving its amount of substance ([`Problem::modify`], which books the
+//! exchange and the resupply of the Dirichlet values in the mass balance).
 //!
 //! A [`Flow`] solves the steady Darcy perfusion of a study once: the pressure with an
 //! anisotropic permeability along the gradient of a map, the equilibrated fluxes through the
@@ -45,6 +48,7 @@ mod discretization;
 mod exchange;
 mod flow;
 mod fluxes;
+mod integral;
 mod multigrid;
 mod operators;
 mod problem;
@@ -56,7 +60,7 @@ pub use exchange::Exchange;
 pub use flow::Flow;
 pub use multigrid::{Multigrid, configure_multigrid};
 pub use operators::{SharedOperator, SourceField, Terms, Transport};
-pub use problem::{Inputs, Problem};
+pub use problem::{Exchanged, Inputs, Problem};
 
 /// The absolute path of the directory of the QFunction sources.
 pub const QFUNCTION_DIR: &str = env!("SLIDESIM_PDE_QFUNCTIONS");

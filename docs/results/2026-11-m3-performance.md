@@ -5,7 +5,8 @@ Status: 2026-11-26, slidesim branch `feat/m3-cells`. Started in task 3 of the mi
 
 ## Setup
 
-- Machine: Intel Core i7-12700 (8 performance and 4 efficiency cores, 20 threads), MPICH.
+- Machine: Intel Core i7-12700 (8 performance and 4 efficiency cores, 20 threads), Open MPI
+  4.1.6.
 - Build: `deps/install/native-opt` (optimized PETSc and libCEED), `cargo build --release`.
 - Field: the milestone 2 baseline study on the real slide
   (`testdata/studies/m2_real_slide/baseline.study.json`) at 1 refinement: 170,244 triangles,
@@ -161,3 +162,60 @@ What remains of `output` is the VTU files of PETSc's viewer (`VecView` 1.6 s of 
 process, 8 files) and the reductions of the summary. The rest of `setup` on one process: PETSc
 and the study 0.3 s, the mesh 0.3 s, the discretizations of the levels 0.2 s, the coefficients
 0.1 s, the assembly of the levels and the multigrid 0.6 s.
+
+## Coupled baseline: cells and fields on a real slide
+
+Task 11, first run of cell models coupled to the blood fields on a real slide (Strang splitting,
+`crates/slidesim/src/coupled.rs`).
+
+- Study: `testdata/studies/m3_real_slide/spt.study.json`: the SPT cell model
+  (`testdata/models/spt_liver_cell.xml`) on the engine path (sbmlsim-core's `Stepper`, the model
+  compiled to C), one cell per coarse element; fields `S` (5 mM at the portal wall) and `P`,
+  carried by the Darcy flow; 24 h, split step 60 s, fixed transport steps of 10 s (BDF2), 25
+  output times (hourly), 1 refinement.
+- Scene: the 281 mg/kg slide `281mg_m1`, regenerated with the commands of
+  `docs/results/2026-11-m3-wall-classes.md` ("Reproduce"; `zonation_layers.py` for this slide
+  alone): 41,252 coarse triangles (= cells; 140 portal and 594 central wall pieces), 165,008
+  triangles after the refinement. The study is copied next to the scene (`scene/scene.json`
+  relative to it) with the model path made absolute.
+- Run: `mpiexec -n 8 target/release/slidesim run spt.study.json --out run -- -log_view
+  :run/log_view.txt`, `native-opt`, the generated C in the compiler cache from an earlier run.
+  The machine ran other jobs at the same time (load average about 8).
+
+Phases (s, `summary.json`), with the 2 h start of the same study for comparison:
+
+| Phase | 2 h | 24 h |
+| --- | ---: | ---: |
+| `setup` | 1.2 | 1.1 |
+| `pressure` | 0.6 | 0.6 |
+| `transport` | 33.7 | 464.9 |
+| `exchange` | 2.5 | 34.6 |
+| `cells` | 27.4 | 166.4 |
+| `output` | 0.7 | 5.6 |
+| wall time of the run | 66 | 673 |
+
+The run finishes in 11.2 min for 24 h of simulated time. Transport is 69 % of it, the cells
+25 %, the exchange (the means of the fields over the cells and the give-back) 5 %.
+
+**Cells.** 1,464 cell steps per cell (61 per hour between two outputs: the second half of a
+split step merged with the first half of the next, the half steps at the output times apart),
+1.63e9 integrator steps over all cells and 8.1e7 rejected (5 %): 27 integrator steps per cell
+step on average, 89 in the first 2 h (the transient), about 1.2 million integrator steps per second
+and process. The `cells` phase includes the wait for the slowest process at the barrier which
+ends it (the cells are not balanced by their work).
+
+**Transport and the restarts.** Every give-back changes the field between two steps and
+restarts BDF2 (`Problem::modify`): the first step after it is a first-order half step and a
+step of the BDF2 start, so a split step of 6 transport steps solves 7 times and sets up the
+multigrid for 3 shifts. `-log_view` of the 24 h run: 17,280 `TSStep` (2 fields, 1,440 split
+steps, 6 steps each), 20,160 `SNESSolve` (+17 %), 8,642 `PCSetUp` (31.8 s), 20,160
+`TSJacobianEval` (20.5 s). The extra solves (pro rata 64 s of the 448 s of `SNESSolve`), the
+multigrid setups and the Jacobian evaluations cost roughly 115 s, a quarter of the transport
+phase; with one shift for the whole run they would nearly vanish. Without the merging of the
+half cell steps there would be twice the restarts.
+
+**Results.** The mass balances of both fields close at every output within 9.2e-11 of their
+largest term (the interval balance, exchange and resupply included). Necrosis (cell state
+`necrosis`, the cells of the necrosis map start with pattern 6) covers 26,848 of the 41,252
+cells after 6 h and 33,787 after 24 h; in the quarter of the cells with the highest `protein`
+its mean is 0.95 from 6 h on, in the quarter with the lowest 0 at 6 h and 0.35 at 24 h.

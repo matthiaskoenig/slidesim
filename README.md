@@ -68,9 +68,11 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 `out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
 an earlier run there are removed first. `slidesim run --help` describes them.
 
-`summary.json` has, per field and output time, the mass balance of the last step
-(`mass_balance`: rate of change of the amount, sources, advective and diffusive inflow per
-boundary tag, and the `advection_defect` of the velocity).
+`summary.json` has, per field and output time, the mass balance over the interval since the
+output time before (`mass_balance`, each term its mean rate there: the rate of change of the
+amount, sources, advective and diffusive inflow per boundary tag, the `advection_defect` of the
+velocity, and with cells their `exchange` and the `resupply` of the Dirichlet tags); the terms
+add up to the change of the amount exactly, up to the residuals of the linear solves.
 
 A study with a `perfusion` section solves the Darcy flow first (maps named by the study are read
 from the scene) and also writes `pressure.vtu` and `velocity.vtu`; `summary.json` then has the flow
@@ -80,6 +82,21 @@ these parts and gives their area. `testdata/studies/lobule_toy` is an example:
 
 ```bash
 target/debug/slidesim run testdata/studies/lobule_toy/study.json --out out
+```
+
+A study with a `cells` section runs an SBML cell model on every coarse element of the mesh (the
+mesh before its refinements), coupled to the fields by Strang splitting: per split step
+`cells.split_step`, the cells over half of it, the fields over all of it, the cells over the
+other half; the linked species of the model exchange with the means of their fields over the
+element. The model is translated to C and compiled with `$CC` (or `cc`) at the start of the run,
+cached in `$SBMLSIM_C_CACHE` (default `$XDG_CACHE_HOME/sbmlsim/c` or `~/.cache/sbmlsim/c`). The
+run also writes `cells_<index>.vtu` (the states, the outputs and the parameters of every element
+as cell data), and `summary.json` gets the steps of the cells and the amounts they exchanged and
+hold (`cells`). `testdata/studies/cells_toy` has examples, a linear model (`cells.study.json`)
+and a larger one with two linked fields (`spt.study.json`):
+
+```bash
+target/debug/slidesim run testdata/studies/cells_toy/spt.study.json --out out
 ```
 
 PETSc options follow `--`. The solvers of a field take the prefix `<field id>_`, for example

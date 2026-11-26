@@ -237,8 +237,9 @@ fn schemas_match_load() {
     }
 }
 
-/// The studies of `testdata/studies` (`<name>/study.json`, run end to end by the `slidesim`
-/// tests; `m2_real_slide` has a test of its own) are valid: by the
+/// The studies of `testdata/studies` (`<name>/study.json` and `<name>/<variant>.study.json`, run
+/// end to end by the `slidesim` tests; `m2_real_slide` and `m3_real_slide` have a test of their
+/// own) are valid: by the
 /// schemas, and by `Study::load` and `Scene::load`, which resolve the scene and the mesh.
 #[test]
 fn example_studies_are_valid() {
@@ -251,13 +252,25 @@ fn example_studies_are_valid() {
     let mut studies: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.file_name().unwrap() != "m2_real_slide")
+        .filter(|path| {
+            !path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with("_real_slide")
+        })
+        .flat_map(|dir| std::fs::read_dir(dir).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            name == "study.json" || name.ends_with(".study.json")
+        })
         .collect();
     studies.sort();
-    assert!(!studies.is_empty());
-    for study in studies {
-        let study_path = study.join("study.json");
-        let study = study.display();
+    assert!(studies.len() >= 5, "{studies:?}");
+    for study_path in studies {
+        let study = study_path.display();
         assert!(validates(contracts::schema_study(), &study_path), "{study}");
         let loaded = Study::load(&study_path).unwrap();
         assert!(
@@ -269,11 +282,19 @@ fn example_studies_are_valid() {
     }
 }
 
-/// The studies of the end-to-end run on a real slide (`testdata/studies/m2_real_slide`,
-/// `<name>.study.json`) are valid by the schema. Their scene is written by
-/// `scripts/e2e/m2_real_slide.sh` from slides outside the repository, so it is not loaded here.
+/// The studies of the end-to-end runs on a real slide (`testdata/studies/m2_real_slide`,
+/// `<name>.study.json`, and `testdata/studies/m3_real_slide/spt.study.json`) are valid by the
+/// schema. Their scenes are written from slides outside the repository (by
+/// `scripts/e2e/m2_real_slide.sh`, and as `docs/results/2026-11-m3-performance.md` describes), so
+/// they are not loaded here.
 #[test]
 fn real_slide_studies_are_valid() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/m3_real_slide/spt.study.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
+    assert!(schema.is_valid(&doc), "m3_real_slide/spt.study.json");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/m2_real_slide");
     let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
     let mut names = Vec::new();

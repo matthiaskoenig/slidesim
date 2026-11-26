@@ -589,6 +589,38 @@ fn engine_cells_match_stepper() {
         }
     }
     assert!(steps > 0);
+    // The outputs: the states, species as concentrations, then the rule target protein, which
+    // pattern 7 sets to protein_ext.
+    let values = cells.output_values();
+    let names: Vec<&str> = values.iter().map(|v| v.id.as_str()).collect();
+    let mut expected_names: Vec<&str> = ids.iter().map(String::as_str).collect();
+    expected_names.push("protein");
+    assert_eq!(names, expected_names);
+    for (v, compartment) in [("S_ext", "Vext"), ("S", "Vli"), ("T", "Vli")] {
+        let value = &values[names.iter().position(|n| *n == v).unwrap()];
+        assert_eq!(value.compartment.as_deref(), Some(compartment), "{v}");
+    }
+    assert_eq!(values.last().unwrap().compartment, None);
+    let mut outputs = Vec::new();
+    cells.outputs(&mut outputs);
+    let no = names.len();
+    assert_eq!(outputs.len(), n * no);
+    let vli = description
+        .parameters
+        .iter()
+        .position(|p| p.id == "Vli")
+        .unwrap();
+    for (i, stepper) in steppers.iter().enumerate() {
+        let row = &outputs[i * no..(i + 1) * no];
+        let s = stepper.state()[state("S")] / stepper.parameters()[vli];
+        assert!((row[state("S")] - s).abs() <= 1e-14 * s.abs(), "{row:?}");
+        let protein = setup.parameters[i]
+            .iter()
+            .find(|(id, _)| id == "protein_ext")
+            .unwrap()
+            .1;
+        assert!((row[no - 1] - protein).abs() <= 1e-14, "cell {i}: {row:?}");
+    }
     // The substrate is taken up: S_ext falls in every cell over a step.
     for i in 0..n {
         assert!(blood[2 * i] < fixed[2 * i], "cell {i}");

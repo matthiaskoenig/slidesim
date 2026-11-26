@@ -15,10 +15,11 @@ use petsc::{
 };
 
 use crate::balance::{Balance, Setup, State};
+use crate::integral::{Integral, Node};
 use crate::operators::PointValues;
 use crate::{
-    Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result, SharedOperator,
-    SourceField, Terms, Transport, coefficient_values, configure_multigrid,
+    BoundaryInflow, Discretization, Flow, MassBalance, Multigrid, PdeError, PointData, Result,
+    SharedOperator, SourceField, Terms, Transport, coefficient_values, configure_multigrid,
 };
 
 /// The options every problem sets before those of the caller, who may override them: a solver
@@ -55,6 +56,18 @@ pub struct Inputs<'a> {
     /// The Darcy flow of the study on the same mesh, for fields with advection (others ignore
     /// it).
     pub flow: Option<&'a Flow>,
+}
+
+/// What a change of the solution between steps ([`Problem::modify`]) exchanged with what is
+/// outside the field, for the mass balance over an interval ([`Problem::interval_balance`]):
+/// amounts in mM*um^2, positive into the field. The change of `int phi u`
+/// ([`Problem::total_mass`]) is `exchange` plus the sum of `resupply`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exchanged {
+    /// What cell models gave to the field ([`MassBalance::exchange`]).
+    pub exchange: f64,
+    /// What the Dirichlet values of each tag resupplied ([`BoundaryInflow::resupply`]).
+    pub resupply: Vec<(String, f64)>,
 }
 
 /// The field `u` of a [`FieldSpec`] on a [`Mesh`], stepped in time:
@@ -96,6 +109,10 @@ pub struct Inputs<'a> {
 /// [`Problem::mass_balance`] its balance at the end of a step from the discrete equations (the
 /// consistent fluxes at the Dirichlet tags, the advective outflow at the others, and the
 /// advection defect, zero to rounding for the conservative velocity, see [`MassBalance`]).
+/// [`Problem::interval_balance`] is the balance over the steps since a time
+/// ([`Problem::start_interval`]), the changes of [`Problem::modify`] included, each term its
+/// mean rate: the terms integrated by the weights of the BDF steps ([`Integral`]), so that they
+/// add up to the change of the amount exactly (up to the residuals of the linear solves).
 ///
 /// Time integration: `TSBDF` of order 2 with the time step [`TimeSpec::dt`]: fixed, or the
 /// initial step of `TSAdapt` `basic` if [`TimeSpec::adaptive`]. The equation is linear, so each
@@ -167,6 +184,8 @@ pub struct Problem {
     values: PointValues,
     /// The operators of the mass balance, built at its first computation.
     balance: OnceCell<Balance>,
+    /// The start of the interval of [`Problem::interval_balance`].
+    mark: Mark,
     /// The discretizations of the levels, coarse first, for tests of the reuse of operators.
     levels: Vec<Discretization>,
     /// Dropped after the `TS`, which may read options until it is destroyed.
@@ -344,6 +363,7 @@ impl Problem {
             work: disc.global_vector()?,
             rate: disc.global_vector()?,
             rate_shift: None,
+            integral: Integral::new(0.0, zeros(&disc)?, disc.num_quadrature_points()),
         };
 
         let mut ts = Ts::implicit(&disc.dm().comm(), equation, &shell, &shell)?;
@@ -370,7 +390,14 @@ impl Problem {
 
         let mut u = disc.global_vector()?;
         u.set(field.initial)?;
-        Ok(Problem {
+        let mark = Mark {
+            node: ts.context().integral.current().duplicate()?,
+            c: u.duplicate()?,
+            mass: 0.0,
+            jumps: zeros(&disc)?,
+            exchanged: Exchanged::default(),
+        };
+        let mut problem = Problem {
             ts,
             u,
             t: 0.0,
@@ -386,22 +413,27 @@ impl Problem {
             edge_tags,
             edge_velocity: flow.map_or_else(Vec::new, |flow| flow.edge_velocity(finest).to_vec()),
             balance: OnceCell::new(),
+            mark,
             levels,
             _options: options,
-        })
+        };
+        problem.mark.mass = problem.total_mass()?;
+        Ok(problem)
     }
 
     /// Sets the solution to the interpolant of `f` (its values at the nodes), as the initial
     /// condition instead of the uniform `FieldSpec::initial`. The Dirichlet values stay on their
     /// boundaries. Set later, it is the solution at the current time, from which the time
-    /// integration starts afresh. Collective.
+    /// integration starts afresh, and the interval of [`Problem::interval_balance`] starts
+    /// there. Collective.
     ///
     /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
     pub fn set_initial_condition(&mut self, f: impl Fn([f64; 2]) -> f64) -> Result<()> {
         self.ensure_usable()?;
         let set = self.disc.interpolate(f, &mut self.u);
         self.restart()?;
-        set
+        set?;
+        self.start_interval()
     }
 
     /// Changes the solution between two steps: `f` changes the global vector of the solution
@@ -409,24 +441,44 @@ impl Problem {
     /// time integration starts afresh from it, as after [`Problem::set_initial_condition`]: BDF2
     /// starts again with its first step, without the history of the steps before, and the rate of
     /// change is unknown until the next step ([`Problem::mass_balance`]). The operators, their
-    /// matrices and the multigrid do not depend on the solution and are kept. Collective if `f`
-    /// is.
+    /// matrices and the multigrid do not depend on the solution and are kept. The change is
+    /// booked in the balance over the interval ([`Problem::interval_balance`]) as what
+    /// `exchanged` says it exchanged: its amount, `int phi` of the change, is `exchanged.exchange`
+    /// plus the resupply, which the caller makes sure of. Collective if `f` is.
     ///
     /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`] (then `f` is not
     /// called), and the error of `f` (the solution may be changed in part, and the time
-    /// integration starts afresh from it all the same).
-    pub fn modify(&mut self, f: impl FnOnce(&mut Vector) -> Result<()>) -> Result<()> {
+    /// integration starts afresh from it all the same, but nothing is booked: the balance over
+    /// the interval is then off by the change).
+    pub fn modify(
+        &mut self,
+        f: impl FnOnce(&mut Vector) -> Result<()>,
+        exchanged: &Exchanged,
+    ) -> Result<()> {
         self.ensure_usable()?;
+        self.mark.jumps.axpy(-1.0, &self.u)?;
         let changed = f(&mut self.u);
+        self.mark.jumps.axpy(1.0, &self.u)?;
         self.restart()?;
-        changed
+        changed?;
+        let booked = &mut self.mark.exchanged;
+        booked.exchange += exchanged.exchange;
+        for (tag, amount) in &exchanged.resupply {
+            match booked.resupply.iter_mut().find(|(t, _)| t == tag) {
+                Some((_, sum)) => *sum += amount,
+                None => booked.resupply.push((tag.clone(), *amount)),
+            }
+        }
+        Ok(())
     }
 
     /// Starts the time integration afresh from the solution: without the history of the steps
     /// before, and with the rate of change unknown until the next step.
     fn restart(&mut self) -> Result<()> {
         self.ts.restart_step()?;
-        self.ts.context_mut().rate_shift = None;
+        let equation = self.ts.context_mut();
+        equation.rate_shift = None;
+        equation.integral.restart();
         Ok(())
     }
 
@@ -660,6 +712,113 @@ impl Problem {
         c_t.set(0.0)?;
         self.disc.dm().global_to_local(&rate, &mut c_t)?;
         let c = self.local_solution()?;
+        self.balance()?.compute(&State {
+            f: &equation.f,
+            porosity: &equation.porosity,
+            c: &c,
+            c_t: &c_t,
+            values: &self.values,
+            duration: 1.0,
+        })
+    }
+
+    /// The time the interval of [`Problem::interval_balance`] starts at (s).
+    pub fn interval_start(&self) -> f64 {
+        self.mark.node.t
+    }
+
+    /// Starts the interval of [`Problem::interval_balance`] at the current time. Collective.
+    ///
+    /// Errors: [`PdeError::Poisoned`] after a failed [`Problem::step_to`].
+    pub fn start_interval(&mut self) -> Result<()> {
+        self.ensure_usable()?;
+        let mass = self.total_mass()?;
+        let jumps = zeros(&self.disc)?;
+        self.mark = Mark {
+            node: self.ts.context().integral.current().duplicate()?,
+            c: self.u.duplicate()?,
+            mass,
+            jumps,
+            exchanged: Exchanged::default(),
+        };
+        Ok(())
+    }
+
+    /// The mass balance over the interval from [`Problem::interval_start`] to the current time,
+    /// each term its mean rate there (the amount over the length of the interval, in
+    /// mM*um^2/s): `storage_rate` the change of [`Problem::total_mass`]; `source`, the inflows
+    /// and `advection_defect` the terms of the steps, integrated by the weights of the BDF
+    /// steps ([`Integral`]); `exchange` and [`BoundaryInflow::resupply`] what the changes of
+    /// [`Problem::modify`] booked. The interval starts at t = 0, then at every
+    /// [`Problem::start_interval`] and [`Problem::set_initial_condition`]. Collective.
+    ///
+    /// Errors: [`PdeError::NotStepped`] for an interval of no length; [`PdeError::Poisoned`]
+    /// after a failed [`Problem::step_to`]; [`PdeError::Unsupported`] if the steps were not of
+    /// `TSBDF` of order 2 as [`Integral`] follows them (other options of the time integration).
+    pub fn interval_balance(&self) -> Result<MassBalance> {
+        self.ensure_usable()?;
+        let equation = self.ts.context();
+        equation.integral.check()?;
+        let (now, start) = (equation.integral.current(), &self.mark.node);
+        let duration = now.t - start.t;
+        if duration <= 0.0 || duration.is_nan() {
+            return Err(PdeError::NotStepped { t: self.t });
+        }
+        // The integrals of the solution, the Dirichlet values included, and of the source.
+        let mut integral = now.c.duplicate()?;
+        integral.axpy(-1.0, &start.c)?;
+        let scaled: Vec<(String, f64)> = self
+            .dirichlet
+            .iter()
+            .map(|(tag, value)| (tag.clone(), value * duration))
+            .collect();
+        let mut c = local_with_dirichlet(&self.disc, &scaled)?;
+        self.disc.dm().global_to_local(&integral, &mut c)?;
+        let f: Vec<f64> = now.f.iter().zip(&start.f).map(|(a, b)| a - b).collect();
+        // The change of the steps: of the solution, but the changes between them.
+        let mut change = self.u.duplicate()?;
+        change.axpy(-1.0, &self.mark.c)?;
+        change.axpy(-1.0, &self.mark.jumps)?;
+        let mut c_t = self.disc.local_vector()?;
+        c_t.set(0.0)?;
+        self.disc.dm().global_to_local(&change, &mut c_t)?;
+        let mut balance = self.balance()?.compute(&State {
+            f: &f,
+            porosity: &equation.porosity,
+            c: &c,
+            c_t: &c_t,
+            values: &self.values,
+            duration,
+        })?;
+        balance.storage_rate = self.total_mass()? - self.mark.mass;
+        balance.exchange = self.mark.exchanged.exchange;
+        for (tag, amount) in &self.mark.exchanged.resupply {
+            match balance.boundary.iter_mut().find(|b| &b.tag == tag) {
+                Some(inflow) => inflow.resupply += amount,
+                None => balance.boundary.push(BoundaryInflow {
+                    tag: tag.clone(),
+                    advective: 0.0,
+                    diffusive: 0.0,
+                    resupply: *amount,
+                }),
+            }
+        }
+        balance.storage_rate /= duration;
+        balance.source /= duration;
+        balance.advection_defect /= duration;
+        balance.exchange /= duration;
+        for inflow in &mut balance.boundary {
+            inflow.advective /= duration;
+            inflow.diffusive /= duration;
+            inflow.resupply /= duration;
+        }
+        Ok(balance)
+    }
+
+    /// The operators of the mass balance, built at the first call and kept. Collective at the
+    /// first call.
+    fn balance(&self) -> Result<&Balance> {
+        let equation = self.ts.context();
         if self.balance.get().is_none() {
             let dirichlet: Vec<&str> = self.dirichlet.iter().map(|(t, _)| t.as_str()).collect();
             let fluxes: Vec<(&str, f64)> =
@@ -676,14 +835,7 @@ impl Problem {
             })?;
             self.balance.get_or_init(|| balance);
         }
-        let balance = self.balance.get().expect("built above");
-        balance.compute(&State {
-            f: &equation.f,
-            porosity: &equation.porosity,
-            c: &c,
-            c_t: &c_t,
-            values: &self.values,
-        })
+        Ok(self.balance.get().expect("built above"))
     }
 
     /// The solution at the quadrature points of the local cells, Dirichlet values included.
@@ -718,6 +870,13 @@ fn options_prefix(id: &str) -> Result<String> {
              an ASCII letter and has ASCII letters, digits and '_' only"
         )))
     }
+}
+
+/// A global vector of `disc` of zeros.
+fn zeros(disc: &Discretization) -> Result<Vector> {
+    let mut zeros = disc.global_vector()?;
+    zeros.set(0.0)?;
+    Ok(zeros)
 }
 
 /// A local vector of `disc` with the Dirichlet values `dirichlet` (in order) and zeros.
@@ -809,6 +968,22 @@ struct Advection<'a> {
     dirichlet: &'a [&'a str],
 }
 
+/// The start of the interval of [`Problem::interval_balance`], and what changed the solution
+/// since then besides the steps.
+#[derive(Debug)]
+struct Mark {
+    /// The integral of the steps ([`Integral`]) at the start.
+    node: Node,
+    /// The solution at the start: a global vector.
+    c: Vector,
+    /// `int phi u` at the start.
+    mass: f64,
+    /// The sum of the changes of [`Problem::modify`] since the start: a global vector.
+    jumps: Vector,
+    /// What they exchanged, the resupply summed by tag.
+    exchanged: Exchanged,
+}
+
 /// The equation of a [`Problem`] for its `TS`:
 /// `F(u, u_t) = M_phi u_t + (A_w + K_(phi d) + M_(phi k)) u - int phi f v - int_Gamma q v`
 /// (with SUPG test functions for advection, see [`Problem`]).
@@ -856,6 +1031,8 @@ struct Equation {
     /// The shift of the last Jacobian; `None` before the first, and after a new initial
     /// condition.
     rate_shift: Option<f64>,
+    /// The integral of the solution and the source over the steps.
+    integral: Integral,
 }
 
 impl Equation {
@@ -924,6 +1101,18 @@ impl Implicit for Equation {
             }
         }
         Ok(rebuild)
+    }
+
+    fn post_stage(&mut self, t: f64, y: &VecRef<'_>) -> petsc::Result<()> {
+        let shift = self.rate_shift.unwrap_or(f64::NAN);
+        self.integral
+            .stage(t, y, &self.f, shift)
+            .map_err(PdeError::into_petsc)
+    }
+
+    fn post_step(&mut self, t: f64, _u: &VecRef<'_>) -> petsc::Result<()> {
+        self.integral.step(t);
+        Ok(())
     }
 }
 

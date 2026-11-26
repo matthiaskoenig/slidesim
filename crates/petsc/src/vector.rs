@@ -143,6 +143,16 @@ macro_rules! read_ops {
             Ok(n as usize)
         }
 
+        /// A new vector of the same layout with the same entries (`VecDuplicate`, `VecCopy`).
+        pub fn duplicate(&self) -> Result<Vector> {
+            let mut raw = null_mut();
+            chk!(unsafe { sys::VecDuplicate(self.raw, &mut raw) });
+            // Owned from here: destroyed if the copy fails.
+            let copy = Vector { raw };
+            chk!(unsafe { sys::VecCopy(self.raw, copy.raw) });
+            Ok(copy)
+        }
+
         /// The 2-norm.
         pub fn norm2(&self) -> Result<f64> {
             let mut norm = 0.0;

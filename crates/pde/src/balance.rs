@@ -16,9 +16,11 @@ use crate::{Discretization, PointData, Result, SourceField, Terms, Transport};
 pub const UNTAGGED: &str = "(untagged)";
 
 /// The balance of the amount of substance `int phi c` of a field `c` (porosity `phi`) at the end
-/// of a time step, each term in mM*um^2/s, from the discrete equations of [`crate::Problem`]:
+/// of a time step ([`crate::Problem::mass_balance`]) or over an interval of steps, each term its
+/// mean rate there ([`crate::Problem::interval_balance`]), in mM*um^2/s, from the discrete
+/// equations of [`crate::Problem`]:
 ///
-/// `storage_rate = source + sum(boundary totals) - advection_defect`,
+/// `storage_rate = source + sum(boundary totals) + exchange - advection_defect`,
 ///
 /// up to the residuals of the linear solves.
 ///
@@ -59,7 +61,15 @@ pub const UNTAGGED: &str = "(untagged)";
 ///   marks it, else [`UNTAGGED`]. The entries: the tags of the conditions in the order listed,
 ///   then the other tags of edges of the mesh which mark edges of the boundary, in the order of
 ///   the mesh, then [`UNTAGGED`] if there are edges of the boundary without tag;
-/// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`.
+/// - `advection_defect`: `int u . grad c - int_Gamma (u . n) c`;
+/// - `exchange`: what cell models gave to the field (negative where they took it,
+///   [`crate::Exchange`]), between the steps ([`crate::Problem::modify`]); the substance the
+///   Dirichlet values resupplied at the same time counts as inflow through their tags
+///   ([`BoundaryInflow::resupply`]). Zero at the end of a step
+///   ([`crate::Problem::mass_balance`]); over an interval
+///   ([`crate::Problem::interval_balance`]) the amounts the changes booked:
+///
+/// `storage_rate = source + sum(boundary totals) + exchange - advection_defect`.
 ///
 /// The velocity on an edge of the boundary is that of the flow at its Gauss points
 /// ([`crate::Flow::edge_velocity`]): the conservative velocity of its cell, whose normal
@@ -70,28 +80,33 @@ pub struct MassBalance {
     pub source: f64,
     pub boundary: Vec<BoundaryInflow>,
     pub advection_defect: f64,
+    pub exchange: f64,
 }
 
 /// The inflow through the edges of the boundary one tag counts for (see [`MassBalance`]), in
-/// mM*um^2/s, positive into the domain, as two parts:
+/// mM*um^2/s, positive into the domain, as three parts:
 ///
 /// - `advective`: minus the advective flux by the Gauss points of the edges, `-int (u . n) c`
 ///   on an edge a Dirichlet tag marks (in and out), else `-int (u . n)^+ c` (the outflow; the
 ///   backflow term lets nothing in); zero without advection;
 /// - `diffusive`: at a Dirichlet tag the consistent flux `sum R_i` over its dofs (a dof of
 ///   several Dirichlet tags counts for the one listed last, as its value does); at a flux tag
-///   `int q` over its edges; zero elsewhere (free outflow: no diffusive flux).
+///   `int q` over its edges; zero elsewhere (free outflow: no diffusive flux);
+/// - `resupply`: at a Dirichlet tag, what its fixed values resupplied when cell models changed
+///   the field next to it (negative where they took substance away, see [`crate::Exchange`]);
+///   zero elsewhere, and at the end of a step.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundaryInflow {
     pub tag: String,
     pub advective: f64,
     pub diffusive: f64,
+    pub resupply: f64,
 }
 
 impl BoundaryInflow {
-    /// The inflow, `advective + diffusive`: the term of the balance.
+    /// The inflow, `advective + diffusive + resupply`: the term of the balance.
     pub fn total(&self) -> f64 {
-        self.advective + self.diffusive
+        self.advective + self.diffusive + self.resupply
     }
 }
 
@@ -128,6 +143,10 @@ pub(crate) struct State<'a> {
     pub(crate) c_t: &'a Vector,
     /// The values of local vectors of the finest level at its quadrature points.
     pub(crate) values: &'a PointValues,
+    /// The factor of the terms which do not depend on the state (the fluxes of the
+    /// conditions): 1 for the balance at an instant, the length of the interval (s) for the
+    /// integral over it, with `c`, `c_t` and `f` integrals over it too.
+    pub(crate) duration: f64,
 }
 
 /// The mass balance of a problem (see [`MassBalance`]) with what stays from step to step built
@@ -310,6 +329,7 @@ impl Balance {
             c,
             c_t,
             values,
+            duration,
         } = *state;
         let (disc, free, data) = (&self.disc, &self.free, &self.data);
         let comm = disc.dm().comm();
@@ -343,7 +363,7 @@ impl Balance {
         }
         residual.axpy(-1.0, &work)?;
         if let Some(load) = &self.load {
-            residual.axpy(-1.0, load)?;
+            residual.axpy(-duration, load)?;
         }
         let dirichlet: Vec<&str> = self.dirichlet.iter().map(String::as_str).collect();
         let dirichlet_inflows = disc.essential_sums(free, &residual, &dirichlet)?;
@@ -386,10 +406,11 @@ impl Balance {
                 tag: tag.clone(),
                 advective: -o,
                 diffusive: 0.0,
+                resupply: 0.0,
             })
             .collect();
         for &(entry, inflow) in &self.flux_inflows {
-            boundary[entry].diffusive += inflow;
+            boundary[entry].diffusive += duration * inflow;
         }
         for (tag, inflow) in self.dirichlet.iter().zip(&dirichlet_inflows) {
             let entry = self
@@ -405,6 +426,7 @@ impl Balance {
                     tag: tag.clone(),
                     advective: -outflow[entry],
                     diffusive: 0.0,
+                    resupply: 0.0,
                 });
             }
         }
@@ -413,6 +435,7 @@ impl Balance {
             source,
             boundary,
             advection_defect: advection - comm.sum_real(through)?,
+            exchange: 0.0,
         })
     }
 }

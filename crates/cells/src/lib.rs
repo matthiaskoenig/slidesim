@@ -28,7 +28,7 @@ mod parameters;
 use petsc::Comm;
 use petsc::sys::PetscInt;
 
-pub use engine::EngineCells;
+pub use engine::{CellModel, EngineCells};
 pub use parameters::CellSetup;
 
 /// A solver of the cells of a process: advances every cell over an interval, exchanging the
@@ -57,6 +57,27 @@ pub trait CellSolver {
     /// The states of every cell (`n_cells * state_ids().len()` values, cell by cell), as the
     /// model stores them (a species of a concentration as its amount, in the model's units).
     fn states(&self) -> &[f64];
+
+    /// The values [`CellSolver::outputs`] writes per cell: every state of the model, in its
+    /// order, then the outputs of the spec ([`contracts::CellsSpec::outputs`]) which are not
+    /// states (targets of assignment rules), in their order.
+    fn output_values(&self) -> &[OutputValue];
+
+    /// The values of [`CellSolver::output_values`] of every cell at the time the cells reached
+    /// (`n_cells * output_values().len()` values, cell by cell), into `out`: a species whose
+    /// unit is a concentration as its concentration (its amount over the volume of its
+    /// compartment, in the model's units), any other value as the model has it; the targets of
+    /// assignment rules evaluated from the state of the cell.
+    fn outputs(&self, out: &mut Vec<f64>);
+}
+
+/// A value of the cells which [`CellSolver::outputs`] writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputValue {
+    /// Its id in the model.
+    pub id: String,
+    /// For a species written as a concentration, its compartment; `None` for other values.
+    pub compartment: Option<String>,
 }
 
 /// The work of one [`CellSolver::advance`] on this process.

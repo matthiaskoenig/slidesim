@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+cells = { path = "../cells" }
 ceed = { path = "../ceed" }
 clap = { version = "4", features = ["derive"] }
 contracts = { path = "../contracts" }

@@ -27,6 +27,21 @@ pub trait Implicit {
     /// coefficients of a shell operator. Returns whether they changed: then they are marked
     /// changed (`MatAssemblyBegin` and `MatAssemblyEnd`), so that the preconditioner is rebuilt.
     fn jacobian(&mut self, t: f64, u: &VecRef<'_>, u_t: &VecRef<'_>, shift: f64) -> Result<bool>;
+
+    /// Called after the solve of each stage of a step (`TSSetPostStage`), with the time of the
+    /// stage and its solution `y`. A step of `TSBDF` has one stage, the first step after a
+    /// restart two (a half step of the first order, then the step). An adaptive step control
+    /// may reject a stage after this call: then the step is tried again, shorter. Nothing by
+    /// default.
+    fn post_stage(&mut self, _t: f64, _y: &VecRef<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after each step which is accepted (`TSSetPostStep`), with the time it reached and
+    /// the solution `u` there. Nothing by default.
+    fn post_step(&mut self, _t: f64, _u: &VecRef<'_>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The kind of equation of a [`Ts`] (`TSProblemType`).
@@ -74,7 +89,9 @@ impl Ts {
 impl<C: Implicit> Ts<C> {
     /// A time stepper of the implicit equation `equation`: `TSSetIFunction`, and
     /// `TSSetIJacobian` with the Jacobian `jacobian` and the matrix `preconditioner` of its
-    /// preconditioner (often `jacobian` again), which the `TS` keeps references to.
+    /// preconditioner (often `jacobian` again), which the `TS` keeps references to; the
+    /// equation is the application context of the `TS`, for [`Implicit::post_stage`]
+    /// (`TSSetPostStage`) and [`Implicit::post_step`] (`TSSetPostStep`).
     pub fn implicit(
         comm: &Comm,
         equation: C,
@@ -94,6 +111,10 @@ impl<C: Implicit> Ts<C> {
                 ctx,
             )
         });
+        // SAFETY: as above; the hooks find the context as the application context.
+        chk!(unsafe { sys::TSSetApplicationContext(ts.raw, ctx) });
+        chk!(unsafe { sys::TSSetPostStage(ts.raw, Some(post_stage::<C>)) });
+        chk!(unsafe { sys::TSSetPostStep(ts.raw, Some(post_step::<C>)) });
         Ok(ts)
     }
 
@@ -399,5 +420,42 @@ unsafe extern "C" fn ijacobian<C: Implicit>(
             }
         }
         Ok(())
+    })
+}
+
+/// The context of the `Ts<C>` of `ts`, its application context ([`Ts::implicit`]).
+///
+/// # Safety
+/// `ts` is the `TS` of a live `Ts<C>` made by [`Ts::implicit`], whose context nothing else uses
+/// meanwhile.
+unsafe fn application_context<'a, C>(ts: sys::TS) -> Result<&'a mut C> {
+    let mut ctx: *mut c_void = null_mut();
+    chk!(unsafe { sys::TSGetApplicationContext(ts, (&raw mut ctx).cast()) });
+    Ok(unsafe { context::<C>(ctx) })
+}
+
+unsafe extern "C" fn post_stage<C: Implicit>(
+    ts: sys::TS,
+    t: sys::PetscReal,
+    _stage: sys::PetscInt,
+    y: *mut sys::Vec,
+) -> sys::PetscErrorCode {
+    callback(c"Implicit::post_stage", || {
+        // SAFETY: PETSc calls this for `Ts::implicit` only, from `Ts::solve`, one callback at a
+        // time, with the vector of the stage (`TSBDF` has one per stage) for the call.
+        let equation = unsafe { application_context::<C>(ts) }?;
+        equation.post_stage(t, &unsafe { VecRef::lent(*y) })
+    })
+}
+
+unsafe extern "C" fn post_step<C: Implicit>(ts: sys::TS) -> sys::PetscErrorCode {
+    callback(c"Implicit::post_step", || {
+        let (mut t, mut u) = (0.0, null_mut());
+        chk!(unsafe { sys::TSGetTime(ts, &mut t) });
+        // SAFETY: the solution is borrowed from the TS for the call.
+        chk!(unsafe { sys::TSGetSolution(ts, &mut u) });
+        // SAFETY: as in `post_stage`.
+        let equation = unsafe { application_context::<C>(ts) }?;
+        equation.post_step(t, &unsafe { VecRef::lent(u) })
     })
 }

@@ -1,59 +1,86 @@
 //! `slidesim run`: a study end to end.
 //!
-//! Loads the study and its scene, checks that the maps the study names are in the scene (before
-//! anything is solved), loads the mesh (distributed over the processes, refined
-//! `mesh.refinements` times), reads the maps over the cells of each process, solves the Darcy
-//! [`Flow`] if the study has a `perfusion` section and writes it as `<out>/pressure.vtu` (point
-//! data `pressure.Pa`) and `<out>/velocity.vtu` (the point vectors `velocity`, the conservative
-//! velocity the fields are carried by, and `primal_velocity`, `-K grad p / mu`, um/s). It removes
-//! the outputs `<out>/<field id>_<index>.vtu` of an earlier run (`pressure.vtu` and
-//! `velocity.vtu` included; other files in `<out>` stay), builds one [`Problem`] per field, and
-//! steps the fields to each output time of `time.outputs` in turn, then to `time.end`. At each
-//! output time (time 0 before any step) it writes every field as `<out>/<field id>_<index>.vtu`,
-//! `<index>` the position of the time in `time.outputs`: point data `<field id>.mM` on the finest
-//! mesh level, Dirichlet values included, one file of the pieces of every process. When every
-//! field is done, process 0 writes `<out>/summary.json`:
+//! Loads the study and its scene, checks that the maps the study names are in the scene and the
+//! `cells` section against the study and the scene, translates the cell model to C, compiles it
+//! and checks it against the study (before anything is solved), loads the mesh (distributed over
+//! the processes, refined `mesh.refinements` times), reads the maps over the cells of each
+//! process, solves the Darcy [`Flow`] if the study has a `perfusion` section, builds one
+//! [`Problem`] per field and, with `cells`, the cells and their exchange with the fields
+//! ([`Coupled`]). It removes the outputs `<out>/<field id>_<index>.vtu` and
+//! `<out>/cells_<index>.vtu` of an earlier run (`pressure.vtu` and `velocity.vtu` included;
+//! other files in `<out>` stay), writes the flow as `<out>/pressure.vtu` (point data
+//! `pressure.Pa`) and `<out>/velocity.vtu` (the point vectors `velocity`, the conservative
+//! velocity the fields are carried by, and `primal_velocity`, `-K grad p / mu`, um/s), and steps
+//! the fields to each output time of `time.outputs` in turn, then to `time.end`: each field
+//! alone, or with `cells` all fields and the cells together by Strang splitting ([`Coupled`]).
+//! At each output time (time 0 before any step) it writes every field as
+//! `<out>/<field id>_<index>.vtu`, `<index>` the position of the time in `time.outputs`: point
+//! data `<field id>.mM` on the finest mesh level, Dirichlet values included, one file of the
+//! pieces of every process; with `cells`, the cells as `<out>/cells_<index>.vtu`: cell data of
+//! the coarse elements, one array per value named after it (NaN in elements without a cell):
+//! every state of the model (a species of a concentration as its concentration, in the model's
+//! units), the outputs of `cells.outputs` (targets of assignment rules) and the parameters of
+//! the element (`cells.parameters` and the two volumes). When every field is done, process 0
+//! writes `<out>/summary.json`:
 //!
 //! ```text
 //! {"fields": {"<field id>": {
 //!     "times": [...], "l2_norm": [...], "total_mass": [...],
 //!     "mass_balance": [null | {
-//!         "storage_rate": ..., "source": ..., "advection_defect": ...,
-//!         "boundary": {"<tag>": {"advective": ..., "diffusive": ...}}}]}},
+//!         "storage_rate": ..., "source": ..., "advection_defect": ..., "exchange": ...,
+//!         "boundary": {"<tag>": {"advective": ..., "diffusive": ..., "resupply": ...}}}]}},
 //!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
 //!                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
-//!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "output": ...}}
+//!  "cells": {"count": <n>, "steps": <n>, "rejected": <n>,
+//!            "exchanged": {"<field id>": [...]}, "amounts": {"<species id>": [...]}},
+//!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "exchange": ...,
+//!             "cells": ..., "output": ...}}
 //! ```
 //!
 //! with, per output time, the time reached (s), the L2 norm of the field (mM*um), its amount of
 //! substance in the domain, the integral of the field weighed by the porosity (mM*um^2,
-//! [`Problem::total_mass`]), and its mass balance at the end of the last step
-//! ([`pde::MassBalance`], every term in mM*um^2/s; `null` at a time before the first step):
-//! `storage_rate = source + sum over the tags of (advective + diffusive) - advection_defect`,
-//! the inflow through each tag of the boundary positive into the domain
-//! ([`pde::BoundaryInflow`]). `perfusion` is there for a study with perfusion: the flow through
-//! each pressure tag ([`Flow::tag_flows`], positive into the domain), and the pressure islands,
-//! the connected components of the mesh which no pressure tag reaches, whose pressure is 0 and
-//! which have no flow ([`Flow::islands`]): their number and area (0 and 0.0 without). With
-//! islands, the run says so in one line. `phases` is the wall time
+//! [`Problem::total_mass`]), and its mass balance over the interval since the output time
+//! before (since t = 0 for the first), each term its mean rate there
+//! ([`Problem::interval_balance`], every term in mM*um^2/s; `null` for an interval of no
+//! length, as at time 0):
+//! `storage_rate = source + sum over the tags of (advective + diffusive + resupply) + exchange
+//! - advection_defect`, the inflow through each tag of the boundary positive into the domain
+//! ([`pde::BoundaryInflow`]), `exchange` what the cells gave to the field, and `resupply` what
+//! the Dirichlet values of a tag resupplied when the cells changed the field next to them.
+//! `storage_rate` is the change of `total_mass` over the interval divided by its length, and
+//! the terms add up to it exactly, up to the residuals of the linear solves.
+//! `cells` is there for a study with cells: their number, the steps and rejected steps of
+//! their integrators summed over the cells and the run, and per output time the amount each
+//! linked field received from the cells since t = 0 (mM*um^2) and the amount of each species
+//! of the cell compartment in all cells, in the units of the fields (mM*um^2: its
+//! concentration times the cell volume of the model, times the blood volume of the element in
+//! um^2 over the blood volume of the model). `perfusion` is there for a study with perfusion:
+//! the flow through each pressure tag ([`Flow::tag_flows`], positive into the domain), and the
+//! pressure islands, the connected components of the mesh which no pressure tag reaches, whose
+//! pressure is 0 and which have no flow ([`Flow::islands`]): their number and area (0 and 0.0
+//! without). With islands, the run says so in one line. `phases` is the wall time
 //! of process 0 in each phase of the run (s), the phases separated by barriers: `setup` (from the
-//! start of the process: PETSc, the study, the mesh, the maps and the problems of the fields),
-//! `pressure` (the flow, zero without perfusion), `transport` (the steps of the fields) and
-//! `output` (the files and the values of the summary); together the time of the run but the
-//! writing of `summary.json` itself.
+//! start of the process: PETSc, the study, the cell model, the mesh, the maps, the problems of
+//! the fields and the cells), `pressure` (the flow, zero without perfusion), `transport` (the
+//! steps of the fields), `exchange` (the means of the fields over the cells and the changes
+//! given back), `cells` (the steps of the cells) and `output` (the files and the values of the
+//! summary); together the time of the run but the writing of `summary.json` itself.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ceed::Ceed;
-use contracts::{Scene, Study, check_maps};
+use cells::CellModel;
+use contracts::{CellSolverKind, Scene, Study, check_cells, check_maps};
 use maps::Maps;
 use mesh::Mesh;
 use pde::{Flow, Inputs, MassBalance, PdeError, Problem};
 use petsc::{Comm, Petsc, Vector, Viewer};
 use serde::Serialize;
+
+use crate::coupled::{Coupled, linked_fields};
 
 /// `summary.json`.
 #[derive(Debug, Serialize)]
@@ -61,6 +88,8 @@ struct Summary {
     fields: BTreeMap<String, FieldSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     perfusion: Option<PerfusionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cells: Option<CellsSummary>,
     /// The wall time of process 0 in each phase: s.
     phases: BTreeMap<&'static str, f64>,
 }
@@ -68,7 +97,7 @@ struct Summary {
 /// The wall time of process 0 in each phase of a run, the phases separated by barriers, so that
 /// a phase ends when every process ended it.
 #[derive(Debug)]
-struct Phases {
+pub(crate) struct Phases {
     comm: Comm,
     /// The end of the last phase.
     last: Instant,
@@ -78,10 +107,17 @@ struct Phases {
 impl Phases {
     /// The phases of a run started at `started`, each at zero seconds.
     fn new(comm: Comm, started: Instant) -> Phases {
-        let seconds = ["setup", "pressure", "transport", "output"]
-            .into_iter()
-            .map(|name| (name, 0.0))
-            .collect();
+        let seconds = [
+            "setup",
+            "pressure",
+            "transport",
+            "exchange",
+            "cells",
+            "output",
+        ]
+        .into_iter()
+        .map(|name| (name, 0.0))
+        .collect();
         Phases {
             comm,
             last: started,
@@ -91,13 +127,28 @@ impl Phases {
 
     /// Ends a time spent in the phase `name`, from the end of the last phase, when every process
     /// ended it. Collective.
-    fn end(&mut self, name: &'static str) -> Result<()> {
+    pub(crate) fn end(&mut self, name: &'static str) -> Result<()> {
         self.comm.barrier()?;
         let now = Instant::now();
         *self.seconds.entry(name).or_default() += (now - self.last).as_secs_f64();
         self.last = now;
         Ok(())
     }
+}
+
+/// The cells of the study.
+#[derive(Debug, Default, Serialize)]
+struct CellsSummary {
+    /// The number of cells.
+    count: usize,
+    /// The steps of the integrators of the cells and the rejected step attempts, summed.
+    steps: u64,
+    rejected: u64,
+    /// Per linked field and output time, the amount the cells gave to the field since t = 0:
+    /// mM*um^2.
+    exchanged: BTreeMap<String, Vec<f64>>,
+    /// Per species of the cell compartment and output time, its amount in all cells: mM*um^2.
+    amounts: BTreeMap<String, Vec<f64>>,
 }
 
 /// The flow of the study.
@@ -124,7 +175,8 @@ struct FieldSummary {
     l2_norm: Vec<f64>,
     /// The amount of substance, `int phi c` (porosity `phi`): mM*um^2.
     total_mass: Vec<f64>,
-    /// The mass balance at the end of the last step, `null` before the first step.
+    /// The mass balance over the interval since the output time before, `null` for an interval
+    /// of no length.
     mass_balance: Vec<Option<BalanceSummary>>,
 }
 
@@ -134,6 +186,7 @@ struct BalanceSummary {
     storage_rate: f64,
     source: f64,
     advection_defect: f64,
+    exchange: f64,
     /// The inflow through each tag of the boundary, positive into the domain.
     boundary: BTreeMap<String, InflowSummary>,
 }
@@ -143,6 +196,7 @@ struct BalanceSummary {
 struct InflowSummary {
     advective: f64,
     diffusive: f64,
+    resupply: f64,
 }
 
 impl From<MassBalance> for BalanceSummary {
@@ -151,6 +205,7 @@ impl From<MassBalance> for BalanceSummary {
             storage_rate: balance.storage_rate,
             source: balance.source,
             advection_defect: balance.advection_defect,
+            exchange: balance.exchange,
             boundary: balance
                 .boundary
                 .into_iter()
@@ -158,6 +213,7 @@ impl From<MassBalance> for BalanceSummary {
                     let inflow = InflowSummary {
                         advective: b.advective,
                         diffusive: b.diffusive,
+                        resupply: b.resupply,
                     };
                     (b.tag, inflow)
                 })
@@ -172,18 +228,31 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
     let study = Study::load(study_path).context("cannot load the study")?;
     let scene = Scene::load(&study.scene).context("cannot load the scene")?;
     check_maps(&study, &scene)?;
+    check_cells(&study, &scene)?;
+    let comm = petsc.comm();
+    let model = study
+        .cells
+        .as_ref()
+        .map(|spec| {
+            linked_fields(&study, spec)?;
+            if spec.solver == CellSolverKind::Batched {
+                bail!(
+                    "cells.solver 'batched' is not available yet: the cells run on the engine \
+                     path, 'engine'"
+                );
+            }
+            let path = study_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&spec.model);
+            let sbml = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read the cell model {}", path.display()))?;
+            CellModel::new(&comm, spec, &sbml).context("cells")
+        })
+        .transpose()?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
-    let comm = petsc.comm();
     let mut phases = Phases::new(comm, started);
-    // Process 0 writes every file, after it removed the outputs of an earlier run.
-    if comm.rank() == 0 {
-        std::fs::create_dir_all(out)
-            .with_context(|| format!("cannot create the output directory {}", out.display()))?;
-        remove_earlier_outputs(&study, out)?;
-    }
-    comm.barrier()?;
-
     let maps = read_maps(&comm, &study, &scene, &mesh)?;
     phases.end("setup")?;
     let flow = study
@@ -195,19 +264,6 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         })
         .transpose()?;
     phases.end("pressure")?;
-    if let Some(flow) = &flow {
-        let islands = flow.islands();
-        if islands.count > 0 && comm.rank() == 0 {
-            let plural = if islands.count == 1 { "" } else { "s" };
-            println!(
-                "perfusion: {} pressure island{plural} of {} um^2 in all, which no pressure \
-                 boundary reaches: pressure 0 and no flow there",
-                islands.count, islands.area
-            );
-        }
-        write_flow(flow, out)?;
-    }
-    phases.end("output")?;
     let inputs = Inputs {
         maps: &maps,
         flow: flow.as_ref(),
@@ -227,7 +283,33 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
             .with_context(|| format!("field '{}'", field.id))
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut coupled = match (&study.cells, &model) {
+        (Some(spec), Some(model)) => {
+            Some(Coupled::new(&study, spec, model, &mesh, &maps, &problems)?)
+        }
+        _ => None,
+    };
     phases.end("setup")?;
+    // Process 0 writes every file, after it removed the outputs of an earlier run.
+    if comm.rank() == 0 {
+        std::fs::create_dir_all(out)
+            .with_context(|| format!("cannot create the output directory {}", out.display()))?;
+        remove_earlier_outputs(&study, out)?;
+    }
+    comm.barrier()?;
+    if let Some(flow) = &flow {
+        let islands = flow.islands();
+        if islands.count > 0 && comm.rank() == 0 {
+            let plural = if islands.count == 1 { "" } else { "s" };
+            println!(
+                "perfusion: {} pressure island{plural} of {} um^2 in all, which no pressure \
+                 boundary reaches: pressure 0 and no flow there",
+                islands.count, islands.area
+            );
+        }
+        write_flow(flow, out)?;
+    }
+    phases.end("output")?;
     let mut summary = Summary {
         fields: study
             .fields
@@ -241,15 +323,16 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
                 area_um2: flow.islands().area,
             },
         }),
+        cells: coupled.as_ref().map(|coupled| CellsSummary {
+            count: coupled.count(),
+            ..CellsSummary::default()
+        }),
         phases: BTreeMap::new(),
     };
     for (index, &t) in study.time.outputs.iter().enumerate() {
+        advance(&study, &mut problems, coupled.as_mut(), t, &mut phases)?;
         for (field, problem) in study.fields.iter().zip(&mut problems) {
             let id = &field.id;
-            problem
-                .step_to(t)
-                .with_context(|| format!("field '{id}'"))?;
-            phases.end("transport")?;
             let values = summary
                 .fields
                 .get_mut(id)
@@ -257,25 +340,41 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
             values.times.push(problem.time());
             values.l2_norm.push(problem.l2_norm()?);
             values.total_mass.push(problem.total_mass()?);
-            let balance = match problem.mass_balance() {
+            let balance = match problem.interval_balance() {
                 Ok(balance) => Some(balance.into()),
-                // Before the first step there is no balance (the output of time 0).
+                // An interval of no length (the output of time 0).
                 Err(PdeError::NotStepped { .. }) => None,
                 Err(e) => return Err(e).with_context(|| format!("field '{id}'")),
             };
             values.mass_balance.push(balance);
+            problem.start_interval()?;
             let path = out.join(format!("{id}_{index}.vtu"));
             write_vtu(problem, &path)
                 .with_context(|| format!("cannot write {}", path.display()))?;
-            phases.end("output")?;
         }
+        if let (Some(coupled), Some(cells)) = (&coupled, &mut summary.cells) {
+            let amounts = coupled.write(&comm, &out.join(format!("cells_{index}.vtu")))?;
+            for (id, amount) in amounts {
+                cells.amounts.entry(id).or_default().push(amount);
+            }
+            for (field, amount) in coupled.exchanged() {
+                let id = study.fields[field].id.clone();
+                cells.exchanged.entry(id).or_default().push(amount);
+            }
+        }
+        phases.end("output")?;
     }
-    for (field, problem) in study.fields.iter().zip(&mut problems) {
-        problem
-            .step_to(study.time.end)
-            .with_context(|| format!("field '{}'", field.id))?;
+    advance(
+        &study,
+        &mut problems,
+        coupled.as_mut(),
+        study.time.end,
+        &mut phases,
+    )?;
+    if let (Some(coupled), Some(cells)) = (&coupled, &mut summary.cells) {
+        (cells.steps, cells.rejected) = coupled.stats(&comm)?;
     }
-    phases.end("transport")?;
+    phases.end("output")?;
 
     summary.phases = phases.seconds;
     if comm.rank() == 0 {
@@ -284,6 +383,28 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Advances the fields of `problems` to the time `t`: each alone, or with the cells of
+/// `coupled` all together. Collective.
+fn advance(
+    study: &Study,
+    problems: &mut [Problem],
+    coupled: Option<&mut Coupled>,
+    t: f64,
+    phases: &mut Phases,
+) -> Result<()> {
+    match coupled {
+        Some(coupled) => coupled.advance(study, problems, t, phases),
+        None => {
+            for (field, problem) in study.fields.iter().zip(problems.iter_mut()) {
+                problem
+                    .step_to(t)
+                    .with_context(|| format!("field '{}'", field.id))?;
+            }
+            phases.end("transport")
+        }
+    }
 }
 
 /// The maps the study names, read for the cells of this process (nothing for a process without
@@ -305,6 +426,17 @@ fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<M
         ids.extend(p.k_across.maps());
         ids.push(&p.direction.map);
     }
+    if let Some(cells) = &study.cells {
+        for p in &cells.parameters {
+            ids.extend(p.value.maps());
+            if let Some(r) = &p.replace {
+                ids.push(&r.map);
+                ids.extend(r.value.maps());
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
     let read = match mesh.local_bounds() {
         Some(bounds) => Maps::read(&scene.maps, &ids, bounds).map_err(anyhow::Error::from),
         None => Ok(Maps::default()),
@@ -340,7 +472,8 @@ fn write_vector(comm: &Comm, vector: &Vector, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes the files `<field id>_<index>.vtu` of the fields of `study` from the directory `out`:
+/// Removes the files `<field id>_<index>.vtu` of the fields of `study` and `cells_<index>.vtu`
+/// from the directory `out`:
 /// outputs of an earlier run, which a viewer would take for a part of the series of this run (for
 /// example the files of more output times). Other files stay.
 fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
@@ -354,6 +487,7 @@ fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
         };
         if name == "pressure.vtu"
             || name == "velocity.vtu"
+            || is_output(name, "cells")
             || study.fields.iter().any(|field| is_output(name, &field.id))
         {
             let path = entry.path();

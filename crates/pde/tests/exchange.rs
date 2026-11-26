@@ -14,7 +14,7 @@ use common::{ceed, fixture_mesh};
 use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, Scene, Study, Table, TimeSpec};
 use maps::Maps;
 use mesh::Mesh;
-use pde::{Exchange, Inputs, PdeError, Problem};
+use pde::{Exchange, Exchanged, Inputs, MassBalance, PdeError, Problem};
 use petsc::Petsc;
 
 /// The time step of the problems (s).
@@ -61,10 +61,15 @@ fn field(initial: f64, portal: f64) -> FieldSpec {
 }
 
 fn problem(mesh: &Mesh, maps: &Maps, field: &FieldSpec) -> Problem {
+    stepped(mesh, maps, field, false)
+}
+
+/// The problem of `field`, with adaptive time steps if `adaptive`.
+fn stepped(mesh: &Mesh, maps: &Maps, field: &FieldSpec, adaptive: bool) -> Problem {
     let time = TimeSpec {
         end: 10.0,
         dt: DT,
-        adaptive: false,
+        adaptive,
         outputs: Vec::new(),
     };
     let inputs = Inputs { maps, flow: None };
@@ -171,7 +176,7 @@ fn give_back_conserves_total() {
         .map(|m| (2.0 * random.uniform() - 1.0) * m)
         .collect();
     let before = problem.total_mass().unwrap();
-    let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = exchange.give_back(&mut problem, &delta).unwrap().resupply;
     let resupply = total_resupply(&exchange, &resupply);
     assert!(resupply != 0.0);
     let after = problem.total_mass().unwrap();
@@ -203,7 +208,7 @@ fn steep_uptake_stays_nonnegative() {
     exchange.means(&problem, &mut means).unwrap();
     let delta: Vec<f64> = means.iter().map(|m| -0.999 * m).collect();
     let before = problem.total_mass().unwrap();
-    let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+    let resupply = exchange.give_back(&mut problem, &delta).unwrap().resupply;
     let resupply = total_resupply(&exchange, &resupply);
     let after = problem.total_mass().unwrap();
     assert_eq!(negative_values(&problem, &mesh), 0);
@@ -231,7 +236,7 @@ fn uniform_change_with_resupply() {
     for (change, value) in [(-0.5, 0.5), (0.25, 0.75)] {
         let delta = vec![change; exchange.len()];
         let before = problem.total_mass().unwrap();
-        let resupply = exchange.give_back(&mut problem, &delta).unwrap();
+        let resupply = exchange.give_back(&mut problem, &delta).unwrap().resupply;
         assert_eq!(resupply.len(), 1);
         assert_eq!(resupply[0].0, "portal_wall");
         let resupply = resupply[0].1;
@@ -264,10 +269,13 @@ fn modify_restarts_the_time_integration() {
     let start = problem.jacobian_shifts().to_vec();
     let uniform = problem.total_mass().unwrap();
     problem
-        .modify(|u| {
-            u.with_array_mut(|u| u.iter_mut().for_each(|u| *u += 0.5))?;
-            Ok(())
-        })
+        .modify(
+            |u| {
+                u.with_array_mut(|u| u.iter_mut().for_each(|u| *u += 0.5))?;
+                Ok(())
+            },
+            &Exchanged::default(),
+        )
         .unwrap();
     assert!(matches!(
         problem.mass_balance(),
@@ -282,6 +290,153 @@ fn modify_restarts_the_time_integration() {
     // The change is in the solution: the field relaxes towards the Dirichlet value 1.
     let mass = problem.total_mass().unwrap();
     assert!(mass > uniform, "{mass} against {uniform}");
+}
+
+/// The residual of the balance `b`, `storage_rate - (source + inflows + exchange -
+/// advection_defect)`, and its largest term.
+fn closure(b: &MassBalance) -> (f64, f64) {
+    let inflows: f64 = b.boundary.iter().map(|i| i.total()).sum();
+    let residual = b.storage_rate - (b.source + inflows + b.exchange - b.advection_defect);
+    let mut scale = [b.storage_rate, b.source, b.exchange, b.advection_defect]
+        .iter()
+        .fold(0.0_f64, |m, x| m.max(x.abs()));
+    for i in &b.boundary {
+        scale = scale.max(
+            i.advective
+                .abs()
+                .max(i.diffusive.abs())
+                .max(i.resupply.abs()),
+        );
+    }
+    (residual, scale)
+}
+
+/// Steps and changes by cell models next to the Dirichlet wall, between steps of any length:
+/// the balance over the interval closes exactly, its storage is the change of the amount, its
+/// exchange the amount the cells gave, and the resupply of the wall counts as inflow there.
+fn interval_balance_closes(adaptive: bool) {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let mut problem = stepped(&mesh, &maps, &field(0.0, 2.0), adaptive);
+    let exchange = exchange(&mesh, &maps, &problem);
+    let start = problem.total_mass().unwrap();
+    assert!(matches!(
+        problem.interval_balance(),
+        Err(PdeError::NotStepped { .. })
+    ));
+    let rank = mesh.finest().comm().rank() as u64;
+    let mut random = Random(5 + rank);
+    let mut given = 0.0;
+    let mut resupplied = 0.0;
+    for t in [1.5, 3.2, 3.3, 4.0] {
+        problem.step_to(t).unwrap();
+        let mut means = vec![0.0; exchange.len()];
+        exchange.means(&problem, &mut means).unwrap();
+        // Uptake of up to 90 % of the blood, and some release.
+        let delta: Vec<f64> = means
+            .iter()
+            .map(|m| (1.1 * random.uniform() - 0.9) * m)
+            .collect();
+        given += exchanged(&exchange, &delta, &mesh);
+        let resupply = exchange.give_back(&mut problem, &delta).unwrap().resupply;
+        resupplied += total_resupply(&exchange, &resupply);
+    }
+    problem.step_to(5.0).unwrap();
+    let balance = problem.interval_balance().unwrap();
+    let (residual, scale) = closure(&balance);
+    eprintln!("{balance:?}\nresidual {residual:e} of {scale:e}");
+    assert!(residual.abs() <= 1e-9 * scale, "{residual:e} of {scale:e}");
+    let duration = 5.0;
+    let storage = (problem.total_mass().unwrap() - start) / duration;
+    assert!((balance.storage_rate - storage).abs() <= 1e-12 * scale);
+    assert!((balance.exchange - given / duration).abs() <= 1e-12 * scale);
+    let portal = balance
+        .boundary
+        .iter()
+        .find(|b| b.tag == "portal_wall")
+        .unwrap();
+    assert!((portal.resupply - resupplied / duration).abs() <= 1e-12 * scale);
+    assert!(
+        portal.resupply != 0.0 && portal.diffusive > 0.0,
+        "{portal:?}"
+    );
+    // A new interval: of no length, then of the steps after it alone.
+    problem.start_interval().unwrap();
+    assert_eq!(problem.interval_start(), 5.0);
+    assert!(matches!(
+        problem.interval_balance(),
+        Err(PdeError::NotStepped { .. })
+    ));
+    let before = problem.total_mass().unwrap();
+    problem.step_to(7.25).unwrap();
+    let balance = problem.interval_balance().unwrap();
+    let (residual, scale) = closure(&balance);
+    assert!(residual.abs() <= 1e-9 * scale, "{residual:e} of {scale:e}");
+    let storage = (problem.total_mass().unwrap() - before) / 2.25;
+    assert!((balance.storage_rate - storage).abs() <= 1e-12 * scale);
+    assert_eq!(balance.exchange, 0.0);
+}
+
+#[test]
+fn interval_balance_closes_with_fixed_steps() {
+    interval_balance_closes(false);
+}
+
+#[test]
+fn interval_balance_closes_with_adaptive_steps() {
+    interval_balance_closes(true);
+}
+
+/// The balance over the first step alone (the start of BDF2: a half step of the first order,
+/// then the step) closes.
+#[test]
+fn interval_balance_of_one_step_is_the_change() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let mut problem = problem(&mesh, &maps, &field(0.0, 2.0));
+    problem.step_to(DT).unwrap();
+    let balance = problem.interval_balance().unwrap();
+    let (residual, scale) = closure(&balance);
+    assert!(residual.abs() <= 1e-9 * scale, "{residual:e} of {scale:e}");
+    assert!(balance.storage_rate > 0.0);
+}
+
+/// Steps of another method than BDF2 (here backward Euler by the options): the balance over
+/// an interval, which follows the steps of BDF2, is an error rather than wrong.
+#[test]
+fn interval_balance_of_other_steps_is_an_error() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = lobule(&p);
+    let maps = lobule_maps(&mesh);
+    let time = TimeSpec {
+        end: 10.0,
+        dt: DT,
+        adaptive: false,
+        outputs: Vec::new(),
+    };
+    let inputs = Inputs {
+        maps: &maps,
+        flow: None,
+    };
+    let mut problem = Problem::new(
+        &mesh,
+        &field(0.0, 2.0),
+        &time,
+        &ceed(),
+        "-ts_type beuler",
+        &inputs,
+    )
+    .unwrap();
+    problem.step_to(3.0 * DT).unwrap();
+    assert!(problem.mass_balance().is_ok());
+    let e = problem.interval_balance().unwrap_err();
+    assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
+    assert!(
+        e.to_string().contains("does not follow the time steps"),
+        "{e}"
+    );
 }
 
 /// An exchange for another discretization than the problem's is refused.
@@ -335,6 +490,8 @@ fn parallel_on_2_processes() {
         &[
             "mpi_world_has_the_expected_size",
             "means_of_constant_field_are_the_constant",
+            "interval_balance_closes_with_fixed_steps",
+            "interval_balance_closes_with_adaptive_steps",
             "give_back_conserves_total",
             "steep_uptake_stays_nonnegative",
             "uniform_change_with_resupply",
