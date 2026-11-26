@@ -1,0 +1,24 @@
+--- a/config/BuildSystem/config/packages/Mmg.py
++++ b/config/BuildSystem/config/packages/Mmg.py
+@@ -19,7 +19,8 @@
+     self.compilerFlags = framework.require('config.compilerFlags',self)
+     self.mathlib       = framework.require('config.packages.mathlib',self)
+     self.ptscotch      = framework.require('config.packages.PTSCOTCH',self)
+-    self.deps          = [self.mathlib,self.ptscotch]
++    self.deps          = [self.mathlib]
++    self.odeps         = [self.ptscotch]
+     return
+ 
+   def formCMakeConfigureArgs(self):
+@@ -27,7 +28,10 @@
+     args.append('-DUSE_ELAS=OFF')
+     args.append('-DUSE_VTK=OFF')
+     args.append('-DMMG_INSTALL_PRIVATE_HEADERS=ON')
+-    args.append('-DSCOTCH_DIR:STRING="'+self.ptscotch.directory+'"')
++    if self.ptscotch.found:
++      args.append('-DSCOTCH_DIR:STRING="'+self.ptscotch.directory+'"')
++    else:
++      args.append('-DUSE_SCOTCH=OFF')
+     if self.getDefaultIndexSize() == 64:
+       int64_t = '''
+ #if !(defined(PETSC_HAVE_STDINT_H) && defined(PETSC_HAVE_INTTYPES_H) && defined(PETSC_HAVE_MPI_INT64_T))
