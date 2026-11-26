@@ -472,8 +472,10 @@ fn phases_sum_to_the_run(study: &Path, name: &str) {
         sum += seconds;
     }
     println!("phases {phases:?} sum to {sum} s, the summary written after {wall} s");
+    // Plus half a second for what a loaded machine adds outside the phases (the start of the
+    // process before its clock, the summary written after it).
     assert!(
-        (sum - wall).abs() <= 0.1 * wall,
+        (sum - wall).abs() <= 0.1 * wall + 0.5,
         "phases {phases:?} sum to {sum} s, the run wrote its summary after {wall} s"
     );
 }
