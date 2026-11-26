@@ -33,12 +33,13 @@ which changes coefficients of the PDEs. The results are explored in a web viewer
 ## Build
 
 Build the pinned native dependencies (PETSc with PT-Scotch and libCEED, versions and sha256 in
-`deps/versions.env`) into `deps/install/native-debug` (or `native-opt`, with `-O3 -march=native`
-and without PETSc's debugging), then slidesim against them:
+`deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging checks, for the tests and CI),
+`native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3 -march=native`, without PETSc's
+debugging), then slidesim against them:
 
 ```bash
-scripts/deps/build-native.sh debug   # or: opt
-. deps/install/native-debug/env.sh   # PETSC_DIR, CEED_DIR, PKG_CONFIG_PATH, LD_LIBRARY_PATH
+scripts/deps/build-native.sh check   # or: debug, opt
+. deps/install/native-check/env.sh   # PETSC_DIR, CEED_DIR, PKG_CONFIG_PATH, LD_LIBRARY_PATH
 cargo build --workspace              # with native-opt: cargo build --release
 ```
 
@@ -49,7 +50,7 @@ but not after `deps/install` is moved or removed.
 ## Test
 
 ```bash
-. deps/install/native-debug/env.sh
+. deps/install/native-check/env.sh
 cargo nextest run --workspace   # one process per test; some start mpiexec
 cargo test --doc --workspace    # doctests, among them compile_fail tests of the bindings
 ```

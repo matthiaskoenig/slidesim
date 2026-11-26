@@ -4,6 +4,10 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # -O2 with PETSc's debugging checks (scripts/deps/build-native.sh), several times faster than debug.
+  DEPS_MODE: check
+
 jobs:
   check:
     name: check (${{ matrix.os }}, ${{ matrix.mpi }})
@@ -52,7 +56,7 @@ jobs:
         run: |
           . /etc/os-release
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
-          echo "key=deps-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
+          echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
         id: deps-cache
         uses: actions/cache@v4
@@ -61,20 +65,20 @@ jobs:
           key: ${{ steps.deps-key.outputs.key }}
       - name: Build native dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
-        run: scripts/deps/build-native.sh debug
+        run: scripts/deps/build-native.sh ${{ env.DEPS_MODE }}
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: |
-          . deps/install/native-debug/env.sh
+          . deps/install/native-check/env.sh
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         # .config/nextest.toml: tests which start mpiexec run alone, and a timeout.
         run: |
-          . deps/install/native-debug/env.sh
+          . deps/install/native-check/env.sh
           cargo nextest run --workspace --no-tests=pass
       - name: Doctests
         # nextest does not run doctests; among them the compile_fail tests of the bindings.
         run: |
-          . deps/install/native-debug/env.sh
+          . deps/install/native-check/env.sh
           cargo test --doc --workspace
