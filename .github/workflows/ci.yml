@@ -28,7 +28,7 @@ jobs:
             mpi: mpich
             mpi-packages: mpich libmpich-dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system packages
         # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.mpi-packages }} pkg-config python3 cmake m4
