@@ -171,7 +171,7 @@ solvers.
 | `cells` | optional: a cell model on the elements, coupled to the fields |
 | `time` | `end` (s), `dt` (s, the first step if adaptive), `adaptive` (default false), `outputs` (s, sorted, within `[0, end]`) |
 | `mesh` | `refinements`: the number of uniform refinements of the scene's mesh (default 0) |
-| `solver` | `petsc_options`: a PETSc options string, for example `-ksp_type cg -pc_type jacobi` |
+| `solver` | `linear_rtol`: the relative tolerance of the linear solves of the transport, in (0, 1), default 1e-10 (the residual of each solve reduced by it; with fixed steps the time integration has no error estimate to derive it from, so the study sets it; `-ksp_rtol` in `petsc_options` overrides it); `petsc_options`: a PETSc options string, for example `-ksp_type cg -pc_type jacobi` |
 
 ### Coefficients
 

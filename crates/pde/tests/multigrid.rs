@@ -17,7 +17,7 @@ use std::rc::Rc;
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
     BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshSource, SCENE_VERSION, Scene,
-    TimeSpec, Units,
+    SolverOptions, TimeSpec, Units,
 };
 use maps::Maps;
 use mesh::Mesh;
@@ -213,14 +213,41 @@ fn one_level_is_the_coarse_solve() {
     let p = Petsc::init(&[]).unwrap();
     let mut steady = Steady::new(&p, 0, 0.0);
     let (_, iterations) = steady.solve();
-    // Algebraic multigrid alone.
-    assert!(iterations <= 20, "{iterations}");
     let pc = steady.ksp.pc().unwrap();
     assert_eq!(pc.type_name().unwrap(), "mg");
     assert_eq!(pc.mg_levels().unwrap(), 1);
     let coarse = pc.mg_smoother(0).unwrap();
-    assert_eq!(coarse.pc().unwrap().type_name().unwrap(), "gamg");
     assert_eq!(coarse.pc().unwrap().options_prefix().unwrap(), "mg_coarse_");
+    if p.comm().size() == 1 {
+        // LU: a direct solve.
+        assert_eq!(coarse.pc().unwrap().type_name().unwrap(), "lu");
+        assert_eq!(iterations, 1);
+    } else {
+        // Algebraic multigrid alone.
+        assert_eq!(coarse.pc().unwrap().type_name().unwrap(), "gamg");
+        assert!(iterations <= 20, "{iterations}");
+    }
+}
+
+/// The coarse solve is LU on one process; on several, algebraic multigrid, which coarsens until
+/// a level has at most 5000 equations: on the coarse level of `tissue_small` (429 equations, below
+/// 5000, above PETSc's default of 50) it has two levels, the coarser solved directly.
+#[test]
+fn coarse_solve_by_process_count() {
+    let p = Petsc::init(&[]).unwrap();
+    let mut steady = Steady::new(&p, 1, 0.0);
+    steady.solve();
+    let coarse = steady.ksp.pc().unwrap().mg_smoother(0).unwrap();
+    let coarse_pc = coarse.pc().unwrap();
+    if p.comm().size() == 1 {
+        assert_eq!(coarse_pc.type_name().unwrap(), "lu");
+    } else {
+        // The equations of the coarse level: those of the mesh unrefined.
+        let equations = Steady::new(&p, 0, 0.0).b.size().unwrap();
+        assert!((50..5000).contains(&equations), "{equations}");
+        assert_eq!(coarse_pc.type_name().unwrap(), "gamg");
+        assert_eq!(coarse_pc.mg_levels().unwrap(), 2);
+    }
 }
 
 #[test]
@@ -336,8 +363,15 @@ fn run(
 ) -> (Discretization, Vec<Vector>, usize) {
     let mesh = tissue_small(p, 1);
     let options = format!("-ksp_rtol 1e-12 {options}");
-    let mut problem =
-        Problem::new(&mesh, &tissue_field(), time, &ceed(), &options, &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &tissue_field(),
+        time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(options),
+        &no_maps(),
+    )
+    .unwrap();
     let solutions = times
         .iter()
         .map(|&t| {
@@ -409,8 +443,15 @@ fn inner_solve_failure_is_error() {
     };
     let options = "-mg_coarse_ksp_type richardson -mg_coarse_ksp_richardson_scale 1000 \
                    -mg_coarse_ksp_divtol 10 -mg_coarse_ksp_max_it 5 -mg_coarse_pc_type none";
-    let mut problem =
-        Problem::new(&mesh, &tissue_field(), &time, &ceed(), options, &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &tissue_field(),
+        &time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(options),
+        &no_maps(),
+    )
+    .unwrap();
     let e = problem.step_to(0.1).unwrap_err();
     assert!(matches!(e, PdeError::Diverged { .. }), "{e}");
     assert!(e.to_string().contains("inner solve"), "{e}");
@@ -431,7 +472,15 @@ fn tissue_results(p: &Petsc) -> [f64; 2] {
         adaptive: false,
         outputs: Vec::new(),
     };
-    let mut problem = Problem::new(&mesh, &tissue_field(), &time, &ceed(), "", &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &tissue_field(),
+        &time,
+        &ceed(),
+        &SolverOptions::default(),
+        &no_maps(),
+    )
+    .unwrap();
     problem.step_to(2.0).unwrap();
     assert_eq!(problem.steps().unwrap(), 4);
     [
@@ -480,11 +529,12 @@ fn two_processes_match_one() {
 
 /// The tests `parallel_on_*_processes` run on several processes: multigrid on a distributed
 /// mesh hierarchy, with the coarse level solved by algebraic multigrid.
-const PARALLEL_TESTS: [&str; 6] = [
+const PARALLEL_TESTS: [&str; 7] = [
     "mpi_world_has_the_expected_size",
     "iterations_bounded",
     "refreshed_preconditioner_matches_a_new_one",
     "one_level_is_the_coarse_solve",
+    "coarse_solve_by_process_count",
     "problem_matches_jacobi_after_step_changes",
     "adaptive_problem_matches_jacobi",
 ];

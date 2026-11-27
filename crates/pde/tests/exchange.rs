@@ -11,7 +11,9 @@ mod common;
 use std::path::Path;
 
 use common::{ceed, fixture_mesh};
-use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, Scene, Study, Table, TimeSpec};
+use contracts::{
+    BoundarySpec, Coefficient, Condition, FieldSpec, Scene, SolverOptions, Study, Table, TimeSpec,
+};
 use maps::Maps;
 use mesh::Mesh;
 use pde::{Exchange, Exchanged, Inputs, MassBalance, PdeError, Problem};
@@ -73,7 +75,15 @@ fn stepped(mesh: &Mesh, maps: &Maps, field: &FieldSpec, adaptive: bool) -> Probl
         outputs: Vec::new(),
     };
     let inputs = Inputs { maps, flow: None };
-    Problem::new(mesh, field, &time, &ceed(), "", &inputs).unwrap()
+    Problem::new(
+        mesh,
+        field,
+        &time,
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap()
 }
 
 /// The exchange of every local coarse cell of `mesh` with the field of `problem`.
@@ -314,7 +324,15 @@ fn restarts_at_inexact_times_build_no_preconditioner() {
         maps: &maps,
         flow: None,
     };
-    let mut problem = Problem::new(&mesh, &field(1.0, 1.0), &time, &ceed(), "", &inputs).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(1.0, 1.0),
+        &time,
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap();
     problem.step_to(1.3).unwrap();
     let builds = problem.preconditioner_builds();
     let mut t = 1.3;
@@ -534,7 +552,7 @@ fn interval_balance_of_other_steps_is_an_error() {
         &field(0.0, 2.0),
         &time,
         &ceed(),
-        "-ts_type beuler",
+        &SolverOptions::with_petsc_options("-ts_type beuler"),
         &inputs,
     )
     .unwrap();

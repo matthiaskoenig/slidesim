@@ -60,7 +60,7 @@ pub use crate::inputs::Inputs;
 use crate::phases::Phases;
 pub use crate::summary::{
     BalanceSummary, CellsSummary, FieldSummary, InflowSummary, IslandsSummary, PerfusionSummary,
-    Seconds, Summary,
+    Seconds, SolverSummary, Summary,
 };
 
 /// The context of an error which every process meets at the same point of a simulation, with
@@ -199,7 +199,7 @@ impl<'p> Simulation<'p> {
                     field,
                     &study.time,
                     &ceed,
-                    &study.solver.petsc_options,
+                    &study.solver,
                     &problem_inputs,
                 )
                 .with_context(|| format!("field '{}'", field.id))
@@ -212,12 +212,18 @@ impl<'p> Simulation<'p> {
             _ => None,
         };
         phases.end("setup")?;
+        // The loosest tolerance of the fields: PETSc options may set one per field.
+        let mut linear_rtol = 0.0_f64;
+        for problem in &problems {
+            linear_rtol = linear_rtol.max(problem.linear_rtol()?);
+        }
         let summary = Summary {
             fields: study
                 .fields
                 .iter()
                 .map(|field| (field.id.clone(), FieldSummary::default()))
                 .collect(),
+            solver: SolverSummary { linear_rtol },
             perfusion: flow.as_ref().map(|flow| PerfusionSummary {
                 tag_flows: flow.tag_flows().iter().cloned().collect(),
                 pressure_islands: IslandsSummary {

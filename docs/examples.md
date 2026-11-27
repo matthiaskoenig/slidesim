@@ -13,6 +13,7 @@ polygons.
 | `cells_toy/cells.study.json` | the scene of `lobule_toy` | the linear cell model `linear_uptake.xml`: uptake from the blood at a rate from the zonation; the amount in blood and cells changes by the wall flows only |
 | `cells_toy/spt.study.json` | the scene of `lobule_toy` | the SPT liver cell model `spt_liver_cell.xml`, `S_ext` and `P_ext` coupled to the fields `S` (5 mM at the portal wall) and `P`, for 60 min, with a lowered necrosis threshold so that necrosis starts within the hour |
 | `lobules/spt.study.json`, `lobules/spt_batched.study.json` | `lobules/scene.json`: one ideal lobule, generated | the SPT model on one lobule, 24 h, hourly outputs, engine and batched path |
+| `lobules/spt_quick.study.json` | `lobules/scene.json` | the batched SPT study on the unrefined mesh for 1 h: the quick case of the benchmarks |
 | `lobules/ring1_spt.study.json`, `lobules/ring1_spt_batched.study.json` | `lobules/ring1.scene.json`: 7 ideal lobules, generated | the same on a ring of lobules |
 | `lobules/linear.study.json` | `lobules/scene.json` | the linear cell model on the generated lobule for 1 h: conservation, agreement across process counts, order of the splitting |
 | `slide_fields/<field>/spt.study.json`, `slide_fields/<field>/spt_batched.study.json` | `slide_fields/<field>/scene.json`: 500 um of a real slide, tagged polygons of slideviz, meshed by slidesim | the SPT model on three real fields (control, 281 and 500 mg/kg), engine and batched path, with the slide's `zonation`, `cyp2e1` and `necrosis` maps |
@@ -149,8 +150,12 @@ the geometry (0 at the portal walls, 1 at the central walls):
 The SPT studies are those of `cells_toy/spt.study.json` for 24 h with hourly outputs: `S` held
 at 5 mM at the portal walls, the perfusion of the toy lobule, CYP2E1 (`protein_ext`) and the
 position from the zonation, one refinement (the cells on the coarse mesh, the fields on its
-refinement), and the model's own necrosis threshold. `spt.study.json` and
-`ring1_spt.study.json` take the engine path, the `_batched` studies the batched one.
+refinement), the model's own necrosis threshold, and the linear solves of the transport to
+`solver.linear_rtol` 1e-6 (the production setting: its error in the fields is below a
+thousandth of that of the time steps, [performance](results/2026-11-m4-performance.md)).
+`spt.study.json` and `ring1_spt.study.json` take the engine path, the `_batched` studies the
+batched one. `spt_quick.study.json` is `spt_batched.study.json` on the unrefined mesh for 1 h,
+a run of seconds, the default case of `scripts/bench/coupled.sh`.
 
 ```bash
 target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh
@@ -192,8 +197,9 @@ length of such a segment around it ([Meshing](methods/meshing.md)), so the field
 quality bounds of the generated lobules
 ([milestone 4 meshing results](results/2026-11-m4-meshing.md)). The studies are
 `m3_real_slide/spt.study.json` on each field, adapted by hand: 24 h, CYP2E1 from the `cyp2e1`
-map, pattern 6 where the `necrosis` map is above 0.5; `spt.study.json` on the engine path,
-`spt_batched.study.json` on the batched one.
+map, pattern 6 where the `necrosis` map is above 0.5, the linear solves to 1e-6 as in the
+lobule studies; `spt.study.json` on the engine path, `spt_batched.study.json` on the batched
+one.
 
 ```bash
 target/release/slidesim mesh testdata/studies/slide_fields/281mg_m1/scene.json --out mesh

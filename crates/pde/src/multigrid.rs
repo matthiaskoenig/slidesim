@@ -27,6 +27,15 @@ const CHEBYSHEV_TRANSFORM: [f64; 4] = [0.0, 0.1, 0.0, 1.1];
 /// for large steps, where diffusion dominates.
 const CHEBYSHEV_TRANSFORM_NONSYMMETRIC: [f64; 4] = [0.0, 0.5, 0.0, 1.2];
 
+/// The equations of the coarsest level of the algebraic multigrid of the coarse solve on several
+/// processes, at most, which its coarse solver solves directly (PETSc's default is 50). Fewer
+/// levels with a larger direct solve make the coarse solve more exact and cheaper in messages:
+/// on the 281 mg/kg slide (21,000 coarse equations, 8 processes, advection) the GMRES iterations
+/// of a solve to 1e-10 fell from 19.6 to 15.1, the messages of the solves by 61 % and their flops
+/// by 15 %, and the transport phase by 20 %; 1000 and 2000 equations gave 16.6 iterations, 10,000
+/// the same as 5000 (`docs/results/2026-11-m4-performance.md`).
+const COARSE_EQUATIONS: usize = 5000;
+
 /// The levels of a geometric multigrid preconditioner from [`configure_multigrid`], for keeping
 /// them in step with the shift of the operator ([`Multigrid::set_shift`]).
 ///
@@ -68,9 +77,15 @@ pub struct Multigrid {
 ///   `[0.5 emax, 1.2 emax]` estimated by GMRES (`KSPChebyshevEstEigSet`, with the estimator
 ///   set explicitly). The estimates are renewed when the operator of the level changes. The
 ///   assembled operators are marked symmetric positive definite if `symmetric`.
-/// - Coarse level (level 0): one application of algebraic multigrid (`PCGAMG`, `preonly`) to
-///   the assembled operator, which runs on any number of processes without external packages.
-///   A mesh of one level is solved this way alone.
+/// - Coarse level (level 0), `preonly` on the assembled operator: on one process its LU
+///   factorization (`PCLU`, PETSc's own), an exact coarse solve; on several, one application of
+///   algebraic multigrid (`PCGAMG`), which runs on any number of processes without external
+///   packages, coarsened until a level has at most 5000 equations, which it solves directly. A
+///   mesh of one level is solved this way alone. On the generated lobule (one process, 3,093
+///   coarse vertices, advection, solves to 1e-6) LU took 4.6 GMRES iterations a solve where
+///   algebraic multigrid took 7.0, 24 % fewer flops in the solves and 21 to 35 % less time in the
+///   transport; on 8 processes a redundant LU of the 281 mg/kg slide's 21,000 coarse equations
+///   made the transport 2.7 times slower (`docs/results/2026-11-m4-performance.md`).
 ///
 /// The options of the solver override these settings (`KSPSetFromOptions` after this call):
 /// under its prefix `<p>`, `-<p>pc_type`, `-<p>mg_levels_ksp_max_it`, `-<p>mg_coarse_pc_type`
@@ -187,7 +202,13 @@ pub fn configure_multigrid(
     }
     coarse_solve.set_operators(&assembled[0], &assembled[0])?;
     coarse_solve.set_type("preonly")?;
-    coarse_solve.set_pc_type("gamg")?;
+    let mut coarse_pc = coarse_solve.pc()?;
+    if discs[0].dm().comm().size() == 1 {
+        coarse_pc.set_type("lu")?;
+    } else {
+        coarse_pc.set_type("gamg")?;
+        coarse_pc.gamg_set_coarse_eq_limit(COARSE_EQUATIONS)?;
+    }
     Ok(Multigrid {
         levels: levels.to_vec(),
         assembled,

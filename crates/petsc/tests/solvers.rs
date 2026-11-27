@@ -77,6 +77,7 @@ fn ksp_solves_to_its_tolerances() {
     ksp.set_type("cg").unwrap();
     ksp.set_pc_type("jacobi").unwrap();
     ksp.set_tolerances(Some(1e-10), None, None).unwrap();
+    assert_eq!(ksp.rtol().unwrap(), 1e-10);
     let b = rhs(&p, n);
     let mut x = Vector::create_seq(&p, n).unwrap();
     ksp.solve(&b, &mut x).unwrap();

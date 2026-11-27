@@ -12,7 +12,7 @@ backends now and are what libCEED's JIT compiles for GPUs later.
 | Maps | Zarr v3 rasters, each process reads the window over its cells, sampled bilinearly at the quadrature points of every level |
 | Operators | libCEED QFunctions in C (`crates/pde/qfunctions/`): mass, tensor diffusion, reaction, advection with SUPG, Darcy; element restrictions and bases from the PETSc discretization, as Ratel and HONEE do |
 | Time stepping | BDF2 of PETSc `TS`, fixed or adaptive steps |
-| Linear solvers | CG for the symmetric problems (Darcy pressure, diffusion-reaction), GMRES with advection, relative tolerance 1e-10 |
+| Linear solvers | CG for the symmetric problems (Darcy pressure, diffusion-reaction), GMRES with advection, relative tolerance `solver.linear_rtol` (1e-10 by default) |
 | Preconditioner | geometric multigrid (`PCMG`) over the refinement levels, the operator discretized again on every level, Chebyshev-Jacobi smoothers, algebraic multigrid (`PCGAMG`) on the coarse level |
 | Cells | sbmlsim-core: the engine (CVODE) per element on native C model code, or the model with a Rosenbrock integrator as a libCEED QFunction over all elements of a process |
 | Coupling | Strang splitting of cells and fields, exchange by element means and conservative give-back |

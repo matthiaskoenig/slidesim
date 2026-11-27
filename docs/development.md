@@ -91,6 +91,12 @@ These need the slides, which are not in the repository, and run on the optimized
 - `scripts/bench/transport.sh`: the transport of the milestone 2 baseline on 1, 4 and 8
   processes with `-log_view`, seconds per step and the phases of `summary.json`
   ([performance](results/2026-11-m3-performance.md)).
+- `scripts/bench/coupled.sh`: the batched SPT studies of cells and fields, shortened, with
+  `-log_view`, the Krylov iterations per solve, the phases and the load of the machine; its
+  default case, one coarse lobule for 1 h, runs in seconds and needs no slide
+  ([performance](results/2026-11-m4-performance.md)). It starts every simulation through
+  `run_sim` of `scripts/lib/proc.sh`: a wall-clock limit, CPUs 0-9 at nice 10, and no process
+  left behind when the script ends, however it ends.
 
 ## Contributing
 

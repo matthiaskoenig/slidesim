@@ -6,7 +6,7 @@ use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use ceed::Ceed;
-use contracts::{Coefficient, Condition, FieldSpec, TimeSpec};
+use contracts::{Coefficient, Condition, FieldSpec, SolverOptions, TimeSpec};
 use maps::Maps;
 use mesh::Mesh;
 use petsc::{
@@ -27,12 +27,15 @@ use crate::{
 const ERRORS_IF_NOT_CONVERGED: &str =
     "-ksp_error_if_not_converged -snes_error_if_not_converged -ts_error_if_step_fails";
 
-/// The tolerance every problem sets for its linear solves, before the options of the caller, who
-/// may override it: the residual reduced by `1e-10`. The solution depends on the number of
-/// processes up to the tolerance (the multigrid preconditioner does, through the partition), so
-/// the tolerance keeps results of different process counts within about `1e-10` of each other,
-/// where PETSc's default (`1e-5`) would not.
-const TOLERANCE: &str = "-ksp_rtol 1e-10";
+/// The initial guess of each step is the solution of the step before, not PETSc's default, its
+/// extrapolation from the steps before. The steps are far longer than the time in which the
+/// field relaxes after a change of its sources (the exchange with the cells, the boundary
+/// values), and extrapolation carries the relaxation on past its end: a worse guess, and since
+/// the linear solve reduces the residual of the guess by the tolerance, a worse solution. On the
+/// generated lobule with cells at a linear tolerance of 1e-6, the fields differed from those of
+/// 1e-12 by 4e-7 with extrapolation and by 6e-8 without, at the same Krylov iterations; on the
+/// 281 mg/kg slide 7 % fewer iterations (`docs/results/2026-11-m4-performance.md`).
+const PREVIOUS_SOLUTION_AS_GUESS: &str = "-ts_bdf_initial_guess_extrapolate 0";
 
 /// The unit of concentrations (of the contracts): the name of the component of the field, for
 /// viewers.
@@ -160,9 +163,11 @@ pub struct Exchanged {
 /// PETSc options: the `TS` and its solvers have the options prefix `<field id>_` (`u_` for the
 /// field `u`, so its linear solver reads `-u_ksp_type`). Their options, lowest precedence first:
 /// 1. the defaults of the problem: `-ksp_error_if_not_converged -snes_error_if_not_converged
-///    -ts_error_if_step_fails` and `-ksp_rtol 1e-10`;
-/// 2. the options of the caller (`petsc_options` of [`Problem::new`], for example
-///    `solver.petsc_options` of a study), written without the prefix;
+///    -ts_error_if_step_fails`, `-ts_bdf_initial_guess_extrapolate 0` (the solution of the step
+///    before as the initial guess of a step), and `-ksp_rtol` of [`SolverOptions::linear_rtol`]
+///    (the residual of each linear solve reduced by it; 1e-10 by default);
+/// 2. the options of the caller ([`SolverOptions::petsc_options`] of [`Problem::new`], for
+///    example `solver.petsc_options` of a study), written without the prefix;
 /// 3. options under the prefix already in the global options database, from the command line
 ///    (or set by the caller of PETSc), for example `-u_ksp_rtol 1e-6`.
 ///
@@ -170,17 +175,18 @@ pub struct Exchanged {
 /// prefix while it lives ([`OptionsScope`]), and removes them when dropped; it leaves those of
 /// 3 as they are. The options override the multigrid preconditioner too: for example
 /// `-pc_type jacobi` replaces it, `-mg_levels_ksp_max_it 3` changes its smoothers and
-/// `-mg_coarse_pc_type lu` its coarse solver (on one process). Options which change the time
-/// integration (`-ts_type cn`, `-ts_bdf_order 1`) are followed, without
+/// `-mg_coarse_pc_type gamg` its coarse solver (algebraic multigrid on one process too). Options
+/// which change the time integration (`-ts_type cn`, `-ts_bdf_order 1`) are followed, without
 /// [`Problem::interval_balance`], which follows the steps of BDF2
 /// ([`Problem::without_interval_balance`] says why).
 ///
 /// Processes: the solution depends on the number of processes up to the tolerance of the linear
 /// solves, since the preconditioner does (algebraic multigrid aggregates the coarse level by
 /// partition, and the eigenvalue estimates of the smoothers start from a vector of the global
-/// numbering of the dofs, which follows the partition). With the default `-ksp_rtol 1e-10`, runs
-/// on different numbers of processes agree to about the tolerance (integrals of the solution
-/// within `1e-11` relative on `tissue_small`); a looser tolerance loosens this too.
+/// numbering of the dofs, which follows the partition). With the default
+/// [`SolverOptions::linear_rtol`] of `1e-10`, runs on different numbers of processes agree to
+/// about the tolerance (integrals of the solution within `1e-11` relative on `tissue_small`),
+/// where PETSc's default (`1e-5`) would not; a looser tolerance loosens this too.
 ///
 /// Limit: one problem per field id lives at a time in a process, since it owns the options under
 /// its prefix; [`Problem::new`] fails for a second one until the first is dropped. Field ids
@@ -227,9 +233,10 @@ impl Problem {
     /// The problem of the field `field` on the finest level of `mesh`, at t = 0 with the uniform
     /// initial value `field.initial` and the source `field.source`, with its coefficients from
     /// the maps of `inputs` and, with advection, the velocity of the flow of `inputs` (solved on
-    /// `mesh`), stepped as `time` says (its time step and adaptivity), and with the PETSc
-    /// options `petsc_options` (for example `-ksp_rtol 1e-8`), which override the defaults of
-    /// the problem and give way to options under the prefix already in the database (see
+    /// `mesh`), stepped as `time` says (its time step and adaptivity), with the tolerance of the
+    /// linear solves `solver.linear_rtol` and the PETSc options `solver.petsc_options` (for
+    /// example `-ksp_type bcgs`), which override the defaults of the problem (`-ksp_rtol`
+    /// included) and give way to options under the prefix already in the database (see
     /// [`Problem`]). Collective.
     ///
     /// Errors: [`PdeError::Unsupported`] if the field id cannot be an options prefix (it starts
@@ -245,7 +252,7 @@ impl Problem {
         field: &FieldSpec,
         time: &TimeSpec,
         ceed: &Ceed,
-        petsc_options: &str,
+        solver: &SolverOptions,
         inputs: &Inputs,
     ) -> Result<Problem> {
         let prefix = options_prefix(&field.id)?;
@@ -259,9 +266,15 @@ impl Problem {
                 )));
             }
         };
+        let tolerance = format!("-ksp_rtol {:e}", solver.linear_rtol);
         let options = OptionsScope::new(
             &prefix,
-            &[ERRORS_IF_NOT_CONVERGED, TOLERANCE, petsc_options],
+            &[
+                ERRORS_IF_NOT_CONVERGED,
+                PREVIOUS_SOLUTION_AS_GUESS,
+                tolerance.as_str(),
+                solver.petsc_options.as_str(),
+            ],
         )?;
 
         let dim = mesh.finest().dimension()?;
@@ -645,6 +658,12 @@ impl Problem {
     /// Collective.
     pub fn linear_iterations(&self) -> Result<usize> {
         Ok(self.ts.linear_iterations()?)
+    }
+
+    /// The relative tolerance of the linear solves: [`SolverOptions::linear_rtol`] of
+    /// [`Problem::new`], unless the PETSc options set another (`-ksp_rtol`).
+    pub fn linear_rtol(&self) -> Result<f64> {
+        Ok(self.ts.snes()?.ksp()?.rtol()?)
     }
 
     /// The number of Jacobians built on the levels of the problem: one per level of the mesh,

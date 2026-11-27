@@ -60,17 +60,24 @@ back the oscillations SUPG removes.
 - **BDF2** of PETSc `TS`, with fixed steps `time.dt` or adaptive steps (`time.adaptive`). With
   cells, each field steps to the end of a split step, whose last step is shortened to end there.
 - **Linear solves**: CG for diffusion-reaction (symmetric positive definite), GMRES with
-  advection, the residual reduced by 1e-10, so that results of different process counts agree
-  within about the tolerance (on the generated lobule the fields of 1 and 2 processes differ by
-  5e-11; 1e-10 everywhere, the cells included, takes linear solves to 1e-12, see
-  [Running a study](../usage.md)). A solver which does not converge is an error, not a silently
-  wrong step.
+  advection, the residual reduced by `solver.linear_rtol` of the study. Its default, 1e-10, keeps
+  results of different process counts within about the tolerance (on the generated lobule the
+  fields of 1 and 2 processes differ by 5e-11; 1e-10 everywhere, the cells included, takes
+  linear solves to 1e-12, see [Running a study](../usage.md)). With fixed steps the time
+  integration has no error estimate to derive the tolerance from, so the study sets it: the SPT
+  examples solve to 1e-6, where the fields differ from those of 1e-12 by 6e-8 of their largest
+  value on the generated lobule, below a thousandth of the change from halving the time step,
+  and the residuals of the mass balances grow with the tolerance ([performance](../results/2026-11-m4-performance.md)). A
+  solver which does not converge is an error, not a silently wrong step.
 - **Geometric multigrid** (`PCMG`, V-cycles) over the refinement levels of the mesh. The coarser
   levels discretize the same equation again (coefficients and velocity at their own quadrature
   points), not the Galerkin product. Smoothers: 2 iterations of Chebyshev preconditioned by
   Jacobi, on \([0.1, 1.1]\, \lambda_{max}\) for symmetric operators and \([0.5, 1.2]\,
   \lambda_{max}\) with advection, whose Jacobi preconditioned spectrum is complex. Coarse level:
-  one application of algebraic multigrid (`PCGAMG`). Every level, the finest included, works on
+  one application of algebraic multigrid (`PCGAMG`), coarsened until a level has at most 5000
+  equations, which it solves directly (PETSc's default stops at 50: the larger direct solve
+  halves the Krylov iterations on the generated lobule,
+  [performance](../results/2026-11-m4-performance.md)). Every level, the finest included, works on
   the operator assembled from libCEED, several times cheaper to apply than the matrix-free one
   for P1 triangles ([performance](../results/2026-11-m3-performance.md)).
 - **Reuse**: the operators and the multigrid are built once per field; a step changes only the

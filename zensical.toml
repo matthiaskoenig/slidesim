@@ -46,6 +46,7 @@ nav = [
     { "M3: wall classes on dosed slides" = "results/2026-11-m3-wall-classes.md" },
     { "M3: performance" = "results/2026-11-m3-performance.md" },
     { "M4: meshing real slides" = "results/2026-11-m4-meshing.md" },
+    { "M4: transport solves" = "results/2026-11-m4-performance.md" },
     { "Cells on dosed slides (deferred)" = "results/m3-dosed-slides.md" },
   ] },
   { "Development" = "development.md" },

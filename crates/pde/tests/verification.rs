@@ -15,7 +15,7 @@ use std::f64::consts::PI;
 use std::rc::Rc;
 
 use common::{PIXELS, Scratch, ceed, unit_square};
-use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, TimeSpec};
+use contracts::{BoundarySpec, Coefficient, Condition, FieldSpec, SolverOptions, TimeSpec};
 use maps::Maps;
 use mesh::{Mesh, MeshError};
 use pde::{Inputs, PdeError, PointData, Problem, Terms, Transport};
@@ -109,7 +109,7 @@ fn spatial_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
                 &field(D, K),
                 &fixed(200.0, 1.0),
                 &ceed(),
-                ACCURATE,
+                &SolverOptions::with_petsc_options(ACCURATE),
                 &no_maps(),
             )
             .unwrap();
@@ -174,7 +174,7 @@ fn temporal_order_bdf2() {
             &field(D, K),
             &fixed(T_END, dt),
             &ceed(),
-            ACCURATE,
+            &SolverOptions::with_petsc_options(ACCURATE),
             &no_maps(),
         )
         .unwrap();
@@ -222,7 +222,7 @@ fn mass_conserved_with_zero_flux() {
         &field,
         &fixed(10.0, 0.5),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &no_maps(),
     )
     .unwrap();
@@ -255,7 +255,7 @@ fn flux_balances_mass() {
         &field,
         &fixed(10.0, 0.5),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &no_maps(),
     )
     .unwrap();
@@ -278,7 +278,7 @@ fn divergence_is_error() {
         &field(D, K),
         &fixed(1e9, 1e9),
         &ceed(),
-        "-ksp_max_it 1",
+        &SolverOptions::with_petsc_options("-ksp_max_it 1"),
         &no_maps(),
     )
     .unwrap();
@@ -318,7 +318,7 @@ fn options_are_scoped_to_the_problem() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        "-ksp_max_it 7",
+        &SolverOptions::with_petsc_options("-ksp_max_it 7"),
         &no_maps(),
     )
     .unwrap();
@@ -336,7 +336,7 @@ fn options_are_scoped_to_the_problem() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        "",
+        &SolverOptions::default(),
         &no_maps(),
     )
     .unwrap_err();
@@ -350,10 +350,44 @@ fn options_are_scoped_to_the_problem() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        "",
+        &SolverOptions::default(),
         &no_maps(),
     )
     .unwrap();
+}
+
+/// `SolverOptions::linear_rtol` is the relative tolerance of the linear solves of the problem
+/// (read back from its solver, 1e-10 by default), and `-ksp_rtol` in the PETSc options of the
+/// study overrides it.
+#[test]
+fn linear_rtol_sets_ksp_rtol() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let rtol = |solver: &SolverOptions| {
+        let mut problem = Problem::new(
+            &mesh,
+            &field(D, K),
+            &fixed(0.1, 0.1),
+            &ceed(),
+            solver,
+            &no_maps(),
+        )
+        .unwrap();
+        problem.set_initial_condition(phi).unwrap();
+        problem.step_to(0.1).unwrap();
+        problem.linear_rtol().unwrap()
+    };
+    assert_eq!(rtol(&SolverOptions::default()), 1e-10);
+    let loose = SolverOptions {
+        linear_rtol: 1e-6,
+        ..SolverOptions::default()
+    };
+    assert_eq!(rtol(&loose), 1e-6);
+    let overridden = SolverOptions {
+        linear_rtol: 1e-6,
+        petsc_options: "-ksp_rtol 1e-8".to_string(),
+    };
+    assert_eq!(rtol(&overridden), 1e-8);
 }
 
 #[test]
@@ -366,7 +400,7 @@ fn user_options_override_the_defaults() {
         &field(D, K),
         &fixed(1e9, 1e9),
         &ceed(),
-        "-ksp_max_it 1 -ksp_error_if_not_converged false",
+        &SolverOptions::with_petsc_options("-ksp_max_it 1 -ksp_error_if_not_converged false"),
         &no_maps(),
     )
     .unwrap();
@@ -392,7 +426,7 @@ fn command_line_options_override_the_defaults_and_the_caller() {
             &field(D, K),
             &fixed(0.1, 0.1),
             &ceed(),
-            "-ksp_rtol 1e-12",
+            &SolverOptions::with_petsc_options("-ksp_rtol 1e-12"),
             &no_maps(),
         )
         .unwrap();
@@ -423,7 +457,7 @@ fn steps_end_at_the_requested_times() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -450,7 +484,7 @@ fn step_to_a_time_which_is_not_finite_is_error() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -478,7 +512,7 @@ fn fixed_steps_keep_their_size_after_requested_times() {
         &field(D, K),
         &fixed(1.0, 0.1),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -509,7 +543,7 @@ fn reuse_problem(mesh: &Mesh) -> Problem {
         &field(D, K),
         &fixed(REUSE_END, REUSE_DT),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -625,8 +659,15 @@ fn adaptive_steps_reassemble_once_per_shift() {
         adaptive: true,
         ..fixed(2.0, 0.01)
     };
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(ACCURATE),
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     problem.step_to(1.0).unwrap();
     problem.step_to(2.0).unwrap();
@@ -676,8 +717,15 @@ fn adaptive_steps_keep_the_choice_of_the_adaptor() {
         adaptive: true,
         ..fixed(2.0, 0.01)
     };
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(ACCURATE),
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     problem.step_to(0.5).unwrap();
     // The adaptor grew the step from 0.01; the next step_to starts with its choice.
@@ -696,8 +744,15 @@ fn adaptive_steps_reach_the_requested_times() {
         adaptive: true,
         ..fixed(2.0, 0.01)
     };
-    let mut problem =
-        Problem::new(&mesh, &field(D, K), &time, &ceed(), ACCURATE, &no_maps()).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field(D, K),
+        &time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(ACCURATE),
+        &no_maps(),
+    )
+    .unwrap();
     problem.set_initial_condition(phi).unwrap();
     for t in [0.5, 2.0] {
         problem.step_to(t).unwrap();
@@ -725,7 +780,7 @@ fn uniform_initial_and_source_and_dirichlet_values() {
         &field,
         &fixed(1.0, 0.25),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -757,7 +812,7 @@ fn local_solution_has_the_dirichlet_values() {
         &field,
         &fixed(1.0, 0.25),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -799,7 +854,7 @@ fn vertex_values_gather_in_canonical_order() {
         &field,
         &fixed(1.0, 0.25),
         &ceed(),
-        ACCURATE,
+        &SolverOptions::with_petsc_options(ACCURATE),
         &no_maps(),
     )
     .unwrap();
@@ -831,7 +886,15 @@ fn unknown_boundary_tag_is_error() {
                 condition,
             }],
         );
-        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+        let e = Problem::new(
+            &mesh,
+            &field,
+            &fixed(1.0, 0.1),
+            &ceed(),
+            &SolverOptions::default(),
+            &no_maps(),
+        )
+        .unwrap_err();
         assert!(
             matches!(&e, PdeError::Mesh(MeshError::UnknownTag { name, .. }) if name == "nowhere"),
             "{e}"
@@ -850,7 +913,15 @@ fn flux_on_a_region_is_error() {
             condition: Condition::Flux { value: 1.0 },
         }],
     );
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &no_maps(),
+    )
+    .unwrap_err();
     assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
     assert!(e.to_string().contains("domain"), "{e}");
 }
@@ -864,7 +935,15 @@ fn field_id_must_be_an_options_prefix() {
             id: id.to_string(),
             ..natural_field(0.0, Vec::new())
         };
-        let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+        let e = Problem::new(
+            &mesh,
+            &field,
+            &fixed(1.0, 0.1),
+            &ceed(),
+            &SolverOptions::default(),
+            &no_maps(),
+        )
+        .unwrap_err();
         assert!(matches!(e, PdeError::Unsupported(_)), "{id:?}: {e}");
     }
 }
@@ -878,7 +957,15 @@ fn advection_without_flow_is_unsupported() {
         advection: true,
         ..natural_field(0.0, Vec::new())
     };
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &no_maps(),
+    )
+    .unwrap_err();
     assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
     assert!(e.to_string().contains("advection"), "{e}");
 }
@@ -891,7 +978,15 @@ fn table_of_a_missing_map_is_error() {
         porosity: table("nowhere", [0.0, 0.5], [1.0, 1.0]),
         ..natural_field(0.0, Vec::new())
     };
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &no_maps()).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &no_maps(),
+    )
+    .unwrap_err();
     let PdeError::Map { message } = &e else {
         panic!("expected a map error, got {e}");
     };
@@ -964,8 +1059,15 @@ fn variable_errors(p: &Petsc, levels: &[u32]) -> Vec<f64> {
                 maps: &maps,
                 flow: None,
             };
-            let mut problem =
-                Problem::new(&mesh, &field, &fixed(1.0, DT), &ceed(), ACCURATE, &inputs).unwrap();
+            let mut problem = Problem::new(
+                &mesh,
+                &field,
+                &fixed(1.0, DT),
+                &ceed(),
+                &SolverOptions::with_petsc_options(ACCURATE),
+                &inputs,
+            )
+            .unwrap();
             problem.set_initial_condition(phi).unwrap();
             let points = problem.discretization().quadrature_points().to_vec();
             let source: Vec<f64> = points.iter().map(|&x| variable_source(x)).collect();

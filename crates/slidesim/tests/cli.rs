@@ -425,6 +425,33 @@ fn island_reports_pressure_islands() {
     }
 }
 
+/// `summary.json` reports the tolerance of the linear solves of the transport: 1e-10 by default,
+/// `solver.linear_rtol` of the study, and `-ksp_rtol` of its PETSc options over it.
+#[test]
+fn summary_reports_linear_rtol() {
+    let dir = scratch("summary_reports_linear_rtol");
+    for (name, solver, expected) in [
+        ("default", serde_json::json!({}), 1e-10),
+        ("loose", serde_json::json!({"linear_rtol": 1e-6}), 1e-6),
+        (
+            "overridden",
+            serde_json::json!({"linear_rtol": 1e-6, "petsc_options": "-ksp_rtol 1e-8"}),
+            1e-8,
+        ),
+    ] {
+        let study = variant(&lobule_study(), &dir, name, |doc| doc["solver"] = solver);
+        let out = dir.join(name);
+        assert_success(&slidesim(&args(&study, &out, &[])));
+        let summary = summary_json(&out);
+        assert_eq!(
+            summary["solver"]["linear_rtol"].as_f64(),
+            Some(expected),
+            "{name}: {}",
+            summary["solver"]
+        );
+    }
+}
+
 /// The phases of a run in `summary.json`, the wall time of process 0 in each: together the time
 /// of the run until it writes the summary. (Not until the process ends: it then still destroys
 /// its objects and finalizes PETSc and MPI, about 0.1 s, which no phase can hold, and which would
@@ -1110,13 +1137,16 @@ fn mesh_command_on_two_processes_is_a_usage_error() {
 }
 
 /// The SPT study of the generated lobule on the batched path, shortened to 30 min: it runs, and
-/// every mass balance closes.
+/// every mass balance closes. The linear solves to 1e-10, not to the study's 1e-6: the residual
+/// of a balance scales with the tolerance, and 1e-8 of its largest term is the bound at 1e-10
+/// (at 1e-6 the balance of `P`, whose terms are small beside its storage, closes to 6e-7).
 #[test]
 fn lobule_spt_runs() {
     let dir = scratch("lobule_spt_runs");
     let study = variant(&lobules("spt_batched.study.json"), &dir, "short", |doc| {
         doc["time"]["end"] = Value::from(1800.0);
         doc["time"]["outputs"] = serde_json::json!([0.0, 900.0, 1800.0]);
+        doc["solver"]["linear_rtol"] = Value::from(1e-10);
     });
     let out = dir.join("out");
     let run = slidesim(&args(&study, &out, &[]));
@@ -1236,7 +1266,7 @@ fn slide_field_examples_mesh() {
 }
 
 /// The SPT study of the dosed field `281mg_m1` on the batched path, shortened to 10 min: it
-/// runs, and every mass balance closes.
+/// runs, and every mass balance closes (the linear solves to 1e-10, as in [`lobule_spt_runs`]).
 #[test]
 fn slide_field_spt_runs() {
     let dir = scratch("slide_field_spt_runs");
@@ -1247,6 +1277,7 @@ fn slide_field_spt_runs() {
         |doc| {
             doc["time"]["end"] = Value::from(600.0);
             doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0]);
+            doc["solver"]["linear_rtol"] = Value::from(1e-10);
         },
     );
     let out = dir.join("out");
@@ -1277,7 +1308,7 @@ fn cells_parallel_matches_one_on_generated_lobule() {
     let study = variant(&lobules("linear.study.json"), &dir, "short", |doc| {
         doc["time"]["end"] = Value::from(900.0);
         doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0, 900.0]);
-        doc["solver"] = serde_json::json!({"petsc_options": "-ksp_rtol 1e-12"});
+        doc["solver"] = serde_json::json!({"linear_rtol": 1e-12});
         doc["cells"]["rtol"] = Value::from(1e-12);
         doc["cells"]["atol"] = Value::from(1e-16);
     });

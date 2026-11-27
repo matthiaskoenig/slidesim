@@ -20,6 +20,9 @@ are not part of CI.
   polygons of real slides against slideviz's gmsh meshes (passing, after a cap of the size at
   short boundary segments; slideviz retires its gmsh step), and three real fields as example
   scenes.
+- **[M4: transport solves](2026-11-m4-performance.md)**: the linear solves of the transport
+  with 5.8 times fewer flops on the generated lobule (coarse solve, initial guess, the linear
+  tolerance `solver.linear_rtol` of the studies), measured on small problems.
 - **[Cells on dosed slides (deferred)](m3-dosed-slides.md)**: the SPT cell model for 24 h on
   dosed slides, the simulated necrosis against the measured one; deferred to later, larger
   hardware, not part of milestone 3.

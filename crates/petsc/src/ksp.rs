@@ -209,6 +209,16 @@ impl Ksp {
         Ok(())
     }
 
+    /// The relative tolerance of the residual norm (`KSPGetTolerances`).
+    pub fn rtol(&self) -> Result<f64> {
+        let mut rtol = 0.0;
+        // SAFETY: a valid KSP; PETSc writes one real, and skips the null outputs.
+        chk!(unsafe {
+            sys::KSPGetTolerances(self.raw, &mut rtol, null_mut(), null_mut(), null_mut())
+        });
+        Ok(rtol)
+    }
+
     /// Solves `A x = b` for the operator of [`Ksp::set_operators`], from the initial guess
     /// zero (`KSPSolve`). Collective.
     ///

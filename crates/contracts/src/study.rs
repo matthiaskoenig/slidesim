@@ -526,12 +526,63 @@ pub struct MeshOptions {
     pub refinements: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+/// The default of [`SolverOptions::linear_rtol`]: the setting at which runs on different numbers
+/// of processes agree within about 1e-10.
+pub const DEFAULT_LINEAR_RTOL: f64 = 1e-10;
+
+fn default_linear_rtol() -> f64 {
+    DEFAULT_LINEAR_RTOL
+}
+
+fn is_default_linear_rtol(rtol: &f64) -> bool {
+    *rtol == DEFAULT_LINEAR_RTOL
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SolverOptions {
+    /// Relative tolerance of the linear solves of the transport (the residual of each solve
+    /// reduced by it), in (0, 1), default 1e-10. With fixed steps the time integration has no
+    /// error estimate to derive it from: the study sets it. `-ksp_rtol` in `petsc_options`
+    /// overrides it.
+    #[serde(
+        default = "default_linear_rtol",
+        skip_serializing_if = "is_default_linear_rtol"
+    )]
+    #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 1))]
+    pub linear_rtol: f64,
     /// PETSc options string, e.g. `-ksp_type cg -pc_type jacobi`.
     #[serde(default)]
     pub petsc_options: String,
+}
+
+impl Default for SolverOptions {
+    fn default() -> SolverOptions {
+        SolverOptions {
+            linear_rtol: DEFAULT_LINEAR_RTOL,
+            petsc_options: String::new(),
+        }
+    }
+}
+
+impl SolverOptions {
+    /// The default options with the PETSc options `petsc_options`.
+    pub fn with_petsc_options(petsc_options: impl Into<String>) -> SolverOptions {
+        SolverOptions {
+            petsc_options: petsc_options.into(),
+            ..SolverOptions::default()
+        }
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        let rtol = self.linear_rtol;
+        if !(rtol > 0.0 && rtol < 1.0) {
+            return Err(invalid(format!(
+                "solver.linear_rtol must be in (0, 1), got {rtol}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn invalid(msg: String) -> ContractError {
@@ -590,6 +641,7 @@ impl Study {
         if let Some(c) = &self.cells {
             c.validate()?;
         }
+        self.solver.validate()?;
         self.time.validate()
     }
 }

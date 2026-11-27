@@ -631,6 +631,13 @@
     "SolverOptions": {
       "additionalProperties": false,
       "properties": {
+        "linear_rtol": {
+          "description": "Relative tolerance of the linear solves of the transport (the residual of each solve\nreduced by it), in (0, 1), default 1e-10. With fixed steps the time integration has no\nerror estimate to derive it from: the study sets it. `-ksp_rtol` in `petsc_options`\noverrides it.",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
         "petsc_options": {
           "default": "",
           "description": "PETSc options string, e.g. `-ksp_type cg -pc_type jacobi`.",

@@ -54,6 +54,7 @@
     "split_step": 60.0,
     "outputs": ["protein"]
   },
+  "solver": {"linear_rtol": 1e-6},
   "time": {
     "end": 86400.0,
     "dt": 10.0,

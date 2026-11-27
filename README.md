@@ -111,8 +111,9 @@ residuals of its linear solves) or `-oxygen_ksp_rtol 1e-8`:
 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out -- -oxygen_ts_monitor
 ```
 
-Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol 1e-10`, and solvers
-which do not converge are errors), `solver.petsc_options` of the study, the options after `--`.
+Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol` of
+`solver.linear_rtol`, 1e-10 unless the study sets it, and solvers which do not converge are
+errors), `solver.petsc_options` of the study, the options after `--`.
 
 ## License
 

@@ -6,6 +6,7 @@
 //!     "mass_balance": [null | {
 //!         "storage_rate": ..., "source": ..., "advection_defect": ..., "exchange": ...,
 //!         "boundary": {"<tag>": {"advective": ..., "diffusive": ..., "resupply": ...}}}]}},
+//!  "solver": {"linear_rtol": ...},
 //!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
 //!                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
 //!  "cells": {"count": <n>, "steps": <n>, "rejected": <n>, "seconds": {"mean": ..., "max": ...},
@@ -26,6 +27,9 @@
 //! the Dirichlet values of a tag resupplied when the cells changed the field next to them.
 //! `storage_rate` is the change of `total_mass` over the interval divided by its length, and
 //! the terms add up to it exactly, up to the residuals of the linear solves.
+//! `solver` holds the relative tolerance of the linear solves of the transport the run used
+//! (`solver.linear_rtol` of the study, unless its PETSc options set `-ksp_rtol`; the loosest
+//! of the fields if they set one per field): the residuals of the balances scale with it.
 //! `cells` is there for a study with cells: their number, the steps and rejected steps of
 //! their integrators summed over the cells and the run, the time of a process in its cells (s,
 //! the mean over the processes and the largest; the phase `cells` is the largest and the wait
@@ -60,12 +64,22 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct Summary {
     pub fields: BTreeMap<String, FieldSummary>,
+    pub solver: SolverSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub perfusion: Option<PerfusionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cells: Option<CellsSummary>,
     /// The wall time of process 0 in each phase: s.
     pub phases: BTreeMap<&'static str, f64>,
+}
+
+/// The settings of the solvers the run used.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SolverSummary {
+    /// The relative tolerance of the linear solves of the transport: `solver.linear_rtol` of the
+    /// study, or `-ksp_rtol` of its PETSc options; the loosest of the fields if the options set
+    /// one per field.
+    pub linear_rtol: f64,
 }
 
 /// A time over the processes: its mean and its largest value (s).

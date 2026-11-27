@@ -15,13 +15,14 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 ```
 
 The same command runs on one process or on many under `mpiexec`: the mesh is partitioned over
-the processes (PT-Scotch). With fixed time steps, the linear solves to 1e-12 (`-ksp_rtol 1e-12`)
-and the cells to rtol 1e-12 and atol 1e-16, every result agrees across 1, 2 and 3 processes
-within 1e-10 relative, as the tests check. At the default settings (linear solves to 1e-10, the
-cell tolerances of the study) runs agree within what the tolerances allow: on the generated
-lobule the fields of 1 and 2 processes differ by 5e-11, the cells by up to 1.4e-10, and a cell
-whose step control decides otherwise on inputs which differ in the last digits by its
-integration error (4e-10 at a cell rtol of 1e-8). `slidesim run --help` describes the outputs.
+the processes (PT-Scotch). With fixed time steps, the linear solves to 1e-12
+(`solver.linear_rtol`) and the cells to rtol 1e-12 and atol 1e-16, every result agrees across 1,
+2 and 3 processes within 1e-10 relative, as the tests check. At the default settings (linear
+solves to 1e-10, the cell tolerances of the study) runs agree within what the tolerances allow:
+on the generated lobule the fields of 1 and 2 processes differ by 5e-11, the cells by up to
+1.4e-10, and a cell whose step control decides otherwise on inputs which differ in the last
+digits by its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve to 1e-6
+for speed, and agree to about that. `slidesim run --help` describes the outputs.
 
 ## What a run does
 
@@ -62,6 +63,7 @@ integration error (4e-10 at a cell rtol of 1e-8). `slidesim run --help` describe
         "exchange": ...,
         "boundary": {"<tag>": {
             "advective": ..., "diffusive": ..., "resupply": ...}}}]}},
+ "solver": {"linear_rtol": ...},
  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
  "cells": {"count": <n>, "steps": <n>, "rejected": <n>,
@@ -93,6 +95,11 @@ integration error (4e-10 at a cell rtol of 1e-8). `slidesim run --help` describe
     `advection_defect` the non-conservation of the velocity (zero for the conservative velocity of
     milestone 3). `storage_rate` is the change of `total_mass` over the interval divided by its
     length, and the terms add up to it exactly, up to the residuals of the linear solves.
+
+`solver`
+:   The relative tolerance of the linear solves of the transport the run used: `linear_rtol`
+    of the study's `solver`, or `-ksp_rtol` of its PETSc options (the loosest of the fields, if
+    the options set one per field). The residuals of the mass balances scale with it.
 
 `perfusion`
 :   With perfusion: the flow through each pressure tag (`tag_flows`, um^2/s, positive into the
@@ -191,5 +198,6 @@ target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out \
   -- -oxygen_ts_monitor
 ```
 
-Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol 1e-10`, and solvers
-which do not converge are errors), `solver.petsc_options` of the study, the options after `--`.
+Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol` of
+`solver.linear_rtol`, 1e-10 unless the study sets it, and solvers which do not converge are
+errors), `solver.petsc_options` of the study, the options after `--`.

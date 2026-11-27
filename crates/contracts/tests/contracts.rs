@@ -914,3 +914,37 @@ fn reserved_tag_names_are_refused() {
         assert!(e.contains("area_tag") && e.contains("reserved"), "{e}");
     }
 }
+
+/// `solver.linear_rtol`: 1e-10 by default, a number in (0, 1) otherwise; 0 and 1 are refused,
+/// naming the key. The default is not written back.
+#[test]
+fn linear_rtol_default_and_bounds() {
+    let study = Study::load(data("study-minimal.json")).unwrap();
+    assert_eq!(study.solver.linear_rtol, 1e-10);
+    assert_eq!(contracts::SolverOptions::default().linear_rtol, 1e-10);
+    assert!(
+        serde_json::to_value(&study.solver).unwrap()["linear_rtol"].is_null(),
+        "{:?}",
+        study.solver
+    );
+
+    let mut value = json("study-minimal.json");
+    value["solver"]["linear_rtol"] = serde_json::json!(1e-6);
+    let study = Study::from_value(value, &data("study-minimal.json")).unwrap();
+    assert_eq!(study.solver.linear_rtol, 1e-6);
+    assert_eq!(study.solver.petsc_options, "-ksp_type cg");
+    assert_eq!(
+        serde_json::to_value(&study.solver).unwrap()["linear_rtol"],
+        serde_json::json!(1e-6)
+    );
+
+    for rtol in [0.0, 1.0, -1e-6, 2.0] {
+        let mut value = json("study-minimal.json");
+        value["solver"]["linear_rtol"] = serde_json::json!(rtol);
+        let e = Study::from_value(value, &data("study-minimal.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("solver.linear_rtol"), "{rtol}: {e}");
+        assert!(e.contains("(0, 1)"), "{rtol}: {e}");
+    }
+}
