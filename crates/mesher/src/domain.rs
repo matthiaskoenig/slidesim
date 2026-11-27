@@ -29,42 +29,55 @@ pub struct Domain {
 }
 
 impl Domain {
-    /// The domain of a `polygons/1` file: the area tags in the order of their first polygon, then
-    /// the edge tags in the order of their first chain; a tag is a name with a value.
+    /// The domain of a `polygons/1` file. A tag is a name with a value; the tags are sorted by
+    /// name, value and dimension (the order in which [`crate::TaggedMesh::from_dm`] reads them
+    /// back).
     ///
-    /// Errors if a tag value does not fit a DMPlex label value (`i32`).
+    /// Errors ([`MesherError::InvalidTag`]) for a reserved or empty tag name, and for a value
+    /// which does not fit a DMPlex label value (`i32`).
     pub fn from_polygons(p: &Polygons) -> Result<Domain, MesherError> {
-        let mut tags: Vec<MeshTag> = Vec::new();
-        let mut index = |name: &str, value: u32, dim: u8| -> Result<usize, MesherError> {
+        let tag = |name: &str, value: u32, dim: u8| -> Result<MeshTag, MesherError> {
+            contracts::check_tag_name(name).map_err(MesherError::InvalidTag)?;
             let value = i32::try_from(value).map_err(|_| {
-                MesherError::Triangulation(format!(
-                    "the value {value} of tag {name:?} is larger than {}",
+                MesherError::InvalidTag(format!(
+                    "the value {value} of the tag {name:?} is larger than {}",
                     i32::MAX
                 ))
             })?;
-            let tag = MeshTag {
+            Ok(MeshTag {
                 name: name.to_string(),
                 value,
                 dim,
-            };
-            Ok(match tags.iter().position(|t| *t == tag) {
-                Some(i) => i,
-                None => {
-                    tags.push(tag);
-                    tags.len() - 1
-                }
             })
         };
-        let areas = p
+        let areas: Vec<(MeshTag, Vec<Vec<[f64; 2]>>)> = p
             .areas
             .iter()
-            .map(|a| Ok((index(&a.tag, a.value, 2)?, a.rings.clone())))
+            .map(|a| Ok((tag(&a.tag, a.value, 2)?, a.rings.clone())))
             .collect::<Result<_, MesherError>>()?;
-        let edges = p
+        let edges: Vec<(MeshTag, Vec<[f64; 2]>)> = p
             .edges
             .iter()
-            .map(|e| Ok((index(&e.tag, e.value, 1)?, e.points.clone())))
+            .map(|e| Ok((tag(&e.tag, e.value, 1)?, e.points.clone())))
             .collect::<Result<_, MesherError>>()?;
+        let mut tags: Vec<MeshTag> = areas
+            .iter()
+            .map(|a| a.0.clone())
+            .chain(edges.iter().map(|e| e.0.clone()))
+            .collect();
+        tags.sort_by(|a, b| (&a.name, a.value, a.dim).cmp(&(&b.name, b.value, b.dim)));
+        tags.dedup();
+        let index = |t: &MeshTag| {
+            tags.binary_search_by(|u| (&u.name, u.value, u.dim).cmp(&(&t.name, t.value, t.dim)))
+        };
+        let areas = areas
+            .into_iter()
+            .map(|(t, rings)| (index(&t).unwrap(), rings))
+            .collect();
+        let edges = edges
+            .into_iter()
+            .map(|(t, points)| (index(&t).unwrap(), points))
+            .collect();
         Ok(Domain { tags, areas, edges })
     }
 }

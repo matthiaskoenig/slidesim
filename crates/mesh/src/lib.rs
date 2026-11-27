@@ -21,20 +21,6 @@ use petsc::{Comm, Dm, Petsc, Point};
 
 mod split;
 
-/// Labels PETSc creates itself (gmsh's generic sets, topology, ghosts, output), which are not
-/// gmsh physical names.
-const PETSC_LABELS: [&str; 9] = [
-    "depth",
-    "celltype",
-    "Cell Sets",
-    "Face Sets",
-    "Edge Sets",
-    "Vertex Sets",
-    "marker",
-    "ghost",
-    "vtk",
-];
-
 /// The name of the DM of a mesh.
 const NAME: &str = "mesh";
 
@@ -315,7 +301,7 @@ fn tags(dm: &Dm, dim: usize) -> Result<Vec<Tag>, MeshError> {
     let mut names: Vec<String> = dm
         .label_names()?
         .into_iter()
-        .filter(|n| !PETSC_LABELS.contains(&n.as_str()))
+        .filter(|n| !contracts::RESERVED_TAGS.contains(&n.as_str()))
         .collect();
     // The same order on every process: the reductions below match up.
     names.sort();

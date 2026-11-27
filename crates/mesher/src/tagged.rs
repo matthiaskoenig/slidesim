@@ -22,20 +22,6 @@ pub struct TaggedMesh {
     pub edge_tags: Vec<u16>,
 }
 
-/// The labels PETSc creates itself (topology, gmsh's generic sets, ghosts, output), which are no
-/// tags.
-const PETSC_LABELS: [&str; 9] = [
-    "depth",
-    "celltype",
-    "Cell Sets",
-    "Face Sets",
-    "Edge Sets",
-    "Vertex Sets",
-    "marker",
-    "ghost",
-    "vtk",
-];
-
 /// The name of the DM of a mesh.
 const NAME: &str = "mesh";
 
@@ -184,77 +170,217 @@ pub(crate) fn plex(
     Ok((dm, edges))
 }
 
+/// The tags as bytes: per tag the length of the name (u32), the name, the value (i32) and the
+/// dimension (u8), little endian.
+fn encode(tags: &[MeshTag]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for t in tags {
+        out.extend((t.name.len() as u32).to_le_bytes());
+        out.extend(t.name.as_bytes());
+        out.extend(t.value.to_le_bytes());
+        out.push(t.dim);
+    }
+    out
+}
+
+/// The tags of [`encode`].
+fn decode(bytes: &[u8]) -> Option<Vec<MeshTag>> {
+    let mut at = 0;
+    let mut take = |n: usize| -> Option<Vec<u8>> {
+        let part = bytes.get(at..at + n)?.to_vec();
+        at += n;
+        Some(part)
+    };
+    let mut tags = Vec::new();
+    while let Some(length) = take(4) {
+        let length = u32::from_le_bytes(length.try_into().ok()?) as usize;
+        let name = String::from_utf8(take(length)?).ok()?;
+        let value = i32::from_le_bytes(take(4)?.try_into().ok()?);
+        let dim = take(1)?[0];
+        tags.push(MeshTag { name, value, dim });
+    }
+    Some(tags)
+}
+
 impl TaggedMesh {
+    /// Whether the arrays fit together: tags of valid names (not reserved) and dimensions 1 or
+    /// 2, at most 65536; finite vertices; one area tag per triangle and one edge tag per edge;
+    /// triangles of three distinct vertices; edges `[a, b]` with `a < b`, each an edge of a
+    /// triangle. Errors: [`MesherError::InvalidTag`] or [`MesherError::InvalidMesh`].
+    pub fn validate(&self) -> Result<(), MesherError> {
+        let bad = |m: String| Err(MesherError::InvalidMesh(m));
+        if self.tags.len() > usize::from(u16::MAX) + 1 {
+            return bad(format!("{} tags, at most 65536", self.tags.len()));
+        }
+        for t in &self.tags {
+            contracts::check_tag_name(&t.name).map_err(MesherError::InvalidTag)?;
+            if t.dim != 1 && t.dim != 2 {
+                return bad(format!("the tag {:?} has the dimension {}", t.name, t.dim));
+            }
+        }
+        if let Some(v) = self
+            .vertices
+            .iter()
+            .find(|v| !(v[0].is_finite() && v[1].is_finite()))
+        {
+            return bad(format!("the vertex {v:?} is not finite"));
+        }
+        if self.triangle_tags.len() != self.triangles.len() {
+            return bad(format!(
+                "{} triangle tags for {} triangles",
+                self.triangle_tags.len(),
+                self.triangles.len()
+            ));
+        }
+        if self.edge_tags.len() != self.edges.len() {
+            return bad(format!(
+                "{} edge tags for {} edges",
+                self.edge_tags.len(),
+                self.edges.len()
+            ));
+        }
+        let n = self.vertices.len() as u64;
+        let dim = |t: u16| self.tags.get(t as usize).map(|t| t.dim);
+        let mut sides = Vec::with_capacity(3 * self.triangles.len());
+        for (i, (t, &tag)) in self.triangles.iter().zip(&self.triangle_tags).enumerate() {
+            if t.iter().any(|&v| u64::from(v) >= n) {
+                return bad(format!(
+                    "triangle {i} {t:?} names a vertex which is not there"
+                ));
+            }
+            if t[0] == t[1] || t[1] == t[2] || t[2] == t[0] {
+                return bad(format!("triangle {i} {t:?} repeats a vertex"));
+            }
+            if dim(tag) != Some(2) {
+                return bad(format!(
+                    "triangle {i} has the tag {tag}, which is no area tag"
+                ));
+            }
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                sides.push([a.min(b), a.max(b)]);
+            }
+        }
+        sides.sort_unstable();
+        for (e, &tag) in self.edges.iter().zip(&self.edge_tags) {
+            if e[0] >= e[1] || u64::from(e[1]) >= n {
+                return bad(format!(
+                    "the edge {e:?} names a vertex which is not there, or is not ordered"
+                ));
+            }
+            if dim(tag) != Some(1) {
+                return bad(format!(
+                    "the edge {e:?} has the tag {tag}, which is no edge tag"
+                ));
+            }
+            if sides.binary_search(e).is_err() {
+                return bad(format!("the tagged edge {e:?} is no edge of a triangle"));
+            }
+        }
+        Ok(())
+    }
+
     /// The mesh as a DMPlex on `comm`, held by process 0 (the meshes of the other processes are
-    /// ignored): the cells and vertices in the order of the arrays, one label per tag, named
-    /// after it, with its value on the triangles or edges of the tag. Collective.
+    /// ignored, and may be empty): the cells and vertices in the order of the arrays, one label
+    /// per tag on every process, named after it, with its value on the triangles or edges of the
+    /// tag. Process 0 validates its mesh ([`TaggedMesh::validate`]) and sends the outcome and
+    /// its tags to the others, so every process gets the same labels, or the same error.
+    /// Collective.
     pub fn to_dm(&self, comm: &Comm) -> petsc::Result<Dm> {
+        let root = comm.rank() == 0;
+        // The first byte 0 and the tags, or 1 and the error.
+        let mut message = Vec::new();
+        if root {
+            match self.validate() {
+                Ok(()) => {
+                    message.push(0);
+                    message.extend(encode(&self.tags));
+                }
+                Err(e) => {
+                    message.push(1);
+                    message.extend(e.to_string().into_bytes());
+                }
+            }
+        }
+        comm.broadcast_bytes(0, &mut message)?;
+        let error = |m: String| petsc::Error {
+            code: petsc::sys::PETSC_ERR_ARG_WRONG,
+            message: m,
+        };
+        let tags = match message.split_first() {
+            Some((0, tags)) => decode(tags).ok_or_else(|| error("undecodable tags".to_string()))?,
+            Some((_, m)) => return Err(error(String::from_utf8_lossy(m).into_owned())),
+            None => return Err(error("no message from process 0".to_string())),
+        };
         let (mut dm, edge_points) = plex(comm, self)?;
-        for tag in &self.tags {
+        for tag in &tags {
             dm.create_label(&tag.name)?;
         }
-        if comm.rank() == 0 {
+        if root {
             let cells = dm.height_stratum(0)?;
             for (i, &t) in self.triangle_tags.iter().enumerate() {
-                let tag = &self.tags[t as usize];
+                let tag = &tags[t as usize];
                 dm.set_label_value(&tag.name, cells.start + i as Point, label_value(tag.value))?;
             }
             for (e, &t) in self.edges.iter().zip(&self.edge_tags) {
-                let tag = &self.tags[t as usize];
-                let point = *edge_points.get(e).ok_or_else(|| petsc::Error {
-                    code: petsc::sys::PETSC_ERR_ARG_WRONG,
-                    message: format!("the tagged edge {e:?} is no edge of a triangle"),
-                })?;
-                dm.set_label_value(&tag.name, point, label_value(tag.value))?;
+                let tag = &tags[t as usize];
+                // Validated: every tagged edge is an edge of a triangle.
+                dm.set_label_value(&tag.name, edge_points[e], label_value(tag.value))?;
             }
         }
         Ok(dm)
     }
 
     /// The mesh of the local points of a serial DMPlex of triangles: one tag per label (but
-    /// PETSc's own) and value, of dimension 2 on cells and 1 on edges (both if the value marks
-    /// both), in the order of the labels and their values.
+    /// PETSc's own, [`contracts::RESERVED_TAGS`]), value and dimension (2 on cells, 1 on edges,
+    /// both if the value marks both), sorted by name, value and dimension.
     ///
     /// Errors: [`MesherError::AreaTags`] for a triangle without exactly one area tag.
     pub fn from_dm(dm: &Dm) -> Result<TaggedMesh, MesherError> {
         let plex = Plex::read(dm)?;
-        let mut tags = Vec::new();
-        let mut area_tags: Vec<Vec<u16>> = vec![Vec::new(); plex.triangles.len()];
-        let mut edges: Vec<(u16, [u32; 2])> = Vec::new();
+        // Per tag: the triangles, or the edges.
+        let mut found: Vec<(MeshTag, Vec<usize>, Vec<[u32; 2]>)> = Vec::new();
         for name in dm.label_names()? {
-            if PETSC_LABELS.contains(&name.as_str()) {
+            if contracts::RESERVED_TAGS.contains(&name.as_str()) {
                 continue;
             }
             for value in dm.label_values(&name)? {
                 let points = dm.stratum_points(&name, value)?;
                 let int = tag_value(value).ok_or_else(|| {
-                    MesherError::Triangulation(format!(
+                    MesherError::InvalidTag(format!(
                         "the value {value} of label {name:?} is larger than {}",
                         i32::MAX
                     ))
                 })?;
-                let mut add = |dim: u8| -> Result<u16, MesherError> {
-                    tags.push(MeshTag {
-                        name: name.clone(),
-                        value: int,
-                        dim,
-                    });
-                    u16::try_from(tags.len() - 1)
-                        .map_err(|_| MesherError::Triangulation("more than 65536 tags".to_string()))
+                let tag = |dim: u8| MeshTag {
+                    name: name.clone(),
+                    value: int,
+                    dim,
                 };
                 let cells: Vec<usize> = points.iter().filter_map(|&p| plex.cell(p)).collect();
                 if !cells.is_empty() {
-                    let tag = add(2)?;
-                    for c in cells {
-                        area_tags[c].push(tag);
-                    }
+                    found.push((tag(2), cells, Vec::new()));
                 }
                 let ends: Vec<[u32; 2]> = points.iter().filter_map(|&p| plex.edge(p)).collect();
                 if !ends.is_empty() {
-                    let tag = add(1)?;
-                    edges.extend(ends.into_iter().map(|e| (tag, e)));
+                    found.push((tag(1), Vec::new(), ends));
                 }
             }
+        }
+        if found.len() > usize::from(u16::MAX) + 1 {
+            return Err(MesherError::InvalidMesh(format!(
+                "{} tags, at most 65536",
+                found.len()
+            )));
+        }
+        found.sort_by(|a, b| (&a.0.name, a.0.value, a.0.dim).cmp(&(&b.0.name, b.0.value, b.0.dim)));
+        let mut area_tags: Vec<Vec<u16>> = vec![Vec::new(); plex.triangles.len()];
+        let mut edges: Vec<(u16, [u32; 2])> = Vec::new();
+        for (i, (_, cells, ends)) in found.iter().enumerate() {
+            for &c in cells {
+                area_tags[c].push(i as u16);
+            }
+            edges.extend(ends.iter().map(|&e| (i as u16, e)));
         }
         let triangle_tags = area_tags
             .iter()
@@ -269,7 +395,7 @@ impl TaggedMesh {
             .collect::<Result<_, _>>()?;
         edges.sort_unstable();
         Ok(TaggedMesh {
-            tags,
+            tags: found.into_iter().map(|f| f.0).collect(),
             vertices: plex.vertices,
             triangles: plex.triangles,
             triangle_tags,

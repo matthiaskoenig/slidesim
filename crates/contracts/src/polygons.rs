@@ -144,6 +144,7 @@ impl Polygons {
             if p.tag.is_empty() {
                 return Err(bad("tag must not be empty".to_string()));
             }
+            crate::check_tag_name(&p.tag).map_err(bad)?;
             let value = u32::try_from(p.value)
                 .ok()
                 .filter(|v| *v > 0)

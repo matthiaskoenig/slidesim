@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::tagged::twice_area;
-use crate::{Size, TaggedMesh};
+use crate::{MesherError, Size, TaggedMesh};
 
 /// The quality of a mesh: the counts, the smallest angle in degrees, the smallest and mean SICN
 /// (`4 sqrt(3) A / (l1^2 + l2^2 + l3^2)`, gmsh's for straight triangles: 1 for an equilateral
@@ -28,8 +28,10 @@ fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 impl TaggedMesh {
-    /// The quality of the mesh, with the edge ratios against `size` if given.
-    pub fn quality(&self, size: Option<&Size>) -> Quality {
+    /// The quality of the mesh, with the edge ratios against `size` if given. Errors unless the
+    /// mesh is valid ([`TaggedMesh::validate`]).
+    pub fn quality(&self, size: Option<&Size>) -> Result<Quality, MesherError> {
+        self.validate()?;
         let mut min_angle = f64::INFINITY;
         let mut min_sicn = f64::INFINITY;
         let mut sum_sicn = 0.0;
@@ -60,13 +62,13 @@ impl TaggedMesh {
                 [lo.min(ratio), hi.max(ratio)]
             })
         });
-        Quality {
+        Ok(Quality {
             triangles: self.triangles.len(),
             vertices: self.vertices.len(),
             min_angle_deg: min_angle,
             min_sicn,
             mean_sicn: sum_sicn / self.triangles.len() as f64,
             edge_ratio,
-        }
+        })
     }
 }

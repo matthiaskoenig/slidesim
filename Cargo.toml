@@ -8,13 +8,18 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-bindgen = "0.73.2"
+# Without the default `prettyplease` formatter (the bindings are formatted by rustfmt, bindgen's
+# default formatter anyway): bindgen 0.73 accepts syn 2 or 3, and a resolution which gives it
+# syn 3 next to prettyplease 0.2 (syn 2) does not compile. `runtime` loads libclang at run time,
+# as the default features do.
+bindgen = { version = "0.73.2", default-features = false, features = ["logging", "runtime"] }
 cc = "1.2.41"
 ceed-sys = { path = "crates/ceed-sys" }
 petsc-sys = { path = "crates/petsc-sys" }
 # The mesher: exact predicates, the R-tree of the size field and the constrained Delaunay
-# triangulation. spade is pinned exactly: a patch release may change its refinement, and the
-# generated meshes are to stay the same.
+# triangulation. spade is pinned exactly: the generated meshes are to stay the same, and they
+# depend on how spade breaks ties when it inserts vertices and constraints (cocircular points,
+# its flips), which a patch release may change.
 robust = "1.2.0"
 rstar = "0.14.0"
 spade = "=2.15.1"
@@ -23,3 +28,14 @@ spade = "=2.15.1"
 sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
 sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
 sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
+
+# The mesher's geometry in debug builds (the tests): unoptimized, spade and rstar make the
+# triangulation of a large domain about 50 times slower.
+[profile.dev.package.spade]
+opt-level = 3
+
+[profile.dev.package.rstar]
+opt-level = 3
+
+[profile.dev.package.robust]
+opt-level = 3

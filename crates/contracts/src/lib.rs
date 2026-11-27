@@ -7,12 +7,14 @@
 
 mod error;
 mod polygons;
+mod reserved;
 mod result;
 mod scene;
 mod study;
 
 pub use error::ContractError;
 pub use polygons::{AreaPolygon, EdgeChain, POLYGONS_VERSION, Polygons, schema_polygons};
+pub use reserved::{RESERVED_TAGS, check_tag_name};
 pub use result::{RESULT_VERSION, RasterMeta, ResultField, ResultMeta, ResultTag, schema_result};
 pub use scene::{
     HoleSpec, LengthUnit, LobuleSize, LobuleSpec, MapSpec, MeshSource, SCENE_VERSION, Scene,

@@ -406,6 +406,7 @@ impl LobuleSpec {
             if tag.is_empty() {
                 return Err(invalid(format!("{key} must not be empty")));
             }
+            crate::check_tag_name(tag).map_err(|e| invalid(format!("{key}: {e}")))?;
             if let Some((other, _)) = tags[..i].iter().find(|(_, t)| t == tag) {
                 return Err(invalid(format!(
                     "{key} '{tag}' equals {other}: the tags must differ"

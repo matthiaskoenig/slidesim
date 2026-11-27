@@ -885,3 +885,25 @@ fn result_schema_rejects_what_it_can_express() {
         assert!(schema_accepts(contracts::schema_result(), file), "{file}");
     }
 }
+
+#[test]
+fn reserved_tag_names_are_refused() {
+    assert!(contracts::RESERVED_TAGS.contains(&"depth"));
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap()
+    };
+    for reserved in contracts::RESERVED_TAGS {
+        let mut p = read("polygons-minimal.geojson");
+        p["features"][0]["properties"]["tag"] = serde_json::json!(reserved);
+        let e = Polygons::from_value(p, &data("polygons-minimal.geojson"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(reserved) && e.contains("reserved"), "{e}");
+        let mut s = read("scene-lobules.json");
+        s["mesh"]["area_tag"] = serde_json::json!(reserved);
+        let e = Scene::from_value(s, &data("scene-lobules.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("area_tag") && e.contains("reserved"), "{e}");
+    }
+}

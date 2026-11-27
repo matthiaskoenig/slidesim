@@ -314,11 +314,14 @@ const BACKGROUND: f64 = 2.0;
 /// edge is longer than [`BACKGROUND`] times the size at the centroid, and of the new triangles
 /// in turn, until none is: Mmg interpolates the metric on this mesh, so the mesh has to resolve
 /// the size field. Constraints are final, so only a triangle whose longest free edge is longer
-/// than its constraints (where an insertion helps) is split, and the refinement stops at `limit`
-/// vertices in all (a size field too steep for the boundary splitting). Every triangle an insertion creates holds the new vertex, and lies in the
-/// region of the triangle the vertex was inserted into (flips never cross a constraint), so
-/// `region` (by face index) stays valid. Centroids which are not strictly inside their triangle
-/// (slivers) are not inserted.
+/// than its constraints (where an insertion helps) is split. Every triangle an insertion creates
+/// holds the new vertex, and lies in the region of the triangle the vertex was inserted into
+/// (flips never cross a constraint), so `region` (by face index) stays valid. Centroids which
+/// are not strictly inside their triangle (slivers) are not inserted.
+///
+/// Errors if the triangulation would get more than `limit` vertices: a safeguard against a
+/// refinement which does not end, never reached by the inputs seen (the caller's limit is the
+/// count of equilateral triangles of `BACKGROUND` times the smallest size over the areas).
 fn refine_background(
     cdt: &mut ConstrainedDelaunayTriangulation<Point2<f64>>,
     region: &mut Vec<usize>,
@@ -361,7 +364,9 @@ fn refine_background(
         .collect();
     while let Some(face) = queue.pop_front() {
         if cdt.num_vertices() >= limit {
-            break;
+            return Err(MesherError::Triangulation(format!(
+                "the background refinement exceeds its limit of {limit} vertices"
+            )));
         }
         let Some((c, hint)) = split(cdt, face) else {
             continue;
@@ -400,6 +405,16 @@ enum Side {
 /// boundary segment without an edge tag, [`MesherError::EdgeOffBoundary`] for a tagged chain off
 /// the boundaries, [`MesherError::Triangulation`] for degenerate input.
 pub fn triangulate(domain: &Domain, size: &Size) -> Result<TaggedMesh, MesherError> {
+    triangulate_capped(domain, size, None)
+}
+
+/// [`triangulate`] with the limit of the background refinement `limit` (vertices in all) instead
+/// of the one from the areas.
+fn triangulate_capped(
+    domain: &Domain,
+    size: &Size,
+    limit: Option<usize>,
+) -> Result<TaggedMesh, MesherError> {
     let bad = |m: String| MesherError::Triangulation(m);
     let graph = Graph::new(domain)?;
     if let Some(at) = graph.crossing() {
@@ -429,23 +444,41 @@ pub fn triangulate(domain: &Domain, size: &Size) -> Result<TaggedMesh, MesherErr
         sub_edges.push(edges);
     }
 
-    let mut conflicts = Vec::new();
-    let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::try_bulk_load_cdt(
-        points.iter().map(|p| Point2::new(p[0], p[1])).collect(),
-        constraints.clone(),
-        |e| conflicts.push(e),
-    )
-    .map_err(|e| bad(format!("{e:?}")))?;
-    if let Some(&[u, v]) = conflicts.first() {
-        let at = midpoint(points[u], points[v]);
-        return Err(bad(format!(
-            "sub-edges cross near ({}, {}) um (segments at too small an angle)",
-            at[0], at[1]
-        )));
+    // Inserted one by one in a fixed order: spade's bulk loading iterates hash sets.
+    let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
+    let mut previous = None;
+    for (i, p) in points.iter().enumerate() {
+        let point = Point2::new(p[0], p[1]);
+        let v = match previous {
+            Some(hint) => cdt.insert_with_hint(point, hint),
+            None => cdt.insert(point),
+        }
+        .map_err(|e| bad(format!("the point ({}, {}): {e:?}", p[0], p[1])))?;
+        if v.index() != i {
+            return Err(bad(format!(
+                "a split point coincides with another point at ({}, {}) um",
+                p[0], p[1]
+            )));
+        }
+        previous = Some(v);
     }
-    if cdt.num_vertices() != points.len() || cdt.num_constraints() != constraints.len() {
+    for &[u, v] in &constraints {
+        let (a, b) = (
+            FixedVertexHandle::from_index(u),
+            FixedVertexHandle::from_index(v),
+        );
+        if !cdt.can_add_constraint(a, b) {
+            let at = midpoint(points[u], points[v]);
+            return Err(bad(format!(
+                "sub-edges cross near ({}, {}) um (segments at too small an angle)",
+                at[0], at[1]
+            )));
+        }
+        cdt.add_constraint(a, b);
+    }
+    if cdt.num_constraints() != constraints.len() {
         return Err(bad(
-            "split points coincide with other points or lie on other segments".to_string(),
+            "split points lie on other segments (segments at too small an angle)".to_string(),
         ));
     }
     // Regions: faces connected across edges which are no constraints.
@@ -609,7 +642,8 @@ pub fn triangulate(domain: &Domain, size: &Size) -> Result<TaggedMesh, MesherErr
         })
         .sum();
     let side = BACKGROUND * size.min();
-    let limit = cdt.num_vertices() + (2.0 * area / (0.25 * 3f64.sqrt() * side * side)) as usize;
+    let limit = limit
+        .unwrap_or(cdt.num_vertices() + (2.0 * area / (0.25 * 3f64.sqrt() * side * side)) as usize);
     refine_background(&mut cdt, &mut region, &in_area, size, limit)?;
     if cdt.num_constraints() != constraints.len() {
         return Err(bad("the refinement split a constraint".to_string()));
@@ -653,4 +687,45 @@ pub fn triangulate(domain: &Domain, size: &Size) -> Result<TaggedMesh, MesherErr
         edge_tags: edges.iter().map(|e| e.0).collect(),
         edges: edges.into_iter().map(|e| e.1).collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MeshTag;
+    use contracts::SizeField;
+
+    #[test]
+    fn background_refinement_limit_is_an_error() {
+        let tag = |name: &str, dim| MeshTag {
+            name: name.to_string(),
+            value: 1,
+            dim,
+        };
+        let square = vec![
+            [0.0, 0.0],
+            [100.0, 0.0],
+            [100.0, 100.0],
+            [0.0, 100.0],
+            [0.0, 0.0],
+        ];
+        let domain = Domain {
+            tags: vec![tag("a", 2), tag("cut", 1)],
+            areas: vec![(0, vec![square.clone()])],
+            edges: vec![(1, square)],
+        };
+        let spec = SizeField {
+            min_um: 5.0,
+            max_um: 5.0,
+            dist_min_um: 0.0,
+            dist_max_um: 1.0,
+            walls: vec![],
+        };
+        let size = Size::new(&spec, &domain).unwrap();
+        assert!(triangulate(&domain, &size).is_ok());
+        match triangulate_capped(&domain, &size, Some(100)) {
+            Err(MesherError::Triangulation(m)) => assert!(m.contains("limit of 100"), "{m}"),
+            r => panic!("unexpected {r:?}"),
+        }
+    }
 }

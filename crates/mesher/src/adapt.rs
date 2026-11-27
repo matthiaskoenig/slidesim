@@ -36,38 +36,21 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
 ///
 /// Errors: [`MesherError::UntaggedBoundary`] for a boundary edge without a tag,
 /// [`MesherError::EdgeOffBoundary`] for a tagged edge inside a region (Mmg would drop it),
-/// [`MesherError::Triangulation`] for an inconsistent mesh, [`MesherError::Petsc`] if Mmg fails.
+/// [`MesherError::InvalidMesh`] for an invalid mesh (see [`TaggedMesh::validate`]) or an edge of more
+/// than two triangles, [`MesherError::Petsc`] if Mmg fails.
 pub fn adapt(petsc: &Petsc, mesh: &TaggedMesh, size: &Size) -> Result<TaggedMesh, MesherError> {
-    let bad = |m: String| MesherError::Triangulation(m);
-    let nv = mesh.vertices.len() as u32;
+    let bad = |m: String| MesherError::InvalidMesh(m);
+    mesh.validate()?;
     if mesh.triangles.is_empty() {
-        return Err(bad("no triangles".to_string()));
-    }
-    if mesh.triangle_tags.len() != mesh.triangles.len() || mesh.edge_tags.len() != mesh.edges.len()
-    {
-        return Err(bad(
-            "tags of another number than triangles or edges".to_string()
-        ));
-    }
-    if mesh.triangles.iter().flatten().any(|&v| v >= nv)
-        || mesh.edges.iter().any(|e| e[0] >= e[1] || e[1] >= nv)
-    {
-        return Err(bad(
-            "a triangle or edge names a vertex which is not there".to_string()
-        ));
-    }
-    let dim_of = |t: u16| mesh.tags.get(t as usize).map(|t| t.dim);
-    if mesh.triangle_tags.iter().any(|&t| dim_of(t) != Some(2))
-        || mesh.edge_tags.iter().any(|&t| dim_of(t) != Some(1))
-    {
-        return Err(bad("a tag of the wrong dimension, or none".to_string()));
+        return Err(MesherError::InvalidMesh("no triangles".to_string()));
     }
     let midpoint = |e: [u32; 2]| {
         let (a, b) = (mesh.vertices[e[0] as usize], mesh.vertices[e[1] as usize]);
         [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
     };
 
-    // Every edge with its triangles, and the tagged edges with their tags, both sorted by edge.
+    // Every edge with its triangles, and the tagged edges with their tags, both sorted by edge
+    // (every tagged edge is an edge of a triangle: validated).
     let mut sides: Vec<([u32; 2], usize)> = Vec::with_capacity(3 * mesh.triangles.len());
     for (i, t) in mesh.triangles.iter().enumerate() {
         for k in 0..3 {
@@ -89,14 +72,6 @@ pub fn adapt(petsc: &Petsc, mesh: &TaggedMesh, size: &Size) -> Result<TaggedMesh
     let mut k = 0;
     for chunk in sides.chunk_by(|x, y| x.0 == y.0) {
         let e = chunk[0].0;
-        if k < tagged.len() && tagged[k].0 < e {
-            // A tagged edge of no triangle.
-            let tag = &mesh.tags[tagged[k].1 as usize].name;
-            return Err(MesherError::EdgeOffBoundary {
-                tag: tag.clone(),
-                at: midpoint(tagged[k].0),
-            });
-        }
         let mut tags = Vec::new();
         while k < tagged.len() && tagged[k].0 == e {
             tags.push(tagged[k].1);
@@ -107,13 +82,6 @@ pub fn adapt(petsc: &Petsc, mesh: &TaggedMesh, size: &Size) -> Result<TaggedMesh
         }
         edges.push((e, chunk.iter().map(|s| s.1).collect(), tags));
     }
-    if let Some(&(e, tag)) = tagged.get(k) {
-        return Err(MesherError::EdgeOffBoundary {
-            tag: mesh.tags[tag as usize].name.clone(),
-            at: midpoint(e),
-        });
-    }
-
     // Regions: triangles connected across untagged edges of one area tag, numbered in the order
     // of their first triangle.
     let mut parent: Vec<usize> = (0..mesh.triangles.len()).collect();
