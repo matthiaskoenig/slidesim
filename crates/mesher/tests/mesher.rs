@@ -849,3 +849,26 @@ fn to_dm_error_on_process_0_reaches_every_process() {
     let e = mesh.to_dm(&comm).unwrap_err();
     assert!(e.message.contains("vertex"), "{e}");
 }
+
+#[test]
+fn t_junction_leaves_the_size_unchanged() {
+    // `cut` with the corners only: the vertex (50, 0) of the rings and of `border` lies inside
+    // its segment (a T-junction) instead of being one of its vertices. Neither is a gap.
+    let shared = fixture();
+    let mut junction = fixture();
+    junction.edges[1].points = vec![
+        [0.0, 0.0],
+        [100.0, 0.0],
+        [100.0, 100.0],
+        [0.0, 100.0],
+        [0.0, 0.0],
+    ];
+    let (_, a) = domain_and_size(&shared);
+    let (_, b) = domain_and_size(&junction);
+    for i in 0..=40 {
+        for j in 0..=40 {
+            let x = [2.5 * i as f64, 2.5 * j as f64];
+            assert_eq!(a.at(x), b.at(x), "at {x:?}");
+        }
+    }
+}

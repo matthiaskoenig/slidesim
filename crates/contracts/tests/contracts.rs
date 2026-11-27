@@ -888,7 +888,9 @@ fn result_schema_rejects_what_it_can_express() {
 
 #[test]
 fn reserved_tag_names_are_refused() {
-    assert!(contracts::RESERVED_TAGS.contains(&"depth"));
+    for name in ["depth", "_boundary_", "_regions_", "pde_floating"] {
+        assert!(contracts::RESERVED_TAGS.contains(&name), "{name}");
+    }
     let read = |name: &str| -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap()
     };

@@ -28,8 +28,8 @@ const FLOOR: f64 = 0.25;
 /// segments.
 ///
 /// The field is capped by the local width of the domain: at a point of a ring or chain whose
-/// nearest other segment across (not touching it, not collinear with it, not along it) is at the
-/// distance `w`, the size is at most `0.4 w` (but not below `min / 4`), growing by 0.3 per um
+/// nearest other segment across (not touching it, at an end or a T-junction; not collinear with
+/// it; not along it) is at the distance `w`, the size is at most `0.4 w` (but not below `min / 4`), growing by 0.3 per um
 /// away from it. Narrow necks of tissue and chains close to each other so get elements which fit
 /// between their frozen boundaries.
 #[derive(Clone, Debug)]
@@ -162,10 +162,26 @@ impl Size {
                     if FEATURE * d >= field {
                         break;
                     }
+                    // Segments which share a point (an end, or an end inside the other: a
+                    // T-junction) make no gap, however narrow the wedge between them; nor do
+                    // collinear ones (shared borders), nor any at the distance 0 (rings and
+                    // chains do not cross, so that is a junction too).
                     let [c, e] = [q.geom().from, q.geom().to];
-                    let touching = q.data == i || [c, e].iter().any(|p| *p == a || *p == b);
+                    let inside = |p: [f64; 2], s: [f64; 2], t: [f64; 2]| {
+                        orient(s, t, p) == 0.0
+                            && p[0] >= s[0].min(t[0])
+                            && p[0] <= s[0].max(t[0])
+                            && p[1] >= s[1].min(t[1])
+                            && p[1] <= s[1].max(t[1])
+                    };
+                    let touching = q.data == i
+                        || [c, e].iter().any(|p| *p == a || *p == b)
+                        || inside(a, c, e)
+                        || inside(b, c, e)
+                        || inside(c, a, b)
+                        || inside(e, a, b);
                     let collinear = orient(a, b, c) == 0.0 && orient(a, b, e) == 0.0;
-                    if touching || collinear {
+                    if touching || collinear || d == 0.0 {
                         continue;
                     }
                     // Across, not along: the way to the other segment makes more than 45 degrees
@@ -208,13 +224,16 @@ impl Size {
         let Some(gaps) = &self.gaps else {
             return field;
         };
-        let reach = (field - self.gap_min) / GRADING;
-        if reach <= 0.0 {
-            return field;
+        // The gap points by distance, until none can give less: every cap is at least
+        // `gap_min` (the slack keeps a point whose distance rounds differently).
+        let mut best = field;
+        for (g, d2) in gaps.nearest_neighbor_iter_with_distance_2(x) {
+            if self.gap_min + GRADING * d2.sqrt() > best * (1.0 + 1e-12) {
+                break;
+            }
+            best = best.min(g.data + GRADING * distance(x, *g.geom()));
         }
-        gaps.locate_within_distance(x, reach * reach)
-            .map(|g| g.data + GRADING * distance(x, *g.geom()))
-            .fold(field, f64::min)
+        best
     }
 
     /// The smallest size anywhere.
