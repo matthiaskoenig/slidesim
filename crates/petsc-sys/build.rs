@@ -22,7 +22,7 @@
 //!
 //! wasm32-wasip1 is not supported yet. It will link the static archives of `deps/install/wasi`
 //! (`pkg-config --static`) plus the wasi-libc emulation libraries listed in
-//! `spike/petsc-wasm/PATCHES.md`, take the sysroot from wasi-sdk instead of MPI include flags,
+//! `scripts/deps/patches/README.md`, take the sysroot from wasi-sdk instead of MPI include flags,
 //! and pass `-fvisibility=default` to bindgen (see `spike/petsc-wasm/diffusion/build.rs`).
 
 use std::env;

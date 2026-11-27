@@ -18,8 +18,8 @@ on real slides.
 - An MPI with `mpicc` and `mpiexec`, and a C compiler behind `mpicc`: Open MPI
   (`apt install openmpi-bin libopenmpi-dev`) or MPICH (`apt install mpich libmpich-dev`); CI tests
   both. Not the MPICH package of Ubuntu 24.04, whose `mpiexec` runs every process alone.
-- For the native dependencies: git, curl, make, cmake, m4, python3 and pkg-config. bison and
-  flex are built from pinned tarballs.
+- For the native dependencies: git, curl, make, cmake, m4, python3, pkg-config and a C++
+  compiler (Mmg's CMake project enables C++). bison and flex are built from pinned tarballs.
 - [wasi-sdk](https://github.com/WebAssembly/wasi-sdk), the version `WASI_SDK_VERSION` of
   `deps/versions.env`: bindgen uses its clang and libclang for the bindings of every target,
   native ones included. It is looked for in `~/opt/wasi-sdk`; set `WASI_SDK_PATH` to its
@@ -36,7 +36,7 @@ on real slides.
 
 ## Build
 
-Build the pinned native dependencies (PETSc with PT-Scotch and libCEED, versions and sha256 in
+Build the pinned native dependencies (PETSc with PT-Scotch and Mmg, and libCEED, versions and sha256 in
 `deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging checks, for the tests and CI),
 `native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3 -march=native`, without PETSc's
 debugging), then slidesim against them:
@@ -48,7 +48,7 @@ cargo build --workspace              # with native-opt: cargo build --release
 ```
 
 The `slidesim` binary has an absolute RUNPATH into the installation it was built against
-(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED): it runs without `env.sh`,
+(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of `libpetsc.so`): it runs without `env.sh`,
 but not after `deps/install` is moved or removed.
 
 ## Test
@@ -125,6 +125,9 @@ The native dependencies are linked into slidesim (`deps/versions.env` pins their
 - PETSc: BSD-2-Clause.
 - libCEED: BSD-2-Clause.
 - PT-Scotch (Scotch): CeCILL-C.
+- Mmg: LGPL-3.0-or-later, linked statically into PETSc (with the patches of
+  `scripts/deps/patches`); slidesim's build from source is the way to relink it with another or
+  a modified Mmg.
 - f2cblaslapack (PETSc's C translation of the reference BLAS and LAPACK): LAPACK's modified BSD
   license.
 

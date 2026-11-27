@@ -25,7 +25,7 @@ use std::time::Instant;
 // written `std::vec::Vec`.
 use ffi::*;
 
-/// The libCEED backend, always the full resource (see PATCHES.md): `/cpu/self` resolves to
+/// The libCEED backend, always the full resource (see `scripts/deps/patches/README.md`): `/cpu/self` resolves to
 /// different backends natively (avx) and in wasm (opt).
 const CEED_RESOURCE: &CStr = c"/cpu/self/opt/blocked";
 /// Quadrature degree of the PetscFE (operator, right-hand side and L2 error).

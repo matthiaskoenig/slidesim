@@ -11,6 +11,11 @@ The fallback of the spec (backend trait with a pure-Rust solver) is not planned 
 
 Target: **wasm32-wasip1** (Rust 1.100.0, wasi-sdk 34.0). Emscripten was not needed.
 
+Since milestone 4 the build script and the patches of this spike live in `scripts/deps`:
+`build-wasi.sh` is `scripts/deps/build-wasi.sh`, `PATCHES.md` is
+`scripts/deps/patches/README.md`, and the patches are `scripts/deps/patches/libceed-wasi-*` and
+`petsc-wasi-*` (named `libceed-*` and `petsc-*` below).
+
 ## What runs
 
 `diffusion/` is a standalone Cargo package (own `[workspace]`, not a member of the root

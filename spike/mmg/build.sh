@@ -6,8 +6,9 @@
 #   native: opt build of scripts/deps/build-native.sh (mpicc, f2cblaslapack, PT-Scotch, bison)
 #           plus Mmg; no libCEED (the lobule program does not need it).
 #   MMG_CMAKE_ARGS: extra CMake arguments of Mmg (native default: none, Mmg finds PT-Scotch).
-#   wasi:   the configure of spike/petsc-wasm/build-wasi.sh (MPIUNI, static) plus Mmg, with the
-#           patches of spike/petsc-wasm/patches and spike/mmg/patches.
+#   wasi:   the configure of the milestone 0 build-wasi.sh (MPIUNI, static) plus Mmg, with the
+#           patches petsc-wasi-* and petsc-0001-mmg-ptscotch-optional of scripts/deps/patches
+#           (the spike's patch, moved there).
 # JOBS (default 8) bounds the parallel make.
 set -euo pipefail
 
@@ -68,7 +69,6 @@ apply_patches() { # <glob>
 
 case "$MODE" in
 native)
-  apply_patches "$SPIKE/patches/petsc-native-*.patch"
   (
     cd "$BUILD/petsc"
     ./configure --prefix="$PREFIX" --with-cc=mpicc --with-cxx=0 --with-fc=0 \
@@ -97,8 +97,8 @@ wasi)
   FLAGS="-O3 -DNDEBUG $FP -msimd128"
   EMU_DEFS="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID"
   EMU_LIBS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid"
-  apply_patches "$ROOT/spike/petsc-wasm/patches/petsc-*.patch"
-  apply_patches "$SPIKE/patches/petsc-wasi-*.patch"
+  apply_patches "$ROOT/scripts/deps/patches/petsc-wasi-*.patch"
+  apply_patches "$ROOT/scripts/deps/patches/petsc-0001-mmg-ptscotch-optional.patch"
   # Mmg's CMake (the arguments go into a shell command line, hence the inner quotes):
   # - no Perl: it would run the wasm genheader to write the Fortran header;
   # - libm of the wasi sysroot (find_library looks on the host);

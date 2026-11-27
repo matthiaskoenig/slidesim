@@ -11,7 +11,15 @@ The native dependencies are linked into slidesim (`deps/versions.env` pins their
 | PETSc | BSD-2-Clause |
 | libCEED | BSD-2-Clause |
 | PT-Scotch (Scotch) | CeCILL-C |
+| Mmg | LGPL-3.0-or-later |
 | f2cblaslapack (PETSc's C translation of the reference BLAS and LAPACK) | LAPACK's modified BSD license |
+
+Mmg, the remesher of the generated meshes, is linked statically into PETSc (natively into
+`libpetsc.so`, in WebAssembly into the module), with the patches of
+[`scripts/deps/patches`](https://github.com/matthiaskoenig/slidesim/tree/main/scripts/deps/patches).
+The LGPL lets a user relink slidesim with another or a modified Mmg; since slidesim is built from
+source (`scripts/deps/build-native.sh`, `scripts/deps/build-wasi.sh`), its build is the way to do
+so. slidesim itself stays MIT.
 
 bison and flex are build tools of PT-Scotch only and are not linked. MPI, and the compression
 libraries Scotch uses, come from the system.

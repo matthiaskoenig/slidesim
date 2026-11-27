@@ -30,7 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install system packages
-        # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
+        # cmake and m4 build PT-Scotch, Mmg and bison (flex and bison come from pinned tarballs);
+        # Mmg's CMake project also needs the C++ compiler of the image.
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.mpi-packages }} pkg-config python3 cmake m4
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -50,13 +51,13 @@ jobs:
           rm "$archive"
           echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
       - name: Native dependencies cache key
-        # The runner's OS release and MPI, the pinned versions and the build scripts (PETSc's
-        # configure).
+        # The runner's OS release and MPI, the pinned versions, the build scripts (PETSc's
+        # configure) and the patches of the dependencies.
         id: deps-key
         run: |
           . /etc/os-release
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
-          echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
+          echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
         id: deps-cache
         uses: actions/cache@v4

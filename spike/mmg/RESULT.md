@@ -6,6 +6,12 @@ into two areas, with a hole). The wasm build needs one small PETSc patch (PT-Sco
 Mmg) and CMake arguments for Mmg, no source patch of Mmg. The meshes are bitwise identical on one
 target across runs and, beyond G4, across all three hosts.
 
+Since Task 2 of milestone 4 the patches live in `scripts/deps/patches`: the PETSc patches of
+`spike/petsc-wasm/patches` as `petsc-wasi-*`, and `patches/petsc-wasi-0001-mmg-ptscotch-optional.patch`
+of this spike as `petsc-0001-mmg-ptscotch-optional.patch` (applied to every build). The builds of
+slidesim build Mmg themselves, with two Mmg patches, instead of the `--download-mmg` route below
+(see `scripts/deps/patches/README.md`).
+
 Date 2026-11-27, PETSc v3.26.1, Mmg 5.8.0, wasi-sdk 34.0, wasmtime 50.0.1, Node 24.21.0,
 spade 2.15.1. The machine was shared and loaded during every measurement (load average 19 to 37
 on 20 cores, see G5).

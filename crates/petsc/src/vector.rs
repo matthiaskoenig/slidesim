@@ -83,6 +83,14 @@ impl<'a> VecMut<'a> {
 }
 
 impl Vector {
+    /// Takes ownership of one reference to `raw`.
+    ///
+    /// # Safety
+    /// `raw` is a valid `Vec`, and the caller gives up its reference.
+    pub unsafe fn from_raw(raw: sys::Vec) -> Vector {
+        Vector { raw }
+    }
+
     /// A sequential vector of length `n` on `PETSC_COMM_SELF`.
     pub fn create_seq(_petsc: &Petsc, n: usize) -> Result<Vector> {
         let n = to_int(n, "vector length")?;

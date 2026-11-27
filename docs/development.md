@@ -17,9 +17,9 @@ dependencies are in [Installation](installation.md).
 | `crates/slidesim` | the command line, `slidesim run`, and the coupled runs |
 | `crates/test-support` | helpers of the tests, among them runs under `mpiexec` |
 | `testdata/` | meshes, maps, models, contracts and example studies of the tests |
-| `scripts/deps/` | the build of the native dependencies |
+| `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
 | `scripts/e2e/`, `scripts/bench/` | the end-to-end runs on real slides, and the benchmarks |
-| `spike/petsc-wasm/` | the milestone 0 spike: PETSc and libCEED from Rust in `wasm32-wasip1` |
+| `spike/petsc-wasm/`, `spike/mmg/` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`) |
 | `docs/` | these pages; `docs/superpowers/` holds the design documents and plans of the milestones, which are not part of the site |
 
 ## Tests
@@ -54,11 +54,26 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## WebAssembly dependencies
+
+The browser build links PETSc (with Mmg) and libCEED compiled for `wasm32-wasip1` with wasi-sdk,
+as static libraries in `deps/install/wasi`:
+
+```bash
+scripts/deps/build-wasi.sh       # into deps/install/wasi
+scripts/deps/wasi-smoke/run.sh   # in wasmtime: Mmg adapts a square, and prints nothing itself
+```
+
+Both builds, native and wasm, copy the sources and apply the patches of `scripts/deps/patches`;
+its `README.md` gives the reason and the upstream status of each patch, and the configure lines
+of the wasm build.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request: the format, Clippy,
 the tests and the doctests, on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 with MPICH, against
-the `native-check` dependencies, which it caches. `.github/workflows/docs.yml` builds these pages
+the `native-check` dependencies, which it caches (the key covers `deps/versions.env`, the build
+scripts and the patches). `.github/workflows/docs.yml` builds these pages
 (below).
 
 ## Benchmarks and end-to-end runs
