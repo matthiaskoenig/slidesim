@@ -334,8 +334,8 @@ Attributes (`ResultMeta`):
 ### Live API
 
 The browser build exposes the same arrays for a running simulation; the declarations are in
-`wasm/js/slidesim.d.ts` (type check: `npx --yes -p typescript@5.6.3 tsc --noEmit -p
-wasm/js/tsconfig.json`). `createSimulation(options)` resolves to a `Simulation` whose `mesh`
+`wasm/js/slidesim.d.ts` (type check: `npm run typecheck --prefix wasm/js`, TypeScript 5.6.3 of its
+lock), implemented by `wasm/js/slidesim.mjs`. `createSimulation(options)` resolves to a `Simulation` whose `mesh`
 holds `mesh/vertices`, `mesh/triangles`, `mesh/element` and `mesh/tags/*`, `times` is the `time`
 array and `meta` the `ResultMeta`. `step()` advances to the next output time and returns its index
 (`null` when done); `field(id)` is `fields/<id>` at the current time index, `cellIds` is
@@ -350,14 +350,22 @@ is the number of output times reached so far, as in `result/1` where an index `t
 complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh,
 and `log()` the array `log` (the quality line of a generated mesh). `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
 are supplied by the caller (the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`, and the map `zonation`); slidesim fixes no names.
-`CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error` naming the
-cap (it needs `slidesim` as bytes; Mmg's own cap of 2 GiB in wasm, below, holds above it). Each
-simulation has its own instance of `slidesim.wasm`, so a trap ends only the simulation it
-happened in.
+`CreateOptions.memory.maximumPages` caps the wasm memory: the maximum of the memory the host
+creates for the simulation, for a compiled module and bytes alike. Exceeding it is an `Error`
+naming the cap: an error of slidesim when PETSc's allocation failed (the simulation stays usable),
+a trap when Rust's or libCEED's did (the simulation is unusable). Mmg's own cap of 2 GiB in wasm,
+below, holds above it. Each simulation has its own instance of `slidesim.wasm` and its own
+memory, so a trap ends only the simulation it happened in. The getters of a `Simulation` throw
+after a trap and after `free()` like its methods; `mesh` is the simulation's own arrays, the same
+on every access (not copies).
 
 Under the live API lies the C ABI of `slidesim.wasm` (`crates/slidesim-wasm`, a WASI reactor,
-`_initialize` first), over its exported memory, pointers and lengths `u32` byte offsets and
-counts:
+`_initialize` first), over its memory, pointers and lengths `u32` byte offsets and counts. The
+module imports its memory, `env.memory`, which the host creates at the minimum of the import (the
+custom section `slidesim.memory` holds it as `{"minimum_pages": n}`, for hosts which cannot read
+the limits of an import, as JavaScript cannot), with the host's cap as its maximum, and gives to
+the kernel as well; the module exports it again as `memory` for WASI hosts which look for it
+there.
 
 | Export | Meaning |
 | --- | --- |
@@ -371,7 +379,7 @@ counts:
 
 `scene` and `study` are the documents, `kernel` the `kernel.json` of the batched kernel of the
 cell model (required with `cells`; the host compiles `kernel.wasm` from the SBML with
-sbmlsim-core's `compiler.wasm` and instantiates it with slidesim's memory and `mathlib.wasm`),
+sbmlsim-core's `compiler.wasm` and instantiates it with the same memory and `mathlib.wasm`),
 `mesh` a `mesh.json` of `slidesim mesh` in place of the scene's mesh. The build reads no files:
 a scene whose mesh (without `mesh`) or maps are files is an error naming the file.
 `slidesim.wasm` imports `slidesim_kernel.init`, `slidesim_kernel.advance` and

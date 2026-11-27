@@ -100,10 +100,13 @@ CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.tom
 (`deps/src/sbmlsim-core`) into `deps/install/sbmlsim-js`, compiles the kernel of the SPT model
 with that compiler in Node (`scripts/wasm/compile_kernel.mjs`, as a page compiles it), builds the
 native `slidesim` (`deps/install/native-check`, or `NATIVE_DEPS`) and `slidesim.wasm`, linked by
-wasi-sdk's `wasm-ld` against its wasi-libc, and writes their paths to `target/wasm/artifacts.env`.
+wasi-sdk's `wasm-ld` against its wasi-libc with an imported memory (`--import-memory`, from
+`crates/slidesim-wasm/build.rs`; `scripts/wasm/memory_section.mjs` records the minimum of the
+import in the custom section `slidesim.memory`), and writes their paths to
+`target/wasm/artifacts.env`.
 
 The tests of `wasm/host` run `slidesim.wasm` in wasmtime as a page runs it: the kernel
-instantiated with slidesim's memory and mathlib, slidesim's imports `slidesim_kernel.init`,
+instantiated with slidesim's memory (which the host creates, `env.memory`) and mathlib, slidesim's imports `slidesim_kernel.init`,
 `slidesim_kernel.advance` and `slidesim_kernel.assign` bound to it. `lobule_matches_native` runs the SPT study of an hour on
 the lobule (`testdata/studies/lobules/spt_1h.study.json`) natively and in wasm on the native
 mesh: the mesh arrays agree bitwise, the fields within 1e-5 of their maximum and the cell values
@@ -127,7 +130,7 @@ scripts/wasm/build.sh                     # also wasm/js/sbmlsim-core/ and the h
 npm ci --prefix wasm/js
 npx --prefix wasm/js playwright install chromium
 npm test --prefix wasm/js
-npx --yes -p typescript@5.6.3 tsc --noEmit -p wasm/js/tsconfig.json
+npm run typecheck --prefix wasm/js         # tsc of slidesim.d.ts (TypeScript of the lock)
 ```
 
 `test/node.test.mjs` runs the SPT study of 30 min on the generated lobule in Node (every mass

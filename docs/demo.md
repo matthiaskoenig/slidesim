@@ -18,13 +18,13 @@ computer, in a worker beside the page.
   [scene/1](contracts.md#mesh-sources)). The page names the tags itself: the area `tissue`, the
   walls `central_wall` and `portal_wall`, the outer boundary `field_cut` and the zonation map
   `zonation`.
-- **Mesh**: the element size at the vein walls and in the interior. The default (8 and 30 um,
-  about 3500 triangles) keeps a run light; the examples use 5 and 20 um.
+- **Mesh**: the element size at the vein walls and in the interior. The default (8 and 30 µm,
+  about 3500 triangles) keeps a run light; the examples use 5 and 20 µm.
 - **Simulation**: the simulated time. The study is that of
   `testdata/studies/lobules/spt_batched.study.json` ([Example studies](examples.md)): S enters
   at 5 mM through the portal veins, the flow carries it to the central vein, the cells take it up
   and give P back; the cell model runs on the batched kernel with a split step of 30 s, the linear
-  solves to 1e-6, an output every minute.
+  solves to `1e-6`, an output every minute.
 
 Start meshes and runs; Stop ends the run at once. **Show** selects a field (P1 values at the
 vertices, interpolated) or a value of the cells (one per element: the states of the model, its

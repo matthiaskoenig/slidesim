@@ -177,6 +177,22 @@ function setRunning(running) {
   for (const input of form.querySelectorAll("input")) input.disabled = running;
 }
 
+/** Empties the drawing of an earlier run: a failed one has none of its own. */
+function clearDrawing() {
+  canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  canvas.setAttribute("aria-label", "No simulation");
+  $("legend").hidden = true;
+  $("summary").hidden = true;
+  timeOutput.hidden = true;
+  $("placeholder").hidden = false;
+}
+
+/** The text over the empty drawing, until the first frame of a run. */
+function placeholder(text) {
+  const p = $("placeholder");
+  if (!p.hidden) p.textContent = text;
+}
+
 function showError(message) {
   errorBox.textContent = message;
   errorBox.hidden = false;
@@ -193,6 +209,8 @@ function start() {
   state.frame = null;
   state.done = false;
   const current = {
+    /** Until the run is done, failed or stopped. */
+    active: true,
     worker: null,
     mesh: null,
     frame: null,
@@ -204,9 +222,10 @@ function start() {
   progress.hidden = false;
   progress.removeAttribute("value");
   status.textContent = "Loading slidesim…";
+  placeholder("The lobule is meshed and set up in your browser…");
   loadAssets()
     .then((modules) => {
-      if (run !== current) return;
+      if (run !== current || !current.active) return;
       status.textContent = "Meshing the lobule and setting up the simulation…";
       const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
       current.worker = worker;
@@ -221,31 +240,41 @@ function start() {
 }
 
 function fail(current, message) {
-  if (run !== current) return;
+  if (run !== current || !current.active) return;
+  current.active = false;
   current.worker?.terminate();
   current.worker = null;
   setRunning(false);
   progress.hidden = true;
   status.textContent = "The run failed.";
+  if (!current.frame) clearDrawing();
+  placeholder("Nothing to draw: the run failed, see the message below.");
   showError(message);
 }
 
-/** Stops the run (if `say`, telling where). */
+/** Stops the run, also while slidesim loads (if `say`, telling where). */
 function stop(say = true) {
-  if (!run?.worker) return;
-  run.worker.terminate();
+  if (!run?.active) return;
+  run.active = false;
+  const loading = !run.worker;
+  run.worker?.terminate();
   run.worker = null;
   setRunning(false);
-  if (say) {
-    progress.value = run.frame ? run.frame.time / run.end : 0;
-    status.textContent = run.frame
-      ? `Stopped at t = ${run.frame.time} s.`
+  if (!say) return;
+  if (run.frame) {
+    progress.value = run.frame.time / run.end;
+    status.textContent = `Stopped at t = ${run.frame.time} s.`;
+  } else {
+    progress.hidden = true;
+    placeholder("Stopped before the first output time: press Start for a new run.");
+    status.textContent = loading
+      ? "Stopped while loading slidesim."
       : "Stopped before the first output time.";
   }
 }
 
 function receive(current, data) {
-  if (run !== current) return;
+  if (run !== current || !current.active) return;
   if (data.type === "mesh") {
     current.mesh = prepareMesh(data);
     current.fieldIds = data.meta.fields.map((f) => f.id);
@@ -267,10 +296,12 @@ function receive(current, data) {
       squares,
     };
     timeOutput.textContent = `t = ${data.time} s`;
+    timeOutput.hidden = false;
     progress.value = data.time / current.end;
     showTotals(current, data.summary);
     scheduleDraw();
   } else if (data.type === "done") {
+    current.active = false;
     current.worker?.terminate();
     current.worker = null;
     setRunning(false);
@@ -379,6 +410,11 @@ function draw() {
   $("low").textContent = format(range.low);
   $("high").textContent = format(range.high);
   $("units").textContent = kind === "field" ? `${name} in mM` : `${name} per element`;
+  $("legend").setAttribute(
+    "aria-label",
+    `Colour scale of ${name}: viridis from ${format(range.low)} (dark violet) to ` +
+      `${format(range.high)} (yellow)${kind === "field" ? " mM" : ""}`,
+  );
   canvas.setAttribute(
     "aria-label",
     `${name} on the lobule at t = ${current.frame.time} s, from ${format(range.low)} to ${format(range.high)}`,
@@ -448,9 +484,8 @@ function draw() {
   }
   const context = canvas.getContext("2d");
   context.putImageData(image, 0, 0);
-  // The walls: the veins and the outer boundary.
-  context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--wall");
-  context.lineWidth = Math.max(1, dpr);
+  // The walls (the veins and the outer boundary): a light line on a dark one, which stands out
+  // on every colour of the scale and on both themes' background.
   context.beginPath();
   for (const edges of walls) {
     for (let k = 0; k < edges.length; k += 2) {
@@ -458,6 +493,12 @@ function draw() {
       context.lineTo(px[edges[k + 1]], py[edges[k + 1]]);
     }
   }
+  context.lineJoin = "round";
+  context.strokeStyle = "rgba(0, 0, 0, 0.6)";
+  context.lineWidth = 2.5 * dpr;
+  context.stroke();
+  context.strokeStyle = "rgba(255, 255, 255, 0.95)";
+  context.lineWidth = 1 * dpr;
   context.stroke();
 }
 

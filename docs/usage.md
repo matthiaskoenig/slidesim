@@ -249,9 +249,12 @@ sim.free();
 
 `createSimulation` resolves at output index 0 (time 0); each `step()` advances to the next output
 time and returns its index, `null` at the end. Errors of slidesim are thrown as an `Error` with
-its message; a trap of the module (a panic, memory past the cap of `memory.maximumPages`) is an
-`Error` too, after which that simulation is unusable. A step blocks its thread, so a page runs the
-simulation in a worker, as the demo does.
+its message, and the simulation goes on. A trap of the module (a panic, an allocation of Rust or
+libCEED past the memory) is an `Error` too, after which that simulation is unusable.
+`memory: { maximumPages }` caps the memory of a simulation; past it, the `Error` names the cap,
+whether it is an error (PETSc's allocation) or a trap. Compile `slidesim.wasm` once
+(`WebAssembly.compile`) and pass the module to create many simulations, capped or not. A step
+blocks its thread, so a page runs the simulation in a worker, as the demo does.
 
 ## PETSc options
 

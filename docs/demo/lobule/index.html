@@ -30,7 +30,6 @@
       --primary-text: #ffffff;
       --primary-hover: #303f9f;
       --focus: #3f51b5;
-      --wall: rgba(29, 33, 48, 0.55);
       --error-bg: #fdecea;
       --error-text: #8a1c12;
       --radius: 6px;
@@ -47,7 +46,6 @@
       --primary-text: #12141a;
       --primary-hover: #9fa8da;
       --focus: #9fa8da;
-      --wall: rgba(227, 229, 238, 0.6);
       --error-bg: #3d1f1d;
       --error-text: #f6b8b2;
     }
@@ -63,7 +61,6 @@
         --primary-text: #12141a;
         --primary-hover: #9fa8da;
         --focus: #9fa8da;
-        --wall: rgba(227, 229, 238, 0.6);
         --error-bg: #3d1f1d;
         --error-text: #f6b8b2;
       }
@@ -196,13 +193,13 @@
     <section class="view" aria-label="Simulation">
       <div class="toolbar">
         <label>Show<select id="show" disabled><option>Start a run first</option></select></label>
-        <output id="time" for="show" aria-live="off">t = 0 s</output>
+        <output id="time" for="show" aria-live="off" hidden>t = 0 s</output>
       </div>
       <div class="stage">
         <canvas id="field" role="img" aria-label="No simulation yet"></canvas>
         <p id="placeholder" class="placeholder">Set the lobule and press Start: the mesh and the simulation run in your browser.</p>
       </div>
-      <div id="legend" class="legend" aria-label="Colour scale" hidden>
+      <div id="legend" class="legend" role="img" aria-label="Colour scale" hidden>
         <span id="low">-</span><span class="ramp"></span><span id="high">-</span>
         <span id="units"></span>
       </div>

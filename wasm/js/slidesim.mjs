@@ -8,12 +8,15 @@
 //
 // The modules and how they are linked, as in the wasmtime host of `wasm/host`:
 //
-// - `slidesim.wasm` imports a few functions of WASI preview 1, which this file implements over
-//   nothing (no files, no environment, no arguments; what slidesim writes to stdout and stderr is
-//   kept for the messages of a trap), and `slidesim_kernel.init`, `slidesim_kernel.advance` and
-//   `slidesim_kernel.assign`, which are bound late, to the kernel once it is instantiated.
+// - `slidesim.wasm` imports its memory (`env.memory`), which this file creates for each
+//   simulation (at the minimum the module records in its custom section `slidesim.memory`, with
+//   `memory.maximumPages` as its maximum), a few functions of WASI preview 1, which this file
+//   implements over nothing (no files, no environment, no arguments; what slidesim writes to
+//   stdout and stderr is kept for the messages of a trap), and `slidesim_kernel.init`,
+//   `slidesim_kernel.advance` and `slidesim_kernel.assign`, which are bound late, to the kernel
+//   once it is instantiated.
 // - The kernel (`compileKernel` of the SBML text with `compiler.wasm`) is instantiated after
-//   slidesim, with slidesim's exported memory and `mathlib.wasm`.
+//   slidesim, with the same memory and `mathlib.wasm`.
 //
 // Each simulation has its own instance of `slidesim.wasm`: after a trap (a panic, an allocation
 // past the memory cap) the instance is in the middle of a call and is discarded with its
@@ -97,88 +100,27 @@ async function toModule(source, what) {
   }
 }
 
-/** `source` as a `Uint8Array` over its bytes (a `BufferSource`). */
-function bytesOf(source, what) {
-  if (source instanceof Uint8Array) return source;
-  if (ArrayBuffer.isView(source)) {
-    return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
-  }
-  if (source instanceof ArrayBuffer) return new Uint8Array(source);
-  throw new TypeError(`${what} must be a WebAssembly.Module or its bytes`);
-}
-
-/** The unsigned LEB128 at `offset` of `bytes`: `[value, offset after it]`. */
-function readLeb(bytes, offset) {
-  let value = 0;
-  let shift = 0;
-  for (;;) {
-    if (offset >= bytes.length) throw new Error("slidesim.wasm is truncated");
-    const byte = bytes[offset++];
-    value += (byte & 0x7f) * 2 ** shift;
-    if ((byte & 0x80) === 0) return [value, offset];
-    shift += 7;
-    if (shift > 35) throw new Error("slidesim.wasm has an overlong LEB128 number");
-  }
-}
-
-/** `value` as unsigned LEB128. */
-function leb(value) {
-  const out = [];
-  do {
-    let byte = value % 128;
-    value = Math.floor(value / 128);
-    if (value > 0) byte |= 0x80;
-    out.push(byte);
-  } while (value > 0);
-  return out;
-}
+/** The custom section in which scripts/wasm/build.sh records the memory slidesim imports. */
+const MEMORY_SECTION = "slidesim.memory";
 
 /**
- * The bytes of a module whose memory (the one it defines, slidesim's) is capped at `pages` wasm
- * pages: a `memory.grow` past it gives -1, so an allocation fails (in Rust a trap, in C a NULL).
+ * The least memory `module` (slidesim.wasm) imports, in wasm pages: from its custom section
+ * `slidesim.memory`, since the JavaScript API cannot read the limits of an import.
  */
-function withMaximumPages(source, pages) {
-  const bytes = bytesOf(source, "slidesim");
-  if (bytes.length < 8 || bytes[0] !== 0 || bytes[1] !== 0x61 || bytes[2] !== 0x73) {
-    throw new Error("slidesim is not a wasm module");
+function minimumPages(module) {
+  const imports = WebAssembly.Module.imports(module);
+  if (!imports.some((i) => i.module === "env" && i.name === "memory" && i.kind === "memory")) {
+    throw new Error("slidesim.wasm does not import env.memory: build it with scripts/wasm/build.sh");
   }
-  let offset = 8;
-  while (offset < bytes.length) {
-    const start = offset;
-    const id = bytes[offset++];
-    let size;
-    [size, offset] = readLeb(bytes, offset);
-    const end = offset + size;
-    if (id !== 5) {
-      offset = end;
-      continue;
-    }
-    let count;
-    let p;
-    [count, p] = readLeb(bytes, offset);
-    if (count !== 1) throw new Error(`slidesim.wasm defines ${count} memories, not one`);
-    const flags = bytes[p++];
-    if (flags & ~0x03) throw new Error("slidesim.wasm has a memory which is not a wasm32 memory");
-    let minimum;
-    [minimum, p] = readLeb(bytes, p);
-    let maximum = MAX_PAGES;
-    if (flags & 0x01) [maximum, p] = readLeb(bytes, p);
-    if (p !== end) throw new Error("slidesim.wasm has a malformed memory section");
-    if (minimum > pages) {
-      throw new Error(
-        `slidesim.wasm needs at least ${minimum} wasm pages of memory, more than ` +
-          `memory.maximumPages ${pages}`,
-      );
-    }
-    const content = [...leb(1), flags | 0x01, ...leb(minimum), ...leb(Math.min(maximum, pages))];
-    const section = [5, ...leb(content.length), ...content];
-    const out = new Uint8Array(start + section.length + (bytes.length - end));
-    out.set(bytes.subarray(0, start), 0);
-    out.set(section, start);
-    out.set(bytes.subarray(end), start + section.length);
-    return out;
+  const [section] = WebAssembly.Module.customSections(module, MEMORY_SECTION);
+  const pages = section && JSON.parse(new TextDecoder().decode(section)).minimum_pages;
+  if (!Number.isInteger(pages) || pages < 1) {
+    throw new Error(
+      `slidesim.wasm has no custom section ${MEMORY_SECTION} with its least memory: build it ` +
+        "with scripts/wasm/build.sh",
+    );
   }
-  throw new Error("slidesim.wasm defines no memory");
+  return pages;
 }
 
 /** A `proc_exit` of slidesim: it ends the instance like a trap. */
@@ -338,9 +280,9 @@ function trapError(instance, what, cause) {
 
 /** An instance of `slidesim.wasm` with its kernel, and the calls of its C ABI. */
 class Instance {
-  constructor(exports, wasi, maximumPages) {
+  constructor(exports, memory, wasi, maximumPages) {
     this.exports = exports;
-    this.memory = exports.memory;
+    this.memory = memory;
     this.wasi = wasi;
     this.maximumPages = maximumPages;
     /** The `Error` of the trap which ended this instance, `null` while it lives. */
@@ -444,7 +386,7 @@ class Simulation {
 
   /** The instance, unless the simulation was freed or its instance trapped. */
   #live() {
-    if (this.#freed) throw new Error("the simulation was freed");
+    if (this.#freed) throw new Error("the simulation was freed: it is unusable");
     if (this.#instance.trap) throw this.#instance.unusable();
     return this.#instance;
   }
@@ -464,23 +406,29 @@ class Simulation {
     return index;
   }
 
+  /** The mesh: the same arrays on every access (see `SimulationMesh` in the declarations). */
   get mesh() {
+    this.#live();
     return this.#mesh;
   }
 
   get times() {
+    this.#live();
     return this.#times.slice();
   }
 
   get time() {
+    this.#live();
     return this.#time;
   }
 
   get meta() {
+    this.#live();
     return structuredClone(this.#meta);
   }
 
   get cellIds() {
+    this.#live();
     return this.#cellIds.slice();
   }
 
@@ -550,17 +498,19 @@ export async function createSimulation(options) {
         `memory.maximumPages must be an integer within 1 and ${MAX_PAGES}, got ${maximumPages}`,
       );
     }
-    if (slidesim instanceof WebAssembly.Module) {
-      throw new TypeError(
-        "memory.maximumPages needs slidesim as its bytes: the memory of a compiled module " +
-          "cannot be capped",
-      );
-    }
   }
 
-  const slidesimModule = await toModule(
-    maximumPages === undefined ? slidesim : withMaximumPages(slidesim, maximumPages),
-    "slidesim.wasm",
+  const slidesimModule = await toModule(slidesim, "slidesim.wasm");
+  // The memory slidesim imports and the kernel works in: created here, capped at maximumPages.
+  const initial = minimumPages(slidesimModule);
+  if (maximumPages !== undefined && initial > maximumPages) {
+    throw new Error(
+      `slidesim.wasm needs at least ${initial} wasm pages of memory, more than ` +
+        `memory.maximumPages ${maximumPages}`,
+    );
+  }
+  const wasmMemory = new WebAssembly.Memory(
+    maximumPages === undefined ? { initial } : { initial, maximum: maximumPages },
   );
   const mathlibModule = await toModule(mathlib, "mathlib.wasm");
   let kernel = null;
@@ -576,6 +526,7 @@ export async function createSimulation(options) {
     return bound[name];
   };
   const imports = {
+    env: { memory: wasmMemory },
     wasi_snapshot_preview1: wasi.imports,
     slidesim_kernel: {
       init: (n, parameters, state) => kernelCall("init")(n, parameters, state),
@@ -591,14 +542,14 @@ export async function createSimulation(options) {
   } catch (error) {
     throw new Error(`cannot instantiate slidesim.wasm: ${error.message}`, { cause: error });
   }
-  wasi.memory = exports.memory;
-  const instance = new Instance(exports, wasi, maximumPages);
+  wasi.memory = wasmMemory;
+  const instance = new Instance(exports, wasmMemory, wasi, maximumPages);
   if (typeof exports._initialize === "function") instance.call("_initialize");
   if (kernel) {
     bound = await instantiateKernel({
       wasm: kernel.wasm,
       mathlib: mathlibModule,
-      memory: exports.memory,
+      memory: wasmMemory,
     });
   }
 

@@ -148,7 +148,10 @@ test("lobule_runs_in_node", async () => {
     }
   }
   sim.free();
-  assert.throws(() => sim.field("S"), /freed/);
+  for (const call of [() => sim.field("S"), () => sim.step(), () => sim.mesh, () => sim.time]) {
+    assert.throws(call, /the simulation was freed: it is unusable/);
+  }
+  sim.free(); // twice is no error
 });
 
 test("node_matches_wasmtime", async () => {
@@ -312,7 +315,18 @@ test("trapped_simulation_is_unusable", async () => {
   } finally {
     performance.now = now;
   }
-  for (const call of [() => sim.step(), () => sim.field("S"), () => sim.summary(), () => sim.log()]) {
+  // Every later call throws, the getters included.
+  for (const call of [
+    () => sim.step(),
+    () => sim.field("S"),
+    () => sim.summary(),
+    () => sim.log(),
+    () => sim.mesh,
+    () => sim.times,
+    () => sim.time,
+    () => sim.meta,
+    () => sim.cellIds,
+  ]) {
     assert.throws(call, /the simulation is unusable: slidesim\.wasm trapped before/);
   }
   sim.free();
@@ -345,18 +359,38 @@ test("memory_option_is_checked", async () => {
   for (const maximumPages of [0, 1.5, 65537, "1024"]) {
     await assert.rejects(createSimulation({ ...options, memory: { maximumPages } }), RangeError);
   }
-  const compiled = await WebAssembly.compile(m.slidesim);
-  await assert.rejects(
-    createSimulation({ ...options, slidesim: compiled, memory: { maximumPages: 4096 } }),
-    /needs slidesim as its bytes/,
-  );
-  // Below the memory slidesim declares: refused before it runs.
+  // Below the memory slidesim imports: refused before it runs.
   await assert.rejects(
     createSimulation({ ...options, memory: { maximumPages: 1 } }),
     /needs at least \d+ wasm pages of memory, more than memory\.maximumPages 1/,
   );
-  // A compiled module runs without a cap.
-  const sim = await createSimulation({ ...options, slidesim: compiled });
-  assert.equal(sim.step(), 1);
-  sim.free();
+});
+
+test("compiled_module_runs_capped_simulations", async () => {
+  // A page compiles slidesim.wasm once and creates many simulations from it, each with the cap:
+  // the memory is the host's (slidesim imports it), so a compiled module is capped like bytes.
+  const m = await modules();
+  const slidesim = await WebAssembly.compile(m.slidesim);
+  const options = { ...m, slidesim, scene: lobuleScene({}, TAGS), study: diffusionStudy() };
+  const memory = { maximumPages: 4096 }; // 256 MiB
+  const first = await createSimulation({ ...options, memory });
+  const second = await createSimulation({ ...options, memory });
+  assert.equal(first.step(), 1);
+  assert.equal(second.step(), 1);
+  assert.equal(bits(first.field("S")), bits(second.field("S")));
+  first.free();
+  second.free();
+  // The cap holds for a compiled module: 61 lobules do not fit in 64 MiB.
+  await assert.rejects(
+    createSimulation({
+      ...options,
+      scene: lobuleScene({ rings: 4 }, TAGS),
+      memory: { maximumPages: 1024 },
+    }),
+    /needs more memory than its maximum of 1024 wasm pages \(64 MiB/,
+  );
+  // Without a cap too.
+  const uncapped = await createSimulation(options);
+  assert.equal(uncapped.step(), 1);
+  uncapped.free();
 });

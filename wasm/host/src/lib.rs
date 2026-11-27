@@ -12,9 +12,11 @@
 //!   scratch) -> i32` and `sbmlsim_kernel_assign(n, state, parameters, control) -> i32`, byte
 //!   offsets into the memory of slidesim). A kernel without `sbmlsim_kernel_assign` (before it
 //!   was added to sbmlsim-core) is linked too: `assign` is then an error if called, which slidesim
-//!   never does for such a kernel (it refuses outputs of rule targets without `assigned_ids`). The kernel imports the memory it works in, so it
-//!   is instantiated after slidesim, with slidesim's exported memory: the imports of slidesim
-//!   are bound late, to host functions which call the kernel once it is there.
+//!   never does for such a kernel (it refuses outputs of rule targets without `assigned_ids`).
+//!   slidesim imports its memory (`env.memory`): the host creates it, at the minimum of the
+//!   import and with the cap as its maximum, and gives the same memory to the kernel, which is
+//!   instantiated after slidesim: the imports of slidesim are bound late, to host functions which
+//!   call the kernel once it is there.
 //! - `mathlib.wasm` of sbmlsim-core (no imports), whose functions the kernel imports as `math.*`.
 //! - `kernel.wasm` with `env.memory` (slidesim's memory) and `math.*`.
 //!
@@ -23,8 +25,10 @@
 //! environment and no arguments; what slidesim writes to its stdout and stderr is kept in
 //! [`Outputs`] (it writes nothing there unless it panics: its log is the array `log`).
 //!
-//! Memory: [`run`] can cap each linear memory of the store at a number of wasm pages (64 KiB),
-//! with a wasmtime [`ResourceLimiter`]: a growth past the cap is refused (`memory.grow` gives -1,
+//! Memory: [`run`] can cap each linear memory of the store at a number of wasm pages (64 KiB):
+//! the memory it creates for slidesim and the kernel has the cap as its maximum, and a wasmtime
+//! [`ResourceLimiter`] holds every memory of the store to it (mathlib's too) and remembers a
+//! refused growth: a growth past the cap is refused (`memory.grow` gives -1,
 //! so a C `malloc` returns NULL and Rust's allocator aborts, a trap), and any failure of the run
 //! after a refused growth is reported as an error naming the cap. The host process lives on:
 //! a trap of slidesim is an error of [`run`], not a crash of the host. Every [`run`] instantiates the
@@ -38,7 +42,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::Value;
 use wasmtime::{
-    Caller, Engine, Instance, Linker, Memory, Module, ResourceLimiter, Store, TypedFunc,
+    Caller, Engine, ExternType, Instance, Linker, Memory, MemoryType, Module, ResourceLimiter,
+    Store, TypedFunc,
 };
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
@@ -254,8 +259,39 @@ impl Host {
         );
         store.limiter(|state| &mut state.limiter);
 
+        let host_error = |store: &mut Store<State>, e: wasmtime::Error, what: &str| {
+            memory_error(store.data(), max_pages)
+                .unwrap_or_else(|| anyhow::Error::from(e).context(what.to_string()))
+        };
+        // The memory slidesim imports, at the minimum of the import, the cap its maximum.
+        let minimum = memory_minimum(&slidesim_module)?;
+        let maximum = max_pages
+            .map(|pages| {
+                u32::try_from(pages)
+                    .ok()
+                    .filter(|&p| p <= 65536)
+                    .with_context(|| format!("a cap of {pages} wasm pages is beyond 4 GiB"))
+            })
+            .transpose()?;
+        if let Some(maximum) = maximum {
+            ensure!(
+                u64::from(maximum) >= minimum,
+                "slidesim.wasm needs at least {minimum} wasm pages of memory, more than the cap \
+                 of {maximum}"
+            );
+        }
+        let memory_type = MemoryType::new(
+            u32::try_from(minimum).context("the memory of slidesim.wasm is beyond 4 GiB")?,
+            maximum,
+        );
+        let memory = match Memory::new(&mut store, memory_type) {
+            Ok(memory) => memory,
+            Err(e) => return Err(host_error(&mut store, e, "cannot create the memory")),
+        };
+
         let mut linker: Linker<State> = Linker::new(&engine);
         p1::add_to_linker_sync(&mut linker, |state| &mut state.wasi)?;
+        linker.define(&store, "env", "memory", memory)?;
         linker.func_wrap(
             "slidesim_kernel",
             "init",
@@ -297,10 +333,6 @@ impl Host {
                 assign.call(&mut caller, (n, y, p, control))
             },
         )?;
-        let host_error = |store: &mut Store<State>, e: wasmtime::Error, what: &str| {
-            memory_error(store.data(), max_pages)
-                .unwrap_or_else(|| anyhow::Error::from(e).context(what.to_string()))
-        };
         let instance = match linker.instantiate(&mut store, &slidesim_module) {
             Ok(instance) => instance,
             Err(e) => {
@@ -316,7 +348,7 @@ impl Host {
                 .call(&mut store, ())
                 .map_err(|e| host_error(&mut store, e, "_initialize of slidesim.wasm failed"))?;
         }
-        let slidesim = Slidesim::new(&mut store, &instance)?;
+        let slidesim = Slidesim::new(&mut store, &instance, memory)?;
         let math = Linker::new(&engine)
             .instantiate(&mut store, &mathlib_module)
             .map_err(|e| host_error(&mut store, e, "cannot instantiate mathlib.wasm"))?;
@@ -534,10 +566,7 @@ impl Host {
 }
 
 impl Slidesim {
-    fn new(store: &mut Store<State>, instance: &Instance) -> Result<Slidesim> {
-        let memory = instance
-            .get_memory(&mut *store, "memory")
-            .context("slidesim.wasm exports no memory")?;
+    fn new(store: &mut Store<State>, instance: &Instance, memory: Memory) -> Result<Slidesim> {
         Ok(Slidesim {
             memory,
             alloc: instance.get_typed_func(&mut *store, "slidesim_alloc")?,
@@ -552,6 +581,19 @@ impl Slidesim {
             destroy: instance.get_typed_func(&mut *store, "slidesim_destroy")?,
         })
     }
+}
+
+/// The least memory `module` (slidesim.wasm) imports as `env.memory`, in wasm pages.
+fn memory_minimum(module: &Module) -> Result<u64> {
+    module
+        .imports()
+        .find_map(
+            |import| match (import.module(), import.name(), import.ty()) {
+                ("env", "memory", ExternType::Memory(ty)) => Some(ty.minimum()),
+                _ => None,
+            },
+        )
+        .context("slidesim.wasm does not import env.memory: build it with scripts/wasm/build.sh")
 }
 
 /// The kernel of the store of `caller`, once it is instantiated.

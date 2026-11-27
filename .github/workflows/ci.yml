@@ -178,7 +178,7 @@ jobs:
         env:
           HWLOC_COMPONENTS: -gl
         run: |
-          npx --yes -p typescript@5.6.3 tsc --noEmit -p wasm/js/tsconfig.json
           npm ci --prefix wasm/js
+          npm run typecheck --prefix wasm/js
           (cd wasm/js && npx playwright install --with-deps chromium)
           npm test --prefix wasm/js

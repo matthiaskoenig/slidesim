@@ -101,7 +101,11 @@ fi
 # bundled one. wasm-ld itself, not clang: for a cdylib rustc gives clang `-shared`, which makes a
 # module of position independent code. So the link line is the one clang gives a reactor
 # (`-mexec-model=reactor`): wasi-libc's crt1-reactor.o, whose `_initialize` (exported) runs the
-# constructors, libc and the builtins of compiler-rt.
+# constructors, libc and the builtins of compiler-rt. The memory is imported (`env.memory`,
+# `--import-memory`): the host creates it with the maximum it allows and gives the same memory to
+# the kernel; scripts/wasm/memory_section.mjs records its minimum in the custom section
+# `slidesim.memory`, which a JavaScript host reads from the compiled module (the link argument is
+# in crates/slidesim-wasm/build.rs).
 (
   # shellcheck source=/dev/null
   . "$ROOT/deps/install/wasi/env.sh"
@@ -116,6 +120,7 @@ fi
     --manifest-path "$ROOT/crates/slidesim-wasm/Cargo.toml"
 )
 cp "$OUT/wasm32-wasip1/release/slidesim_wasm.wasm" "$OUT/slidesim.wasm"
+node "$ROOT/scripts/wasm/memory_section.mjs" "$OUT/slidesim.wasm"
 
 if [[ "$BROWSER" == 0 ]]; then
   cat > "$OUT/artifacts.env" <<EOF

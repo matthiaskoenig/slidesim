@@ -6,7 +6,7 @@
 //!
 //! The cells run on the batched kernel of sbmlsim-core (`kernel/1`, `cells::KernelCells`): the
 //! host compiles the kernel of the cell model (`kernel.wasm` and its `kernel.json`, which the
-//! inputs carry), instantiates it with slidesim's exported memory and mathlib, and binds
+//! inputs carry), instantiates it with slidesim's memory and mathlib, and binds
 //! slidesim's imports `slidesim_kernel.init`, `slidesim_kernel.advance` and
 //! `slidesim_kernel.assign` to its `sbmlsim_kernel_init`, `sbmlsim_kernel_advance` and
 //! `sbmlsim_kernel_assign`. Only `"solver": "batched"` runs; the
@@ -15,6 +15,11 @@
 //! The build reads and writes no files: the inputs are JSON, the results arrays in memory. A
 //! scene whose mesh or maps are files is refused, naming the file, unless the inputs carry the
 //! mesh (`mesh`, the `mesh.json` of `slidesim mesh`).
+//!
+//! The memory is imported (`env.memory`, linked with `--import-memory` by `build.rs`) and
+//! exported again (`memory`, for WASI hosts): the host creates it at the minimum of the import,
+//! which `scripts/wasm/build.sh` records in the custom section `slidesim.memory`
+//! (`{"minimum_pages": n}`), with its cap as the maximum, and gives the same memory to the kernel.
 //!
 //! Exports (pointers and lengths are `u32` byte offsets and counts in slidesim's memory):
 //!
@@ -58,9 +63,9 @@
 //! A pointer with a length of 0 is never read, so it may be anything, 0 included (0 is a valid
 //! address in wasm, and the host need not allocate for an empty name or input).
 //!
-//! Memory: a wasm32 memory has at most 4 GiB; the host may cap it lower (`wasm/host`,
-//! `CreateOptions.memory` of the JavaScript API), and an allocation past the cap fails the call
-//! (a trap, or an error of PETSc or Mmg). Mmg, the remesher of the mesher, caps itself at 2 GiB
+//! Memory: a wasm32 memory has at most 4 GiB; the host may cap it lower (the maximum of the
+//! memory it creates: `wasm/host`, `CreateOptions.memory` of the JavaScript API), and an
+//! allocation past the cap fails the call (a trap, or an error of PETSc or Mmg). Mmg, the remesher of the mesher, caps itself at 2 GiB
 //! in wasm (the constant of `scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`: half the
 //! address space by Mmg's own rule): PETSc's adaptor sets no `MMG2D_IPARAM_mem`, so the cap of
 //! the host cannot reach Mmg's own limit.

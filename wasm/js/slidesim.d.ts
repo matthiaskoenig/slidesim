@@ -8,7 +8,8 @@
 // cap, a failure of a host function) leaves the module in the middle of a call: its instance is
 // discarded with the simulation in it, the call which trapped throws (or rejects) an `Error`
 // naming the trap (and the memory, when an allocation failed), and every later call of that
-// `Simulation` throws an `Error` saying that it is unusable. Each simulation has its own
+// `Simulation`, its getters included, throws an `Error` saying that it is unusable (as after
+// `free()`). Each simulation has its own
 // instance, so other simulations and the next `createSimulation` are not affected.
 
 /** Parameters of a lobule scene; the defaults are those of the Rust `LobuleSpec`. */
@@ -78,6 +79,11 @@ export interface ResultMeta {
   raster?: RasterMeta;
 }
 
+/**
+ * The mesh of a simulation: unlike the other arrays these are not copies but the simulation's
+ * own, the same on every access of `Simulation.mesh` and never changed by it. Do not modify them,
+ * and copy one before transferring its buffer to a worker (a transfer detaches it).
+ */
 export interface SimulationMesh {
   /** `[V, 2]` row-major, um. */
   vertices: Float64Array;
@@ -138,8 +144,10 @@ export interface CreateOptions {
   mesh?: object;
   /**
    * Caps the wasm memory of the simulation, in 64 KiB wasm pages (an integer within 1 and 65536,
-   * 4 GiB); exceeding it is an `Error` naming the cap (a trap or an error of slidesim). It needs
-   * `slidesim` as bytes: the memory of a compiled module cannot be capped. Mmg, the remesher of
+   * 4 GiB): the maximum of the memory the host creates for it (slidesim.wasm imports its memory),
+   * for a compiled module and bytes alike. Exceeding it is an `Error` naming the cap: an error of
+   * slidesim when the allocation which failed was PETSc's (the simulation stays usable), a trap
+   * when it was Rust's or libCEED's (the simulation is unusable afterwards). Mmg, the remesher of
    * the mesher, caps itself at 2 GiB in wasm (a constant of the Mmg patch of the wasi build), so
    * a cap below that is the one which holds; without a cap the browser's limit holds.
    */

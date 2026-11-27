@@ -119,3 +119,46 @@ test("lobule_demo_runs_in_chromium", { timeout: 240_000 }, async () => {
   assert.deepEqual(errors, [], "no console errors");
   await page.close();
 });
+
+test("stop_while_loading_cancels_the_run", { timeout: 120_000 }, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  // slidesim.wasm arrives only when the test lets it: the run is still loading.
+  let release;
+  const released = new Promise((resolve) => (release = resolve));
+  await page.route("**/slidesim.wasm", async (route) => {
+    await released;
+    await route.continue();
+  });
+  const workers = [];
+  page.on("worker", (worker) => workers.push(worker.url()));
+  await page.goto(`${origin}/index.html`);
+  await page.click("#start");
+  await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Loading"));
+  assert.equal(await page.isEnabled("#stop"), true);
+  await page.click("#stop");
+  assert.equal(await page.textContent("#status"), "Stopped while loading slidesim.");
+  assert.equal(await page.isEnabled("#start"), true);
+  assert.equal(await page.isEnabled("#stop"), false);
+  assert.equal(await page.isHidden("#progress"), true);
+  assert.equal(await page.isEnabled("#minutes"), true);
+  // The load finishes: the stopped run starts no worker.
+  release();
+  await page.waitForResponse("**/slidesim.wasm");
+  await page.waitForTimeout(500);
+  assert.deepEqual(workers, []);
+  assert.equal(await page.textContent("#status"), "Stopped while loading slidesim.");
+  assert.equal(await page.isHidden("#time"), true, "no time before a frame");
+  // A new run starts and draws.
+  await page.fill("#minutes", "1");
+  await page.click("#start");
+  await page.waitForFunction(() => window.lobuleDemo.done, null, { timeout: 100_000 });
+  assert.equal(await page.textContent("#time"), "t = 60 s");
+  assert.equal(workers.length, 1);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
