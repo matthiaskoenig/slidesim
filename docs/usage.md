@@ -22,10 +22,9 @@ digits), every result agrees across 1, 2 and 3 processes within 1e-10 relative, 
 check. At the default settings (linear solves to 1e-10, the cell tolerances of the study) runs
 agree within what the tolerances allow: on the generated lobule the fields of 1 and 2 processes
 differ by 5e-11, the cells by up to 1.4e-10, and a cell whose step control decides otherwise by
-its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve the cells to rtol
-1e-6 for speed; how far their runs on different numbers of processes differ is not measured,
-but it is bounded by the integration error at that tolerance. `slidesim run --help` describes
-the outputs.
+its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve the linear systems
+and the cells to 1e-6 for speed; how far their runs on different numbers of processes differ is
+not measured, but it is bounded by those errors. `slidesim run --help` describes the outputs.
 
 ## What a run does
 

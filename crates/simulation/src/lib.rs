@@ -310,11 +310,13 @@ impl<'p> Simulation<'p> {
         self.current = None;
         self.phases.end("output")?;
         let Some(&t) = self.study.time.outputs.get(self.next) else {
-            // `study/1` ends `time.outputs` at `time.end`: the run is there already.
-            debug_assert_eq!(
-                self.time(),
-                self.study.time.end,
-                "time.outputs ends at time.end"
+            // `study/1` ends `time.outputs` at `time.end`: the run is there already (up to the
+            // rounding of the time of the steps).
+            let end = self.study.time.end;
+            debug_assert!(
+                (self.time() - end).abs() <= 1e-12 * end.abs(),
+                "time.outputs ends at time.end: the time is {}, time.end {end}",
+                self.time()
             );
             if let (Some(coupled), Some(cells)) = (&self.coupled, &mut self.summary.cells) {
                 let stats = coupled.stats(&self.comm)?;

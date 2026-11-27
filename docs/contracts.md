@@ -384,7 +384,7 @@ there.
 | --- | --- |
 | `slidesim_alloc(len) -> ptr`, `slidesim_free(ptr, len)` | memory for the caller's bytes |
 | `slidesim_create(ptr, len) -> i32` | the simulation of the JSON `{"scene", "study", "kernel", "mesh"?}`: its handle, -1 with the error |
-| `slidesim_next_output(h) -> i32` | steps to the next output time: its index (the first at time 0 without a step), -1 when none is left (no step: the simulation stays at the last output time), -2 with the error |
+| `slidesim_next_output(h) -> i32` | steps to the next output time: its index (the first at `times[0]`, without a step), -1 when none is left (no step: the simulation stays at the last output time), -2 with the error |
 | `slidesim_time(h) -> f64` | the time reached (s) |
 | `slidesim_array(h, name_ptr, name_len) -> ptr`, `slidesim_array_len() -> u32` | the bytes of an array now, valid until the next `slidesim_array`; 0 with the error |
 | `slidesim_error_ptr() -> ptr`, `slidesim_error_len() -> u32` | the message of the last error (UTF-8) |
