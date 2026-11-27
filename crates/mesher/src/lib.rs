@@ -122,12 +122,22 @@ pub enum MesherError {
 /// Guaranteed for any input it accepts: every triangle has the area tag of the polygon it lies
 /// in, the triangles of an area cover its polygons exactly (the boundary and the interfaces keep
 /// their input vertices), and every tagged chain keeps its tags on every sub-edge and its length.
-/// The quality (`min_angle_deg`, `min_sicn`, `edge_ratio` against `size`, which includes the cap
-/// by the gap widths) is measured and returned, not enforced: for a size field which the
-/// boundary splitting resolves and gaps no narrower than `min / 1.6` (where the cap reaches its
-/// floor) the tests see a smallest angle of 20 degrees or more, a SICN of 0.4 or more and edge
-/// ratios within [0.4, 2.0]; inputs with sharper corners, narrower gaps or steeper size fields
-/// may give less, which the caller reads from the [`Quality`].
+/// The quality (`min_angle_deg`, `min_sicn`, `edge_ratio` against `size`, which includes the caps
+/// by the gap widths and the segment lengths) is measured and returned, not enforced. The tests
+/// see a smallest angle of 20 degrees or more, a SICN of 0.4 or more and edge ratios within
+/// [0.4, 2.0] when the input has
+///
+/// - a size field which the boundary splitting resolves (no jump over less than an element),
+/// - gaps no narrower than `min / 1.6` (where the gap cap reaches its floor `min / 4`),
+/// - input segments no shorter than `min / 4` (the cap by a segment's length, `1.5` times it,
+///   stops at the floor `min / 4`), and
+/// - no sharp corners of the boundary (the triangles at a corner of angle `t` have angles of at
+///   most `t` there);
+///
+/// the lobules of any valid spec, polygonized circles and the pixel steps of masks with pixels of
+/// `min / 4` or more are such inputs.
+/// Inputs with sharper corners, narrower gaps, shorter segments or steeper size fields may give
+/// less, which the caller reads from the [`Quality`].
 pub fn generate(
     petsc: &Petsc,
     domain: &Domain,

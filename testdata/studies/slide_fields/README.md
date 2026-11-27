@@ -33,15 +33,19 @@ Each folder holds:
   position (0 periportal, 1 pericentral), the CYP2E1 readout (0 to 1) and the necrosis calls
   (1 necrotic, 0 not), on the working grid of `zonation_layers.py`.
 - `spt.study.json`, `spt_batched.study.json`: the SPT cell model for 24 h on the engine and on
-  the batched path, the study of `../m3_real_slide/spt.study.json` on this field.
+  the batched path: `../m3_real_slide/spt.study.json`, adapted by hand (the scene and model
+  paths; `"solver": "batched"` in the second).
 
 The provenance attributes of the polygons (`meta`) and of the maps name the files they were made
-from, with their SHA-256, as paths of the machine which made them.
+from, with their SHA-256: `$SLIDEVIZ_DATA/...` relative to the slide folder (below),
+`$OUT/...` relative to the output folder of `scripts/e2e/m4_meshing.sh`.
 
 ## Provenance
 
-Made with slideviz commit `98b30a7` (branch `feat/tagged-polygons`) and slidesim branch
-`feat/m4-lobules` from the slides, the lumen masks `predictions/<animal>_lumen.npz`, the
+Made with slideviz commit `98b30a7` (branch `feat/tagged-polygons`: `zonation_layers.py`,
+`mesh_inputs.py`, `mesh/polygons.py`, `write_scene.py`) and slidesim's
+`scripts/e2e/m4_meshing.sh` as of the commit which last changed this folder (branch
+`feat/m4-lobules`, after `b0c84fa`), from the slides, the lumen masks `predictions/<animal>_lumen.npz`, the
 necrosis calls `predictions/mouse_apap_<animal>_he_necrosis.npz` and the CYP2E1 readouts
 `predictions/mouse_apap_<animal>_cyp2e1_readout.npz`, by:
 
@@ -62,10 +66,11 @@ holding a central lumen of at least 500 um^2 near the centre and as many portal 
 
 | Field | Triangles | Min angle | Min SICN | Mean SICN | Edge length / size |
 | --- | --- | --- | --- | --- | --- |
-| `000mg_m1` | 6002 | 15.95 deg | 0.458 | 0.956 | 0.35 to 1.56 |
-| `281mg_m1` | 13598 | 16.25 deg | 0.419 | 0.948 | 0.35 to 1.63 |
-| `500mg_m1` | 16782 | 16.35 deg | 0.447 | 0.944 | 0.35 to 1.70 |
+| `000mg_m1` | 6106 | 23.24 deg | 0.547 | 0.955 | 0.46 to 1.53 |
+| `281mg_m1` | 13791 | 23.03 deg | 0.498 | 0.948 | 0.43 to 1.63 |
+| `500mg_m1` | 17175 | 22.44 deg | 0.541 | 0.944 | 0.41 to 1.67 |
 
-The smallest angles and edge ratios are below the bounds of the generated meshes (20 deg, 0.4):
-the polygons keep edges of one pixel (1.77 um) of the masks, shorter than 0.4 of the 5 um
-triangles, see [the milestone 4 meshing results](../../../docs/results/2026-11-m4-meshing.md).
+All three meet the quality bounds of the mesher (20 deg, 0.4, [0.4, 2.0]): the polygons keep
+edges of one pixel (1.77 um) of the masks, and the size field is capped at 1.5 times the length
+of such a segment around its ends, see
+[the milestone 4 meshing results](../../../docs/results/2026-11-m4-meshing.md).

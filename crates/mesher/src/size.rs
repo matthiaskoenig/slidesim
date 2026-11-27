@@ -1,5 +1,5 @@
 //! The size field: the edge length as a function of the distance to the nearest wall, capped by
-//! the width of narrow gaps.
+//! the width of narrow gaps and by the length of short boundary segments.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -24,6 +24,16 @@ const GRADING: f64 = 0.3;
 /// `FLOOR min / FEATURE` gets no smaller elements (its quality is then reported, not bounded),
 /// which bounds the element count whatever the input.
 const FLOOR: f64 = 0.25;
+
+/// The cap of the size at the ends of a boundary segment in units of its length: the ends are
+/// input vertices, which every step keeps, so a segment much shorter than the field (a pixel
+/// step of a mask: 1.77 um under 5 um elements) would be an edge of metric length well below 1
+/// with elements of the full size beside it. With the cap the elements next to it are at most
+/// 1.5 times its length (an isosceles triangle on it has SICN 0.89; the edge ratio of the
+/// segment is at least `1 / (1.5 + GRADING / 2) = 0.6`), growing by [`GRADING`]. Segments of nearly the field's length (a polygonized circle
+/// of `ceil(2 pi r / h)` segments) need no cap and get none. Not below [`FLOOR`] `min`: shorter
+/// segments are reported, not bounded.
+const SEGMENT: f64 = 1.5;
 
 /// A boundary point and the nearest point of another segment are no gap if the boundary joins
 /// them within `PATH` times their distance. Two sides of a gap are joined only the long way
@@ -120,7 +130,10 @@ impl Threshold {
 /// it; not along it; not joined to the point along the boundary within twice the distance, see
 /// [`PATH`]) is at the distance `w`, the size is at most `0.4 w` (but not below `min / 4`),
 /// growing by 0.3 per um away from it. Narrow necks of tissue and chains close to each other so
-/// get elements which fit between their frozen boundaries.
+/// get elements which fit between their frozen boundaries. It is capped by the boundary
+/// segments too: at both ends of a segment of length `l` the size is at most `1.5 l` (but not
+/// below `min / 4`), growing by 0.3 per um away from them, so that the elements beside a short
+/// frozen segment (a pixel step of a mask) take its length ([`SEGMENT`]).
 #[derive(Clone, Debug)]
 pub struct Size {
     fields: Vec<Threshold>,
@@ -128,7 +141,8 @@ pub struct Size {
     min: f64,
     /// The largest `max` of the fields.
     max: f64,
-    /// The boundary points where the cap is below the field, with the cap.
+    /// The boundary points where a cap (of a gap or of a short segment) is below the field, with
+    /// the cap.
     gaps: Option<RTree<GeomWithData<[f64; 2], f64>>>,
     /// The smallest cap.
     gap_min: f64,
@@ -289,8 +303,9 @@ impl Size {
         Ok(size)
     }
 
-    /// The points of the rings and chains (every `min / 2` along each segment) where the cap is
-    /// below the field, with the cap.
+    /// The points of the rings and chains (every `min / 2` along each segment) where the cap by a
+    /// gap is below the field, and the ends of the segments where the cap by their length is,
+    /// with the cap.
     fn gaps(&self, domain: &Domain) -> Option<RTree<GeomWithData<[f64; 2], f64>>> {
         let segments = segments(domain);
         let tree = RTree::bulk_load(
@@ -312,6 +327,14 @@ impl Size {
         let mut gaps = Vec::new();
         for (i, &[a, b]) in segments.iter().enumerate() {
             let length = distance(a, b);
+            // A segment shorter than the field: its ends are frozen vertices, so the elements
+            // around it take its length (see [`SEGMENT`]).
+            let cap = (SEGMENT * length).max(floor);
+            for x in [a, b] {
+                if cap < self.field(x) {
+                    gaps.push(GeomWithData::new(x, cap));
+                }
+            }
             let direction = sub(b, a);
             let n = (2.0 * length / self.min).ceil().max(1.0) as usize;
             // The paths along the boundary from the ends of this segment, walked when needed.

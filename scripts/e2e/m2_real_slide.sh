@@ -17,7 +17,8 @@
 #
 # Nothing is written into SLIDEVIZ_DATA. Settings (environment variables, defaults in brackets):
 #   SLIDEVIZ_DATA        slides with their sidecars and predictions/ (required)
-#   SLIDEVIZ_REPO        the slideviz checkout [~/git/slideviz]
+#   SLIDEVIZ_REPO        the slideviz checkout [~/git/slideviz]; one with the gmsh mesher
+#                        build_mesh.py, retired in slideviz a5d287b (e.g. 98b30a7)
 #   SLIDE                slide stem without the stain [mouse_apap_000mg_m1]
 #   ANIMAL               prefix of the prediction files [SLIDE without "mouse_apap_"]
 #   LUMEN, NECROSIS      prediction files [SLIDEVIZ_DATA/predictions/ANIMAL_{lumen,necrosis}.npz]

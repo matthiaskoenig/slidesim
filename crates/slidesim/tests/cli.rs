@@ -1192,10 +1192,11 @@ fn polygons_area(path: &Path) -> f64 {
 }
 
 /// `slidesim mesh` of each real-slide field: the mesh has portal and central walls, covers the
-/// polygons exactly (the area of its triangles is that of the area features), and no triangle
-/// is worse than SICN 0.2. The fields miss the bounds of the generated meshes (min angle 20 deg,
-/// edge length / size from 0.4): their polygons have edges of one pixel (1.77 um) at 5 um
-/// triangles, see `docs/results/2026-11-m4-meshing.md`.
+/// polygons exactly (the area of its triangles is that of the area features), and meets the
+/// quality bounds of the mesher (min angle 20 deg, SICN 0.4, edge length / size within [0.4,
+/// 2.0]): the polygons keep pixel steps of 1.77 um under 5 um triangles, which the cap of the
+/// size by the segment lengths resolves (measured: min angle 22.4 deg, SICN 0.50, edge ratios
+/// 0.41 to 1.67).
 #[test]
 fn slide_field_examples_mesh() {
     let dir = scratch("slide_field_examples_mesh");
@@ -1225,10 +1226,12 @@ fn slide_field_examples_mesh() {
         let quality: Value =
             serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap())
                 .unwrap();
-        assert!(
-            quality["min_sicn"].as_f64().unwrap() >= 0.2,
-            "{field}: {quality}"
-        );
+        let number = |key: &str| quality[key].as_f64().unwrap();
+        assert!(number("min_angle_deg") >= 20.0, "{field}: {quality}");
+        assert!(number("min_sicn") >= 0.4, "{field}: {quality}");
+        let ratio = &quality["edge_ratio"];
+        let (lo, hi) = (ratio[0].as_f64().unwrap(), ratio[1].as_f64().unwrap());
+        assert!(lo >= 0.4 && hi <= 2.0, "{field}: {quality}");
     }
 }
 

@@ -667,6 +667,73 @@ fn narrow_neck_is_resolved() {
 }
 
 #[test]
+fn pixel_steps_are_resolved() {
+    // A wall of pixel steps under 5 um triangles, as the polygons of a slide mask have them: a
+    // 100 by 60 um area whose bottom side rises from x = 20 to 80 um in steps of one pixel
+    // (1.25 um up) after runs of 5, 2.5 and 1.25 um, and falls back the same way. The step
+    // vertices are frozen, so without a cap by the segment lengths the triangles on the 1.25 um
+    // edges reach 5 um inward.
+    let mut wall = vec![[0.0, 0.0], [20.0, 0.0]];
+    let (mut x, mut y) = (20.0, 0.0);
+    for run in [5.0, 2.5, 1.25, 1.25, 1.25, 2.5, 5.0, 1.25, 2.5] {
+        y += 1.25;
+        wall.push([x, y]);
+        x += run;
+        wall.push([x, y]);
+    }
+    let top = wall.clone();
+    for &[px, py] in top.iter().rev().skip(1) {
+        if px > 20.0 {
+            wall.push([100.0 - px, py]);
+        }
+    }
+    wall.dedup();
+    wall.push([100.0, 0.0]);
+    let mut ring = wall.clone();
+    ring.extend([[100.0, 60.0], [0.0, 60.0], [0.0, 0.0]]);
+    let p = Polygons {
+        areas: vec![area("tissue", vec![ring.clone()])],
+        edges: vec![
+            edge("wall", wall.clone()),
+            edge(
+                "cut",
+                vec![[100.0, 0.0], [100.0, 60.0], [0.0, 60.0], [0.0, 0.0]],
+            ),
+        ],
+    };
+    let shortest = ring
+        .windows(2)
+        .map(|w| dist(w[0], w[1]))
+        .fold(f64::INFINITY, f64::min);
+    assert_eq!(shortest, 1.25);
+    let petsc = Petsc::init(&[]).unwrap();
+    let domain = Domain::from_polygons(&p).unwrap();
+    let spec = SizeField {
+        min_um: 5.0,
+        max_um: 20.0,
+        dist_min_um: 10.0,
+        dist_max_um: 200.0,
+        walls: vec!["wall".to_string()],
+    };
+    let size = Size::new(&spec, &domain).unwrap();
+    let (mesh, q) = generate(&petsc, &domain, &size).unwrap();
+    assert_rel(
+        tag_length(&mesh, "wall"),
+        polyline_length(&wall),
+        1e-12,
+        "wall",
+    );
+    let total: f64 = mesh
+        .triangles
+        .iter()
+        .map(|&t| triangle_area(&mesh, t))
+        .sum();
+    assert_rel(total, ring_area(&ring), 1e-12, "area");
+    eprintln!("{q:?}");
+    assert_quality(&q);
+}
+
+#[test]
 fn fixture_mesh_is_stable() {
     // The fixture's mesh, bit for bit, on this target: a change of the mesher, spade, Mmg or the
     // PETSc build shows here.

@@ -37,7 +37,7 @@
   ],
   "attributes": {
     "provenance": {
-      "source": "/data/koeniglab/image.analysis/APAP/APAP_zarr/predictions/mouse_apap_000mg_m1_cyp2e1_readout.npz",
+      "source": "$SLIDEVIZ_DATA/predictions/mouse_apap_000mg_m1_cyp2e1_readout.npz",
       "sha256": "ede5e832d337dd221035ca623e2334b36832ead0fa9ab0cfaa608071a9a72174",
       "values": "cyp2e1_readout.py position / 250: the DAB between its window's low (0) and high (1)",
       "fill": "nearest",

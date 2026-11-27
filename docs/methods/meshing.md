@@ -47,7 +47,12 @@ as gmsh's Threshold field, \(h_\max\) everywhere without walls. Several such fie
 their minimum. Narrow parts of the domain cap it: at a point of the boundary whose nearest
 segment across (not joined to it along the boundary within twice the distance) is at the
 distance \(w\), the size is at most \(0.4\,w\) (but not below \(h_\min / 4\)), growing by 0.3 per
-um away from that point, so that the elements fit between the frozen boundaries of a neck.
+um away from that point, so that the elements fit between the frozen boundaries of a neck. Short
+boundary segments cap it too: at both ends of a segment of length \(l\) the size is at most
+\(1.5\,l\) (but not below \(h_\min / 4\)), growing by 0.3 per um away from them. Every input vertex
+is kept, so a segment much shorter than the size (a pixel step of a mask, 1.77 um under 5 um
+elements) is a frozen edge; with the cap the triangles beside it take its length (an isosceles
+triangle on it has SICN 0.89) instead of reaching 5 um inward.
 
 ## The steps
 
@@ -77,13 +82,15 @@ um away from that point, so that the elements fit between the frozen boundaries 
    replaces.
 6. **Quality.** The smallest angle, the SICN of every triangle (\(4\sqrt{3} A / (l_1^2 + l_2^2 +
    l_3^2)\), 1 for an equilateral triangle, 0 for a degenerate one) and the ratio of every edge
-   length to the size at its midpoint. It is measured and reported, not enforced: the lobules of
-   any valid scene meet a smallest angle of 20 degrees, a SICN of 0.4 and edge ratios within
-   [0.4, 2.0] (tested over rings 0 to 4, wall sizes 2 to 20 um, jitter 0 to 0.25), and so do
-   polygons whose size field the boundary splitting resolves and whose gaps are not narrower
-   than \(h_\min / 1.6\). The polygons of real slides keep edges of one mask pixel (1.77 um),
-   shorter than \(0.4\,h_\min\) at 5 um: next to them the smallest angles reach 14 to 16 degrees
-   and the SICN 0.41 ([milestone 4 meshing results](../results/2026-11-m4-meshing.md)).
+   length to the size at its midpoint. It is measured and reported, not enforced. The tests see
+   a smallest angle of 20 degrees, a SICN of 0.4 and edge ratios within [0.4, 2.0] when the size
+   field is one the boundary splitting resolves (no jump within less than an element), the gaps
+   are not narrower than \(h_\min / 1.6\), the input segments not shorter than \(h_\min / 4\)
+   (where both caps reach their floor) and the boundary has no sharp corners (the triangles at a
+   corner of angle \(t\) have angles of at most \(t\) there). The lobules of any valid scene
+   (tested over rings 0 to 4, wall sizes 2 to 20 um, jitter 0 to 0.25), polygonized circles and
+   pixel steps of masks with pixels of at least \(h_\min / 4\) are such inputs; the real-slide
+   fields are measured in the [milestone 4 meshing results](../results/2026-11-m4-meshing.md).
 
 ## Ideal lobules
 

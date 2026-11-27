@@ -17,8 +17,9 @@ are not part of CI.
   that made a step 29 times faster, the setup and output phases, and the coupled 24 h baseline of
   cells and fields on both paths.
 - **[M4: meshing real slides](2026-11-m4-meshing.md)**: slidesim's mesher on slideviz's tagged
-  polygons of real slides against slideviz's gmsh meshes (the gmsh step stays: slidesim's
-  triangles at one-pixel edges are worse), and three real fields as example scenes.
+  polygons of real slides against slideviz's gmsh meshes (passing, after a cap of the size at
+  short boundary segments; slideviz retires its gmsh step), and three real fields as example
+  scenes.
 - **[Cells on dosed slides (deferred)](m3-dosed-slides.md)**: the SPT cell model for 24 h on
   dosed slides, the simulated necrosis against the measured one; deferred to later, larger
   hardware, not part of milestone 3.

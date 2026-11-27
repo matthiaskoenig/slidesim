@@ -183,16 +183,17 @@ cropped to the field:
 
 | Field | Coarse mesh | Quality |
 | --- | --- | --- |
-| `000mg_m1` | 6,002 triangles, 3,160 vertices | min angle 16.0 deg, SICN min 0.46, edge length / size 0.35 to 1.56 |
-| `281mg_m1` | 13,598 triangles, 7,102 vertices | min angle 16.3 deg, SICN min 0.42, edge length / size 0.35 to 1.63 |
-| `500mg_m1` | 16,782 triangles, 8,755 vertices | min angle 16.4 deg, SICN min 0.45, edge length / size 0.35 to 1.70 |
+| `000mg_m1` | 6,106 triangles, 3,229 vertices | min angle 23.2 deg, SICN min 0.55, edge length / size 0.46 to 1.53 |
+| `281mg_m1` | 13,791 triangles, 7,208 vertices | min angle 23.0 deg, SICN min 0.50, edge length / size 0.43 to 1.63 |
+| `500mg_m1` | 17,175 triangles, 8,961 vertices | min angle 22.4 deg, SICN min 0.54, edge length / size 0.41 to 1.67 |
 
-The polygons keep edges of one pixel (1.77 um) of the masks, so the smallest angles and edge
-ratios are below those of the generated lobules
+The polygons keep edges of one pixel (1.77 um) of the masks; the size is capped at 1.5 times the
+length of such a segment around it ([Meshing](methods/meshing.md)), so the fields meet the
+quality bounds of the generated lobules
 ([milestone 4 meshing results](results/2026-11-m4-meshing.md)). The studies are
-`m3_real_slide/spt.study.json` on each field: 24 h, CYP2E1 from the `cyp2e1` map, pattern 6 where
-the `necrosis` map is above 0.5; `spt.study.json` on the engine path, `spt_batched.study.json` on
-the batched one.
+`m3_real_slide/spt.study.json` on each field, adapted by hand: 24 h, CYP2E1 from the `cyp2e1`
+map, pattern 6 where the `necrosis` map is above 0.5; `spt.study.json` on the engine path,
+`spt_batched.study.json` on the batched one.
 
 ```bash
 target/release/slidesim mesh testdata/studies/slide_fields/281mg_m1/scene.json --out mesh

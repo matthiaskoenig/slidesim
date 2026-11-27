@@ -37,7 +37,7 @@
   ],
   "attributes": {
     "provenance": {
-      "source": "/data/koeniglab/image.analysis/APAP/APAP_zarr/predictions/mouse_apap_000mg_m1_he_necrosis.npz",
+      "source": "$SLIDEVIZ_DATA/predictions/mouse_apap_000mg_m1_he_necrosis.npz",
       "sha256": "d02143856a2e52a87f6a10061db1a9bc897ed56223ba8c04699d29cf6b71d5e2",
       "values": "call_E, 1 necrotic, 0 not",
       "cutoff": 0.775,

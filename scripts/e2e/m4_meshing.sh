@@ -5,13 +5,18 @@
 #    inputs of a 500 um square of slideviz (mesh_inputs.py), its tagged polygons (polygons.py,
 #    variant follow) and the polygons scene with the zonation, cyp2e1 and necrosis maps
 #    (write_scene.py --polygons), copied into OUT/slide_fields/<animal> in the layout of the
-#    examples (scene.json, polygons.geojson, <map>.zarr).
+#    examples (scene.json, polygons.geojson, <map>.zarr), the paths of their provenance relative
+#    to SLIDEVIZ_DATA and OUT (written "$SLIDEVIZ_DATA/..." and "$OUT/...", with the SHA-256 of
+#    each file).
 # 2. compare: the 1500 um fields of milestones 2 (000mg_m1) and 3 (281mg_m1), meshed by gmsh
 #    (slideviz build_mesh.py, variant plain, 5:20 um) and by slidesim from the polygons of
 #    variant plain (5:20 um); `slidesim mesh` of both scenes, and the criteria of the comparison
 #    as Markdown tables (m4_meshing/compare.py) in OUT/compare.md.
+#    It needs slideviz's gmsh mesher, retired after the comparison (a5d287b): a slideviz checkout
+#    at 98b30a7 (SLIDEVIZ_REPO) with the gmsh environment of its mesh/pixi.toml.
 #
-# Nothing is written into SLIDEVIZ_DATA. Settings (environment variables, defaults in brackets):
+# Needs uv, jq and pixi. Nothing is written into SLIDEVIZ_DATA. Settings (environment variables,
+# defaults in brackets):
 #   SLIDEVIZ_DATA   slides with their sidecars and predictions/ (required)
 #   SLIDEVIZ_REPO   the slideviz checkout [~/git/slideviz]
 #   OUT             output folder [target/e2e/m4_meshing]
@@ -68,6 +73,16 @@ field() {
         --out "$dir/scene" >/dev/null
 }
 
+# JSON on stdin with the paths of the provenance (the files the polygons and maps were made from)
+# relative to their roots: "$SLIDEVIZ_DATA/..." for the slides and predictions, "$OUT/..." for the
+# intermediates of this script. Extra arguments go to jq.
+relocate() {
+    jq "$@" --arg data "$SLIDEVIZ_DATA/" --arg out "$OUT/" 'walk(
+        if type == "string" and startswith($data) then "$SLIDEVIZ_DATA/" + .[($data | length):]
+        elif type == "string" and startswith($out) then "$OUT/" + .[($out | length):]
+        else . end)'
+}
+
 fields() {
     local spec animal row col dst
     for spec in "000mg_m1 14120 15016" "281mg_m1 11656 28904" "500mg_m1 8072 15016"; do
@@ -77,10 +92,18 @@ fields() {
         dst=$OUT/slide_fields/$animal
         rm -rf "$dst"
         mkdir -p "$dst"
-        cp "$OUT/fields/$animal"/polygons/*.geojson "$dst/polygons.geojson"
+        relocate -c <"$(ls "$OUT/fields/$animal"/polygons/*.geojson)" >"$dst/polygons.geojson"
         cp -r "$OUT/fields/$animal"/scene/maps/*.zarr "$dst/"
+        for zarr in "$dst"/*.zarr/zarr.json; do
+            relocate <"$zarr" >"$zarr.new"
+            mv "$zarr.new" "$zarr"
+        done
         jq '.mesh.path = "polygons.geojson" | .maps |= map(.path = (.id + ".zarr"))' \
             "$OUT/fields/$animal/scene/scene.json" >"$dst/scene.json"
+        if grep -rqIE '"/[^"]' "$dst"; then
+            echo "an absolute path is left in $dst" >&2
+            exit 1
+        fi
         "$SLIDESIM" mesh "$dst/scene.json" --out "$OUT/fields/$animal/mesh"
     done
 }
@@ -91,6 +114,7 @@ compare() {
     for spec in "000mg_m1 10114 16388" "281mg_m1 9336 30608"; do
         read -r animal row col <<<"$spec"
         dir=$OUT/compare/$animal
+        rm -rf "${dir:?}"
         log "comparison on $animal at ($row, $col), 1500 um"
         field "$animal" "$row" "$col" 1500 follow "$dir/follow"
         field "$animal" "$row" "$col" 1500 plain "$dir/plain"

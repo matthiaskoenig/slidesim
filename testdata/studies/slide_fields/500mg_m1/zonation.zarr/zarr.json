@@ -37,8 +37,8 @@
   ],
   "attributes": {
     "provenance": {
-      "source": "/home/mkoenig/git/slidesim/.superpowers/sdd/2026-11-26-slidesim-m4-lobules/scratch/t8/e2e/zonation/mouse_apap_500mg_m1_cyp2e1_lobules.npz",
-      "sha256": "4299b44b013bfb43321279b8389b0eaeeecad589602f7a8dfd82975c243b4f96",
+      "source": "$OUT/zonation/mouse_apap_500mg_m1_cyp2e1_lobules.npz",
+      "sha256": "d6d9e50d0d5d41ecb84388ba5a3fd3d8fd34cb52687844c75e98e6a7eccd93f2",
       "values": "zonation position, 0 periportal, 1 pericentral",
       "fill": "nearest",
       "filled_share": 0.0
