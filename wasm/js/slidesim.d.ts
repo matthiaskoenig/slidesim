@@ -6,17 +6,17 @@
 export interface LobuleParams {
   /** Circumradius of the hexagonal lobule in um, > 0 (default 300). */
   lobuleRadiusUm?: number;
-  /** Rings of neighbouring lobules (default 0). */
+  /** Rings of neighbouring lobules, an integer >= 0 (default 0). */
   rings?: number;
   /** Vein displacement as a fraction of the radius, 0 <= jitter <= 0.25 (default 0). */
   jitter?: number;
-  /** Seed of the displacements (default 0). */
+  /** Seed of the displacements (default 0); above 2^53 it loses precision in JS. */
   seed?: number;
   /** Radius of the central veins in um (default 30). */
   centreRadiusUm?: number;
   /** Radius of the corner veins in um (default 25). */
   cornerRadiusUm?: number;
-  /** Element size near the walls in um (default 5). */
+  /** Element size near the walls in um (default 5), at most `interiorSizeUm`. */
   wallSizeUm?: number;
   /** Element size in the interior in um (default 20). */
   interiorSizeUm?: number;
@@ -56,7 +56,7 @@ export interface RasterMeta {
 
 /** The root attributes of `result.zarr`: the JSON of the Rust `ResultMeta`. */
 export interface ResultMeta {
-  version: string;
+  version: "result/1";
   study: string;
   scene: string;
   refinements: number;
@@ -80,6 +80,14 @@ export interface SimulationMesh {
   tags: Record<string, Uint32Array>;
 }
 
+/**
+ * A running simulation. After `createSimulation` resolves it is at output index 0, the initial
+ * state: `time === times[0]`, `field()` and `cellValues()` return the values at index 0 and
+ * `meta.written === 1`. Each `step()` advances to the next output index and returns it (the
+ * first call returns 1), or returns `null` when there is none left, after which
+ * `meta.complete` is true. `written` is the number of output times reached so far, as in the
+ * `result/1` store where an index `t < written` is complete.
+ */
 export interface Simulation {
   readonly mesh: SimulationMesh;
   /** All output times in s. */
@@ -96,6 +104,8 @@ export interface Simulation {
   /** Per-element values `[C]` of a cell value at the current time, a copy the caller owns. */
   cellValues(name: string): Float64Array;
   summary(): object;
+  /** The quality report of a generated mesh, `null` for a loaded mesh. */
+  meshQuality(): object | null;
   /** Release the wasm memory; the simulation is unusable afterwards. */
   free(): void;
 }
@@ -112,7 +122,7 @@ export interface CreateOptions {
   study: object;
   /** A prebuilt mesh, when the scene's source is not generated in the browser. */
   mesh?: object;
-  /** Caps the wasm memory; exceeding it is an `Error`. */
+  /** Caps the wasm memory, in 64 KiB wasm pages; exceeding it is an `Error`. */
   memory?: { maximumPages: number };
 }
 

@@ -799,13 +799,16 @@ and its parent `docs/superpowers/specs/2026-11-24-slidesim-design.md`.
 **Interfaces:**
 - Consumes: Task 16's exports, sbmlsim-core's `js/compile.mjs` and `js/kernel.mjs`.
 - Produces:
-  - `lobuleScene(params) -> object` (a `scene/1` with a lobule source, the defaults of Task 3,
-    tags `tissue`, `central_wall`, `portal_wall`, `field_cut`, map `zonation`).
-  - `createSimulation({ slidesim, compiler, mathlib, sbml, scene, study, mesh? }) -> Promise<Simulation>`
+  - `lobuleScene(params, tags) -> object` (a `scene/1` with a lobule source, the defaults of
+    Task 3; the tag and map names are supplied by the caller, the demo passes `tissue`,
+    `central_wall`, `portal_wall`, `field_cut` and `zonation`; `wasm/js/slidesim.d.ts` is the
+    fixed declaration, Task 3b).
+  - `createSimulation({ slidesim, compiler, mathlib, sbml, scene, study, mesh?, memory? }) -> Promise<Simulation>`
+    (`memory: { maximumPages }` caps the wasm memory in 64 KiB pages, exceeding it is an `Error`)
     (modules or bytes; compiles the kernel with `compileKernel`); `sim.mesh` `{ vertices: Float64Array, triangles: Uint32Array, element: BigUint64Array, tags }`,
     `sim.times`, `sim.time`, `sim.step() -> number | null`, `sim.field(id) -> Float64Array`,
     `sim.cellIds -> BigUint64Array`, `sim.cellValues(name) -> Float64Array`, `sim.summary() -> object`,
-    `sim.free()`; slidesim's errors rejected or thrown as `Error` with its message.
+    `sim.meshQuality() -> object | null`, `sim.free()`; slidesim's errors rejected or thrown as `Error` with its message.
   - The demo page: lobule parameters, start/stop, field and cell value select, the field drawn
     on a canvas, time and the summary's totals.
 

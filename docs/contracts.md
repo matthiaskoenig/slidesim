@@ -288,6 +288,13 @@ holds `mesh/vertices`, `mesh/triangles`, `mesh/element` and `mesh/tags/*`, `time
 array and `meta` the `ResultMeta`. `step()` advances to the next output time and returns its index
 (`null` when done); `field(id)` is `fields/<id>` at the current time index, `cellIds` is
 `cells/element` and `cellValues(name)` is `cells/<name>` at the current time index. The arrays
-are copies the caller owns. `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
-are supplied by the caller (for example `central_vein` or `periportal`), slidesim fixes none.
+are copies the caller owns.
+
+Live semantics: after `createSimulation` resolves the simulation is at output index 0, the
+initial state: `time == times[0]`, `field()` and `cellValues()` return the values at index 0, and
+`meta.written == 1`. Each `step()` advances to the next output index and returns it (the first
+`step()` returns 1) and `null` when there is none left; then `meta.complete` is true. `written`
+is the number of output times reached so far, as in `result/1` where an index `t < written` is
+complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh. `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
+are supplied by the caller (the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`, and the map `zonation`); slidesim fixes no names.
 `CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error`.

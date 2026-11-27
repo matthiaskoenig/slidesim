@@ -20,6 +20,10 @@
 //! undistributed mesh; the id of a finest triangle is `(coarse << (2 * level)) | child bits`. The
 //! triangles of `mesh/triangles` are sorted by that fine id, the vertices are numbered by first
 //! appearance in that order, and `mesh/element` holds the coarse id of each triangle.
+//!
+//! `written` is the number of output times reached so far; in a finished run `complete` is true
+//! and `written == times.len()`. The live API (`wasm/js/slidesim.d.ts`) says the same: a created
+//! simulation has `written == 1` (the initial state at `times[0]`), each step reaches one more.
 
 use std::collections::HashSet;
 
@@ -133,6 +137,24 @@ impl ResultMeta {
                 return bad(format!("duplicate field id '{}' in fields", f.id));
             }
         }
+        let mut names = HashSet::new();
+        for t in &self.tags {
+            if !(1..=2).contains(&t.dim) {
+                return bad(format!(
+                    "tag '{}': dim must be 1 or 2, got {}",
+                    t.name, t.dim
+                ));
+            }
+            if !names.insert(t.name.as_str()) {
+                return bad(format!("duplicate tag name '{}' in tags", t.name));
+            }
+        }
+        let mut values = HashSet::new();
+        for v in &self.cell_values {
+            if !values.insert(v.as_str()) {
+                return bad(format!("duplicate name '{v}' in cell_values"));
+            }
+        }
         if let Some(r) = &self.raster {
             if r.levels < 1 {
                 return bad("raster levels must be >= 1".to_string());
@@ -143,6 +165,9 @@ impl ResultMeta {
                     r.shapes.len(),
                     r.levels
                 ));
+            }
+            if let Some(l) = r.shapes.iter().position(|s| s[0] == 0 || s[1] == 0) {
+                return bad(format!("raster shapes of level {l} must be non-zero"));
             }
             if r.um_per_px.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
                 return bad(format!("raster um_per_px must be > 0, got {}", r.um_per_px));

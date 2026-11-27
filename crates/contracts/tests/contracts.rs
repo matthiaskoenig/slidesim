@@ -864,8 +864,24 @@ fn result_meta_rejects() {
         ("levels", "levels"),
         ("shapes", "shapes"),
         ("um-per-px", "um_per_px"),
+        ("tag-dim", "dim"),
+        ("duplicate-tag", "tissue"),
+        ("duplicate-cell-value", "protein"),
+        ("shape-zero", "shapes"),
     ] {
         let e = result_meta(&format!("result-meta-bad-{name}.json")).unwrap_err();
         assert!(e.contains(word), "{name}: {e}");
+    }
+}
+
+#[test]
+fn result_schema_rejects_what_it_can_express() {
+    // Rules JSON Schema cannot state (uniqueness by key, cross-field rules) are only in `check`.
+    for name in ["unknown-field", "version", "levels", "um-per-px", "tag-dim"] {
+        let file = format!("result-meta-bad-{name}.json");
+        assert!(!schema_accepts(contracts::schema_result(), &file), "{name}");
+    }
+    for file in ["result-meta-minimal.json", "result-meta-raster.json"] {
+        assert!(schema_accepts(contracts::schema_result(), file), "{file}");
     }
 }
