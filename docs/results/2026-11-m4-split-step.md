@@ -11,7 +11,9 @@ mesh 0.69 % at 4 h but 4.2 % at 1 h), and on the 7 lobules the S uptake in the f
 off by 1.7 % at the end and 13 % at 5 min. The necrosis numbers come from a coarser mesh over
 4 h and are not measured on the production mesh at 24 h (see Setup). The splitting is of order 1.3 to 1.7 over the measured split steps, because a cell
 step of seconds to minutes is long against the few seconds in which the perfusion refills a
-cell's blood. The example studies keep `split_step` 60 s until the user decides.
+cell's blood. The lobule and slide field example SPT studies use `split_step` 30 s since the commit
+"feat(examples): split step 30 s in the SPT examples" (the user's decision of 2026-11-27); a
+supply-aware coupling is a separate design task after milestone 4.
 
 ## Setup
 

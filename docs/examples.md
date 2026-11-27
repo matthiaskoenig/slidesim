@@ -155,7 +155,11 @@ refinement), the model's own necrosis threshold, and the linear solves of the tr
 thousandth of that of the time steps, [performance](results/2026-11-m4-performance.md)).
 `spt.study.json` and `ring1_spt.study.json` take the engine path, the `_batched` studies the
 batched one. `spt_quick.study.json` is `spt_batched.study.json` on the unrefined mesh for 1 h,
-a run of seconds, the default case of `scripts/bench/coupled.sh`.
+a run of seconds, the default case of `scripts/bench/coupled.sh`. The lobule and slide field SPT
+studies use `cells.split_step` 30 s since the commit "feat(examples): split step 30 s in the SPT
+examples" ([split step](results/2026-11-m4-split-step.md)); `cells_toy/spt.study.json` and
+`m3_real_slide/spt.study.json` keep 60 s. A supply-aware coupling of the cells to their blood is a
+separate design task after milestone 4.
 
 ```bash
 target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh

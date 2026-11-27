@@ -51,7 +51,7 @@
       {"id": "protein_ext", "value": {"map": "cyp2e1", "points": [[0, 0], [0.7405, 1]]}},
       {"id": "position", "value": {"map": "zonation", "points": [[0, 0], [1, 1]]}}
     ],
-    "split_step": 60.0,
+    "split_step": 30.0,
     "outputs": ["protein"]
   },
   "solver": {"linear_rtol": 1e-6},
