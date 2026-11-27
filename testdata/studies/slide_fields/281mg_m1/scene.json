@@ -1,0 +1,56 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {
+    "length": "um"
+  },
+  "mesh": {
+    "format": "polygons",
+    "path": "polygons.geojson",
+    "size": {
+      "min_um": 5.0,
+      "max_um": 20.0,
+      "dist_min_um": 10.0,
+      "dist_max_um": 200.0,
+      "walls": [
+        "vessel_wall",
+        "portal_wall",
+        "central_wall",
+        "section_edge",
+        "necrosis_border"
+      ]
+    }
+  },
+  "maps": [
+    {
+      "id": "zonation",
+      "path": "zonation.zarr",
+      "units": "1",
+      "um_per_px": 1.7685842225042125,
+      "origin_um": [
+        6135.218667867113,
+        2322.1510841480313
+      ]
+    },
+    {
+      "id": "cyp2e1",
+      "path": "cyp2e1.zarr",
+      "units": "1",
+      "um_per_px": 1.7685842225042125,
+      "origin_um": [
+        6135.218667867113,
+        2322.1510841480313
+      ]
+    },
+    {
+      "id": "necrosis",
+      "path": "necrosis.zarr",
+      "units": "1",
+      "um_per_px": 1.7685842225042125,
+      "origin_um": [
+        6135.218667867113,
+        2322.1510841480313
+      ]
+    }
+  ]
+}

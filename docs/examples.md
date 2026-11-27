@@ -3,7 +3,8 @@
 The studies under `testdata/studies/` run end to end in the tests of `crates/slidesim`, and
 show the parts of `study/1` one at a time. The gmsh meshes are written by
 `testdata/meshes/make_fixtures.py`, named as slideviz names its tags; the lobule studies run on
-meshes slidesim generates.
+meshes slidesim generates, the real-slide fields on meshes slidesim makes of slideviz's tagged
+polygons.
 
 | Study | Scene | What it shows |
 | --- | --- | --- |
@@ -14,6 +15,7 @@ meshes slidesim generates.
 | `lobules/spt.study.json`, `lobules/spt_batched.study.json` | `lobules/scene.json`: one ideal lobule, generated | the SPT model on one lobule, 24 h, hourly outputs, engine and batched path |
 | `lobules/ring1_spt.study.json`, `lobules/ring1_spt_batched.study.json` | `lobules/ring1.scene.json`: 7 ideal lobules, generated | the same on a ring of lobules |
 | `lobules/linear.study.json` | `lobules/scene.json` | the linear cell model on the generated lobule for 1 h: conservation, agreement across process counts, order of the splitting |
+| `slide_fields/<field>/spt.study.json`, `slide_fields/<field>/spt_batched.study.json` | `slide_fields/<field>/scene.json`: 500 um of a real slide, tagged polygons of slideviz, meshed by slidesim | the SPT model on three real fields (control, 281 and 500 mg/kg), engine and batched path, with the slide's `zonation`, `cyp2e1` and `necrosis` maps |
 | `cells_manufactured/study.json` | the unit square | a linear cell model in a closed domain whose coupled solution is known: the order of the Strang splitting |
 | `m2_real_slide/*.study.json` | a real slide (not in the repository) | the four perfusion studies of the [milestone 2 results](results/2026-11-m2-real-slide.md): baseline, calibrated, whole blood, radial10 |
 | `m3_real_slide/spt.study.json` | a dosed real slide (not in the repository) | the SPT model for 24 h on the 281 mg/kg slide, the coupled baseline of the [performance results](results/2026-11-m3-performance.md) |
@@ -153,4 +155,46 @@ refinement), and the model's own necrosis threshold. `spt.study.json` and
 ```bash
 target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh
 target/release/slidesim run testdata/studies/lobules/spt_batched.study.json --out spt
+```
+
+## Real-slide fields
+
+`testdata/studies/slide_fields` holds three fields of 500 um of real mouse liver slides (CC BY
+4.0, see its README): `000mg_m1` (control), `281mg_m1` and `500mg_m1` (dosed), each a central vein
+with portal fields. Their scenes are `polygons` scenes: the tagged polygons of slideviz
+(`polygons.geojson`, areas `surviving` and `necrotic`, edge chains such as `portal_wall`,
+`central_wall` and `field_cut`), meshed by slidesim with 5 um triangles at the walls and 20 um far
+from them ([Meshing](methods/meshing.md)), and the maps `zonation`, `cyp2e1` and `necrosis`
+cropped to the field:
+
+```json
+"mesh": {
+  "format": "polygons",
+  "path": "polygons.geojson",
+  "size": {
+    "min_um": 5.0,
+    "max_um": 20.0,
+    "dist_min_um": 10.0,
+    "dist_max_um": 200.0,
+    "walls": ["portal_wall", "central_wall", "necrosis_border"]
+  }
+}
+```
+
+| Field | Coarse mesh | Quality |
+| --- | --- | --- |
+| `000mg_m1` | 6,002 triangles, 3,160 vertices | min angle 16.0 deg, SICN min 0.46, edge length / size 0.35 to 1.56 |
+| `281mg_m1` | 13,598 triangles, 7,102 vertices | min angle 16.3 deg, SICN min 0.42, edge length / size 0.35 to 1.63 |
+| `500mg_m1` | 16,782 triangles, 8,755 vertices | min angle 16.4 deg, SICN min 0.45, edge length / size 0.35 to 1.70 |
+
+The polygons keep edges of one pixel (1.77 um) of the masks, so the smallest angles and edge
+ratios are below those of the generated lobules
+([milestone 4 meshing results](results/2026-11-m4-meshing.md)). The studies are
+`m3_real_slide/spt.study.json` on each field: 24 h, CYP2E1 from the `cyp2e1` map, pattern 6 where
+the `necrosis` map is above 0.5; `spt.study.json` on the engine path, `spt_batched.study.json` on
+the batched one.
+
+```bash
+target/release/slidesim mesh testdata/studies/slide_fields/281mg_m1/scene.json --out mesh
+target/release/slidesim run testdata/studies/slide_fields/281mg_m1/spt_batched.study.json --out spt
 ```

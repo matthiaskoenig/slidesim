@@ -1,0 +1,50 @@
+{
+  "shape": [
+    288,
+    288
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        256,
+        256
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 3,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "provenance": {
+      "source": "/home/mkoenig/git/slidesim/.superpowers/sdd/2026-11-26-slidesim-m4-lobules/scratch/t8/e2e/zonation/mouse_apap_000mg_m1_cyp2e1_lobules.npz",
+      "sha256": "abed12af6c140b005c39ba319c8919193b009d1e9bae1525fc117f9eb542caae",
+      "values": "zonation position, 0 periportal, 1 pericentral",
+      "fill": "nearest",
+      "filled_share": 0.0
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

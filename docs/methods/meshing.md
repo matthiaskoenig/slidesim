@@ -81,7 +81,9 @@ um away from that point, so that the elements fit between the frozen boundaries 
    any valid scene meet a smallest angle of 20 degrees, a SICN of 0.4 and edge ratios within
    [0.4, 2.0] (tested over rings 0 to 4, wall sizes 2 to 20 um, jitter 0 to 0.25), and so do
    polygons whose size field the boundary splitting resolves and whose gaps are not narrower
-   than \(h_\min / 1.6\).
+   than \(h_\min / 1.6\). The polygons of real slides keep edges of one mask pixel (1.77 um),
+   shorter than \(0.4\,h_\min\) at 5 um: next to them the smallest angles reach 14 to 16 degrees
+   and the SICN 0.41 ([milestone 4 meshing results](../results/2026-11-m4-meshing.md)).
 
 ## Ideal lobules
 

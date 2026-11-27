@@ -1137,6 +1137,127 @@ fn lobule_spt_runs() {
     );
 }
 
+/// The real-slide fields of `testdata/studies/slide_fields`: slideviz's tagged polygons around a
+/// central vein with portal fields, one control and two dosed slides.
+const SLIDE_FIELDS: [&str; 3] = ["000mg_m1", "281mg_m1", "500mg_m1"];
+
+/// The file `name` of the real-slide field `field` (see [`SLIDE_FIELDS`]).
+fn slide_field(field: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/slide_fields")
+        .join(field)
+        .join(name)
+}
+
+/// The area of the area features of a polygons/1 file: each polygon's exterior ring less its
+/// holes (shoelace).
+fn polygons_area(path: &Path) -> f64 {
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let ring_area = |ring: &Value| {
+        let points: Vec<[f64; 2]> = ring
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| [p[0].as_f64().unwrap(), p[1].as_f64().unwrap()])
+            .collect();
+        let twice: f64 = points
+            .windows(2)
+            .map(|w| w[0][0] * w[1][1] - w[1][0] * w[0][1])
+            .sum();
+        (twice / 2.0).abs()
+    };
+    let polygon_area = |rings: &Value| {
+        let rings = rings.as_array().unwrap();
+        ring_area(&rings[0]) - rings[1..].iter().map(ring_area).sum::<f64>()
+    };
+    doc["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["properties"]["kind"] == "area")
+        .map(|f| {
+            let geometry = &f["geometry"];
+            match geometry["type"].as_str().unwrap() {
+                "Polygon" => polygon_area(&geometry["coordinates"]),
+                "MultiPolygon" => geometry["coordinates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(polygon_area)
+                    .sum(),
+                other => panic!("{other} is no area geometry"),
+            }
+        })
+        .sum()
+}
+
+/// `slidesim mesh` of each real-slide field: the mesh has portal and central walls, covers the
+/// polygons exactly (the area of its triangles is that of the area features), and no triangle
+/// is worse than SICN 0.2. The fields miss the bounds of the generated meshes (min angle 20 deg,
+/// edge length / size from 0.4): their polygons have edges of one pixel (1.77 um) at 5 um
+/// triangles, see `docs/results/2026-11-m4-meshing.md`.
+#[test]
+fn slide_field_examples_mesh() {
+    let dir = scratch("slide_field_examples_mesh");
+    for field in SLIDE_FIELDS {
+        let out = dir.join(field);
+        let run = slidesim(&mesh_args(&slide_field(field, "scene.json"), &out));
+        assert_success(&run);
+        let mesh: mesher::TaggedMesh =
+            serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+        let names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+        for wall in ["portal_wall", "central_wall"] {
+            assert!(names.contains(&wall), "{field}: {names:?}");
+        }
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|k| mesh.vertices[k as usize]);
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum();
+        let expected = polygons_area(&slide_field(field, "polygons.geojson"));
+        assert!(
+            relative_difference(&[area], &[expected]) <= 1e-9,
+            "{field}: {area} against {expected}"
+        );
+        let quality: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap())
+                .unwrap();
+        assert!(
+            quality["min_sicn"].as_f64().unwrap() >= 0.2,
+            "{field}: {quality}"
+        );
+    }
+}
+
+/// The SPT study of the dosed field `281mg_m1` on the batched path, shortened to 10 min: it
+/// runs, and every mass balance closes.
+#[test]
+fn slide_field_spt_runs() {
+    let dir = scratch("slide_field_spt_runs");
+    let study = variant(
+        &slide_field("281mg_m1", "spt_batched.study.json"),
+        &dir,
+        "short",
+        |doc| {
+            doc["time"]["end"] = Value::from(600.0);
+            doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0]);
+        },
+    );
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&study, &out, &[])));
+    for field in ["S", "P"] {
+        let balances = balances(&out, field);
+        assert_eq!(balances.len(), 3);
+        assert!(balances[0].is_none());
+        for terms in balances.iter().flatten() {
+            assert_closes(terms);
+        }
+    }
+}
+
 /// [`cells_parallel_matches_one`] on the mesh slidesim generates for one lobule (process 0
 /// meshes, every process gets its part), with the linear study shortened to 15 min, the linear
 /// solves to 1e-12 and the cells to 1e-12 (rtol; atol 1e-16).

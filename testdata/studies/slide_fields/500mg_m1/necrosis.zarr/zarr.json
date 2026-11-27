@@ -1,0 +1,52 @@
+{
+  "shape": [
+    288,
+    288
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        256,
+        256
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 3,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "provenance": {
+      "source": "/data/koeniglab/image.analysis/APAP/APAP_zarr/predictions/mouse_apap_500mg_m1_he_necrosis.npz",
+      "sha256": "986eff30fa29ddcc9a3b42fa8914c5555a6695e5c6e12c08ada7411f68639e36",
+      "values": "call_E, 1 necrotic, 0 not",
+      "cutoff": 0.775,
+      "resampling": "majority of the calls at 0.44213551453520505 um/px per pixel",
+      "fill": "nearest",
+      "filled_share": 0.06023341049382716
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}
