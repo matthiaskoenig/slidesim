@@ -47,6 +47,7 @@ nav = [
     { "M3: performance" = "results/2026-11-m3-performance.md" },
     { "M4: meshing real slides" = "results/2026-11-m4-meshing.md" },
     { "M4: transport solves" = "results/2026-11-m4-performance.md" },
+    { "M4: split step of the coupled SPT runs" = "results/2026-11-m4-split-step.md" },
     { "Cells on dosed slides (deferred)" = "results/m3-dosed-slides.md" },
   ] },
   { "Development" = "development.md" },

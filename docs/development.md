@@ -97,6 +97,11 @@ These need the slides, which are not in the repository, and run on the optimized
   ([performance](results/2026-11-m4-performance.md)). It starts every simulation through
   `run_sim` of `scripts/lib/proc.sh`: a wall-clock limit, CPUs 0-9 at nice 10, and no process
   left behind when the script ends, however it ends.
+- `scripts/bench/split_step.sh`: the batched SPT study of one lobule at several split steps of
+  the Strang splitting against a reference, on the lobule's mesh (1 h), a coarser mesh (4 h,
+  with necrosis) and the 7 lobules (15 min), compared by `scripts/bench/split_step.py` (uptake,
+  cell states, necrotic share and Dice, observed orders, cost); about 12 min, no slide needed
+  ([split step](results/2026-11-m4-split-step.md)).
 
 All of these scripts source `scripts/lib/proc.sh` and start every `slidesim` and `mpiexec` run
 through its `run_sim <limit> <cmd...>`: a wall-clock limit (`LIMIT`), the CPUs `PROC_CPUS` (default

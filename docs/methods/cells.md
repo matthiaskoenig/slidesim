@@ -78,6 +78,21 @@ lobule in 1 h differs by 3 % between split steps of 120 and 60 s, the difference
 halvings falling by a factor 1.9. With the transport 100 times slower, the same split steps show
 order 2.
 
+The SPT studies of the lobules are in this first order regime over all split steps that matter
+([split-step results](../results/2026-11-m4-split-step.md)): against a reference at 5 s, the
+substrate uptake of the generated lobule in 1 h is off by 4.6, 1.7, 0.6, 0.2 and 0.1 % at split
+steps of 120, 60, 30, 15 and 10 s (observed order 1.3 to 1.7), and on a coarser mesh of the
+lobule over 4 h the necrosis front lags (necrotic share 0.015 and 0.005 below the reference at
+120 and 60 s, Dice down to 0.946 and 0.984, within 0.002 and above 0.997 from 30 s on). The cost
+of the cells grows almost in proportion to the number of split steps, each of which starts the
+cells with a transient of their blood. The largest split step which keeps the uptake within 1 %
+and the necrotic share and Dice within 0.01 is 30 s, at about 1.7 times the cost of 60 s; the
+example studies keep 60 s until that choice is made. At an output time a cell has just made a
+half step without transport, so a species the cells give to a quickly washed out blood (the
+product P of the SPT model) piles up in the blood: the states P_ext and P at the output times
+measure the splitting at every practical split step. A coupling in which the cell step sees the
+supply and washout of its blood would remove both errors.
+
 ## Exchange with the blood
 
 A cell step from \(t_0\) to \(t_1\) reads the means of the linked fields over each cell, the
