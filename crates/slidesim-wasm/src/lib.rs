@@ -31,7 +31,8 @@
 //!   handle (>= 0), or -1 with the error. Every check, the mesh, the maps, the flow and the setup
 //!   of the fields and the cells (`simulation::Simulation::new`).
 //! - `slidesim_next_output(h) -> i32`: steps to the next output time and gives its index (the
-//!   first at `times[0]`, without a step), -1 when there is none left (without a step: the last
+//!   first is at `times[0]`; it steps only when `times[0]` is later than the start, and at 0 it is
+//!   the initial state, without a step), -1 when there is none left (without a step: the last
 //!   output time is `time.end`, and the arrays stay those of it), -2 with the error.
 //! - `slidesim_time(h) -> f64`: the time the simulation reached (s).
 //! - `slidesim_array(h, name_ptr, name_len) -> ptr` and `slidesim_array_len() -> u32`: the bytes

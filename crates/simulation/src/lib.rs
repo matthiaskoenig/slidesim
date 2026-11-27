@@ -294,8 +294,9 @@ impl<'p> Simulation<'p> {
     }
 
     /// Steps to the next output time and records its values in the summary: `Some(index)`, its
-    /// index in `time.outputs` (from 0). The first call at an output time 0 does not step (the
-    /// initial state). After the last output time, which is `time.end`, records the statistics
+    /// index in `time.outputs` (from 0). The first call is at `times[0]`: it steps only when
+    /// `times[0]` is later than the start (when `times[0]` is 0 it is the initial state, without a
+    /// step). After the last output time, which is `time.end`, records the statistics
     /// of the cells and the phases of the whole run and returns `None` without a step: the
     /// fields and the cells stay at the last output time. Later calls return `None` and do
     /// nothing. The time since the end of the last call (or of [`Simulation::new`]) counts as
