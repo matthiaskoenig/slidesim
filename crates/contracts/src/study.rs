@@ -276,7 +276,7 @@ pub fn check_maps(study: &Study, scene: &Scene) -> Result<(), ContractError> {
         named.extend(p.k_across.maps());
         named.push(&p.direction.map);
     }
-    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    let available: Vec<String> = scene.map_ids().into_iter().map(String::from).collect();
     match named.iter().find(|m| !available.iter().any(|a| a == *m)) {
         Some(m) => Err(ContractError::UnknownMap {
             map: m.to_string(),
@@ -405,7 +405,7 @@ pub fn check_cells(study: &Study, scene: &Scene) -> Result<(), ContractError> {
             )));
         }
     }
-    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    let available: Vec<String> = scene.map_ids().into_iter().map(String::from).collect();
     for p in &cells.parameters {
         let mut named: Vec<&str> = p.value.maps().into_iter().collect();
         if let Some(r) = &p.replace {

@@ -6,6 +6,7 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("create schemas dir");
     for (name, schema) in [
         ("scene-1.schema.json", contracts::schema_scene()),
+        ("polygons-1.schema.json", contracts::schema_polygons()),
         ("study-1.schema.json", contracts::schema_study()),
     ] {
         let text = serde_json::to_string_pretty(&schema).expect("serialize") + "\n";

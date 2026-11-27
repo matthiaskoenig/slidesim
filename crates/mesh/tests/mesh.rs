@@ -4,7 +4,7 @@
 use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 
-use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
+use contracts::{LengthUnit, MeshSource, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError, Tag};
 use petsc::{Dm, Petsc, Point};
 
@@ -25,10 +25,7 @@ fn scene_at(path: PathBuf, dimension: u8) -> Scene {
         units: Units {
             length: LengthUnit::Um,
         },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
-            path,
-        },
+        mesh: MeshSource::Gmsh { path },
         maps: Vec::new(),
     }
 }

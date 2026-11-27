@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use contracts::{Coefficient, Condition, Scene, Study, Table, check_maps};
+use contracts::{Coefficient, Condition, MeshSource, Polygons, Scene, Study, Table, check_maps};
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,8 +38,9 @@ fn load_resolves_paths_against_file_directory() {
             .ends_with("testdata/contracts/scene-minimal.json")
     );
     let scene = Scene::load(data("scene-minimal.json")).unwrap();
-    assert!(scene.mesh.path.is_absolute());
-    assert!(scene.mesh.path.ends_with("testdata/contracts/mesh.msh"));
+    let path = scene.mesh.path().unwrap();
+    assert!(path.is_absolute());
+    assert!(path.ends_with("testdata/contracts/mesh.msh"));
 }
 
 #[test]
@@ -157,6 +158,7 @@ fn schemas_are_current() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
     for (name, schema) in [
         ("scene-1.schema.json", contracts::schema_scene()),
+        ("polygons-1.schema.json", contracts::schema_polygons()),
         ("study-1.schema.json", contracts::schema_study()),
     ] {
         let text = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
@@ -206,6 +208,26 @@ fn schemas_match_load() {
         "study-perfusion.json"
     ));
     assert!(schema_accepts(contracts::schema_scene(), "scene-maps.json"));
+    for f in ["scene-lobules.json", "scene-polygons.json"] {
+        assert!(schema_accepts(contracts::schema_scene(), f), "{f}");
+    }
+    assert!(schema_accepts(
+        contracts::schema_polygons(),
+        "polygons-minimal.geojson"
+    ));
+    for f in [
+        "polygons-bad-kind.geojson",
+        "polygons-bad-value.geojson",
+        "scene-lobules-bad-jitter.json",
+        "scene-lobules-bad-radius.json",
+    ] {
+        let schema = if f.starts_with("polygons") {
+            contracts::schema_polygons()
+        } else {
+            contracts::schema_scene()
+        };
+        assert!(!schema_accepts(schema, f), "schema accepts {f}");
+    }
     // Strictly increasing table values and unique tags are checked by `load` only.
     for f in [
         "study-table-negative-diffusion.json",
@@ -278,7 +300,8 @@ fn example_studies_are_valid() {
             "{study}"
         );
         let scene = Scene::load(&loaded.scene).unwrap();
-        assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
+        let path = scene.mesh.path().unwrap();
+        assert!(path.is_file(), "{}", path.display());
     }
 }
 
@@ -615,4 +638,172 @@ fn cells_split_step_positive() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("time.dt") && e.contains("split_step"), "{e}");
+}
+
+#[test]
+fn lobules_scene_loads_with_defaults() {
+    let dir = std::env::temp_dir().join(format!("slidesim-lobules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("scene.json");
+    std::fs::write(
+        &file,
+        r#"{"version": "scene/1", "dimension": 2, "units": {"length": "um"},
+            "mesh": {"format": "lobules",
+                     "centre": {"tag": "c"}, "corner": {"tag": "p"},
+                     "outer_tag": "o", "area_tag": "a",
+                     "zonation": {"map": "zonation"}}}"#,
+    )
+    .unwrap();
+    let scene = Scene::load(&file).unwrap();
+    let MeshSource::Lobules(spec) = &scene.mesh else {
+        panic!("not lobules: {:?}", scene.mesh)
+    };
+    assert_eq!(spec.lobule_radius_um, 300.0);
+    assert_eq!(spec.rings, 0);
+    assert_eq!(spec.jitter, 0.0);
+    assert_eq!(spec.seed, 0);
+    assert_eq!(spec.centre.radius_um, 30.0);
+    assert_eq!(spec.corner.radius_um, 25.0);
+    assert_eq!(spec.size.wall_um, 5.0);
+    assert_eq!(spec.size.interior_um, 20.0);
+    assert_eq!(spec.zonation.um_per_px, 2.0);
+    assert_eq!(scene.map_ids(), ["zonation"]);
+    assert!(scene.mesh.path().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn lobules_scene_full_round_trip() {
+    let scene = Scene::load(data("scene-lobules.json")).unwrap();
+    let text = std::fs::read_to_string(data("scene-lobules.json")).unwrap();
+    let original: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(serde_json::to_value(&scene).unwrap(), original);
+}
+
+#[test]
+fn lobule_size_field() {
+    let scene = Scene::load(data("scene-lobules.json")).unwrap();
+    let MeshSource::Lobules(spec) = &scene.mesh else {
+        panic!()
+    };
+    let f = spec.size_field();
+    assert_eq!(
+        (f.min_um, f.max_um, f.dist_min_um, f.dist_max_um),
+        (5.0, 20.0, 10.0, 200.0)
+    );
+    assert_eq!(f.walls, ["central_wall", "portal_wall"]);
+}
+
+#[test]
+fn polygons_scene_resolves_its_path() {
+    let scene = Scene::load(data("scene-polygons.json")).unwrap();
+    let MeshSource::Polygons { path, size } = &scene.mesh else {
+        panic!()
+    };
+    assert!(path.is_absolute());
+    assert!(path.ends_with("testdata/contracts/polygons-minimal.geojson"));
+    assert!(path.is_file());
+    assert_eq!(size.walls, ["central_wall"]);
+    assert!(scene.map_ids().is_empty());
+}
+
+#[test]
+fn gmsh_scenes_still_load() {
+    let mut n = 0;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                stack.push(p);
+            } else if name.starts_with("scene") && name.ends_with(".json") && !name.contains("bad")
+            {
+                let Ok(scene) = Scene::load(&p) else {
+                    panic!("{} does not load", p.display())
+                };
+                if let MeshSource::Gmsh { path } = &scene.mesh {
+                    assert!(path.is_absolute());
+                    n += 1;
+                }
+            }
+        }
+    }
+    assert!(n >= 3, "only {n} gmsh scenes found");
+}
+
+#[test]
+fn lobule_parameters_out_of_range() {
+    for (file, key) in [
+        ("scene-lobules-bad-radius.json", "lobule_radius_um"),
+        ("scene-lobules-bad-jitter.json", "jitter"),
+        ("scene-lobules-bad-veins-touch.json", "centre.radius_um"),
+        ("scene-lobules-bad-corner.json", "corner.radius_um"),
+        ("scene-lobules-bad-size.json", "size.wall_um"),
+        ("scene-lobules-bad-map-clash.json", "zonation.map"),
+        ("scene-lobules-bad-tags.json", "area_tag"),
+    ] {
+        let e = Scene::load(data(file)).unwrap_err();
+        assert!(matches!(e, contracts::ContractError::Invalid(_)), "{file}");
+        assert!(e.to_string().contains(key), "{file}: {e}");
+    }
+}
+
+#[test]
+fn size_field_rules() {
+    let base = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(data("scene-polygons.json")).unwrap(),
+    )
+    .unwrap();
+    let load = |key: &str, v: f64| {
+        let mut d = base.clone();
+        d["mesh"]["size"][key] = serde_json::json!(v);
+        Scene::from_value(d, &data("scene-polygons.json"))
+    };
+    for (key, v) in [
+        ("min_um", 30.0),
+        ("min_um", -1.0),
+        ("max_um", 1.0),
+        ("dist_min_um", 200.0),
+        ("dist_min_um", -1.0),
+        ("dist_max_um", 10.0),
+    ] {
+        let e = load(key, v).unwrap_err().to_string();
+        assert!(e.contains("size."), "{key}={v}: {e}");
+        assert!(e.contains(key), "{key}={v}: {e}");
+    }
+    assert!(load("dist_min_um", 0.0).is_ok());
+}
+
+fn polygons_err(name: &str) -> String {
+    Polygons::load(data(name)).unwrap_err().to_string()
+}
+
+#[test]
+fn polygons_load() {
+    let p = Polygons::load(data("polygons-minimal.geojson")).unwrap();
+    assert_eq!(p.areas.len(), 2);
+    assert_eq!(p.edges.len(), 3);
+    assert_eq!((p.areas[0].tag.as_str(), p.areas[0].value), ("tissue", 1));
+    assert_eq!(p.areas[0].rings.len(), 1);
+    assert_eq!((p.areas[1].tag.as_str(), p.areas[1].value), ("necrotic", 2));
+    assert_eq!(p.areas[1].rings.len(), 2);
+    assert_eq!(p.edges[0].tag, "central_wall");
+    assert_eq!(p.edges[0].points[1], [20.0, 10.0]);
+    assert!(p.edges.iter().all(|e| e.value == 1));
+}
+
+#[test]
+fn polygons_refuse_bad_kinds() {
+    assert!(polygons_err("polygons-bad-kind.geojson").contains("volume"));
+    let e = polygons_err("polygons-bad-linestring-area.geojson");
+    assert!(e.contains("tissue") && e.contains("LineString"), "{e}");
+    let e = polygons_err("polygons-bad-tag-both.geojson");
+    assert!(
+        e.contains("tissue") && e.contains("area and as an edge"),
+        "{e}"
+    );
+    let e = polygons_err("polygons-bad-value.geojson");
+    assert!(e.contains("value"), "{e}");
 }

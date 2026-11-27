@@ -1,9 +1,10 @@
 # Contracts
 
-slidesim reads two versioned JSON contracts. Each has one Rust definition (serde, crate
-`contracts`) and a JSON Schema generated from it: `schemas/scene-1.schema.json` and
-`schemas/study-1.schema.json`. slideviz writes `scene/1` against a copy of the schema, which its
-tests validate the scenes against. Unknown keys are errors in both.
+slidesim reads three versioned contracts. Each has one Rust definition (serde, crate
+`contracts`) and a JSON Schema generated from it: `schemas/scene-1.schema.json`,
+`schemas/polygons-1.schema.json` and `schemas/study-1.schema.json`. slideviz writes `scene/1` and
+`polygons/1` against a copy of the schema, which its tests validate the files against. Unknown
+keys are errors in all of them.
 
 Units throughout: length um, time s, concentration mM, pressure Pa, permeability um^2,
 viscosity Pa*s, velocity um/s; porosity is dimensionless.
@@ -36,8 +37,53 @@ the tissue.
 | `version` | exactly `scene/1` |
 | `dimension` | 2 or 3; the solvers take 2D triangle meshes, 3D meshes come in a later milestone |
 | `units.length` | `um`, the only unit of the mesh coordinates |
-| `mesh` | `format` `gmsh` and `path` of the `.msh` file, relative to the scene file; its physical groups are the area tags (`surviving`, `necrotic`, `tissue`) and the edge tags (`portal_wall`, `central_wall`, `vessel_wall`, `section_edge`, `field_cut`, ...) the study refers to |
+| `mesh` | where the mesh comes from, by `format`: `gmsh`, `polygons` or `lobules`, see below |
 | `maps` | raster maps over the tissue (optional), see below |
+
+### Mesh sources
+
+`mesh.format` selects the source. The tags of the mesh (area and edge tags) are what a study
+refers to; slidesim has no built-in tag names.
+
+**`gmsh`**: `{"format": "gmsh", "path": "mesh.msh"}`. `path` is the `.msh` file, relative to the
+scene file; its physical groups are the area tags (`surviving`, `necrotic`, `tissue`) and the edge
+tags (`portal_wall`, `central_wall`, `vessel_wall`, `section_edge`, `field_cut`, ...).
+
+**`polygons`**: `{"format": "polygons", "path": "tissue.geojson", "size": {...}}`. `path` is a
+`polygons/1` file (below), relative to the scene file, which slidesim meshes with the size field
+`size`:
+
+| Key | Meaning |
+| --- | --- |
+| `min_um` | element size near the walls, > 0 and <= `max_um` |
+| `max_um` | element size far from the walls |
+| `dist_min_um` | distance up to which the size is `min_um`, >= 0 and < `dist_max_um` |
+| `dist_max_um` | distance from which the size is `max_um`, linear in between |
+| `walls` | edge tags the distance is measured from (default none: `max_um` everywhere) |
+
+**`lobules`**: parametric hexagonal liver lobules, generated and meshed by slidesim, with a
+central vein and a portal vein at every corner. All lengths in um.
+
+| Key | Meaning |
+| --- | --- |
+| `lobule_radius_um` | circumradius of the hexagonal lobule, > 0 (default 300) |
+| `rings` | rings of neighbouring lobules around the central one (default 0: one lobule) |
+| `jitter` | largest displacement of a vein as a fraction of `lobule_radius_um`, `0 <= jitter <= 0.25` (default 0) |
+| `seed` | seed of the displacements (default 0) |
+| `centre` | the central vein: `radius_um` (> 0, default 30) and `tag`, the edge tag of its wall |
+| `corner` | the portal veins at the corners: `radius_um` (> 0, default 25) and `tag` |
+| `outer_tag` | edge tag of the outer boundary |
+| `area_tag` | area tag of the tissue |
+| `size` | `wall_um` (default 5) and `interior_um` (default 20), `0 < wall_um <= interior_um` |
+| `zonation` | `map`, the id of the generated zonation map (0 periportal to 1 pericentral), and `um_per_px` (default 2) |
+
+The tags (`outer_tag`, `area_tag`, `centre.tag`, `corner.tag`) and `zonation.map` have no
+defaults; the four tags must differ and `zonation.map` must not be the id of an entry of `maps`.
+The veins must not touch even in the worst displacement: `centre.radius_um + corner.radius_um`
+and `2 corner.radius_um` are both below `(1 - 2 jitter) lobule_radius_um / 2`. The size field of
+the mesh is `wall_um` up to `2 wall_um` from the vein walls (the centre and corner tags), linear
+to `interior_um` at `10 interior_um`. Studies refer to the zonation map like to an entry of
+`maps`.
 
 A **map** is a 2D Zarr v3 array (rows along y, columns along x, float32 or float64), sampled
 bilinearly by slidesim at the quadrature points of every mesh level that needs it. Each process
@@ -56,6 +102,37 @@ A quadrature point outside the raster, or next to a pixel without data, is an er
 map, never a silent default. The slideviz scenes of the liver carry `zonation` (0 periportal to 1
 pericentral), and from milestone 3 on `cyp2e1` (the relative CYP2E1 readout) and `necrosis` (the
 measured necrosis calls).
+
+## polygons/1
+
+Tagged polygons for the `polygons` mesh source: a GeoJSON FeatureCollection with the foreign
+members `version` and `meta` (free JSON, ignored). Coordinates are `[x, y]` in the um of the scene.
+
+```json
+{
+  "type": "FeatureCollection",
+  "version": "polygons/1",
+  "meta": {"source": "slideviz"},
+  "features": [
+    {"type": "Feature",
+     "properties": {"kind": "area", "tag": "tissue"},
+     "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [100, 0], [100, 100], [0, 100], [0, 0]]]}},
+    {"type": "Feature",
+     "properties": {"kind": "edge", "tag": "central_wall"},
+     "geometry": {"type": "LineString", "coordinates": [[10, 10], [20, 10], [20, 20], [10, 10]]}}
+  ]
+}
+```
+
+| Property | Meaning |
+| --- | --- |
+| `kind` | `area` (geometry `Polygon` or `MultiPolygon`) or `edge` (`LineString` or `MultiLineString`) |
+| `tag` | the tag name; a tag is either an area tag or an edge tag |
+| `value` | integer tag value > 0 (default 1) |
+
+The first ring of a polygon is its outer boundary, the others are holes. `Polygons::load` checks
+the kinds, the geometry types, the values and that no tag is both an area and an edge tag; the
+geometry (closed rings, no self-intersections, edges on area boundaries) is checked by the mesher.
 
 ## study/1
 

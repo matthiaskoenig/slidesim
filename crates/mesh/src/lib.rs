@@ -16,7 +16,7 @@ use std::cmp::max;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use contracts::{MeshFormat, Scene};
+use contracts::{MeshSource, Scene};
 use petsc::{Comm, Dm, Petsc, Point};
 
 mod split;
@@ -84,6 +84,8 @@ pub enum MeshError {
         name: String,
         available: Vec<String>,
     },
+    #[error("mesh format '{format}' is not yet supported by the mesher")]
+    Source { format: &'static str },
     #[error(transparent)]
     Petsc(#[from] petsc::Error),
 }
@@ -113,14 +115,17 @@ impl Mesh {
     /// A mesh without such a vertex is used as read.
     ///
     /// Errors (on every process): [`MeshError::NotFound`] if process 0 finds no file at
-    /// `scene.mesh.path`, [`MeshError::Read`] if PETSc cannot read it, [`MeshError::Dimension`]
+    /// the gmsh path of the scene, [`MeshError::Read`] if PETSc cannot read it, [`MeshError::Dimension`]
     /// if its dimension is not `scene.dimension`, and [`MeshError::Petsc`] if distributing or
     /// refining fails.
     pub fn load(petsc: &Petsc, scene: &Scene, refinements: u32) -> Result<Mesh, MeshError> {
-        let path = &scene.mesh.path;
-        match scene.mesh.format {
-            MeshFormat::Gmsh => {}
-        }
+        let path = match &scene.mesh {
+            MeshSource::Gmsh { path } => path,
+            MeshSource::Polygons { .. } => {
+                return Err(MeshError::Source { format: "polygons" });
+            }
+            MeshSource::Lobules(_) => return Err(MeshError::Source { format: "lobules" }),
+        };
         check_readable(petsc, path)?;
         let comm = petsc.comm();
         let mut coarse = read(petsc, &comm, path).map_err(|source| MeshError::Read {

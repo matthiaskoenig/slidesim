@@ -16,8 +16,8 @@ use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshFormat, MeshRef,
-    SCENE_VERSION, Scene, TimeSpec, Units,
+    BoundarySpec, Coefficient, Condition, FieldSpec, LengthUnit, MeshSource, SCENE_VERSION, Scene,
+    TimeSpec, Units,
 };
 use maps::Maps;
 use mesh::Mesh;
@@ -48,8 +48,7 @@ fn tissue_small(p: &Petsc, refinements: u32) -> Mesh {
         units: Units {
             length: LengthUnit::Um,
         },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
+        mesh: MeshSource::Gmsh {
             path: fixture("tissue_small.msh"),
         },
         maps: Vec::new(),

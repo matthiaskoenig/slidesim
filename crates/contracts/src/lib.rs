@@ -1,16 +1,19 @@
-//! Versioned JSON input contracts of slidesim: `scene/1` and `study/1`.
+//! Versioned JSON input contracts of slidesim: `scene/1`, `polygons/1` and `study/1`.
 //!
 //! Units are fixed: length um, time s, concentration mM; diffusion um^2/s,
 //! decay 1/s, source mM/s, flux mM*um/s, pressure Pa, permeability um^2, viscosity Pa*s,
 //! velocity um/s, porosity dimensionless, `g0` 1/um.
 
 mod error;
+mod polygons;
 mod scene;
 mod study;
 
 pub use error::ContractError;
+pub use polygons::{AreaPolygon, EdgeChain, POLYGONS_VERSION, Polygons, schema_polygons};
 pub use scene::{
-    LengthUnit, MapSpec, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units, schema_scene,
+    HoleSpec, LengthUnit, LobuleSize, LobuleSpec, MapSpec, MeshSource, SCENE_VERSION, Scene,
+    SizeField, Units, ZonationSpec, schema_scene,
 };
 pub use study::{
     BoundarySpec, CellParameter, CellSolverKind, CellsSpec, Coefficient, Condition, Direction,

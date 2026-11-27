@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
-use contracts::{LengthUnit, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
+use contracts::{LengthUnit, MeshSource, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError};
 use pde::{Discretization, PdeError, PointData, SharedOperator, SourceField, Terms, Transport};
 use petsc::{Petsc, Vector};
@@ -25,8 +25,7 @@ fn scene(file: &str, dimension: u8) -> Scene {
         units: Units {
             length: LengthUnit::Um,
         },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
+        mesh: MeshSource::Gmsh {
             path: fixture(file),
         },
         maps: Vec::new(),

@@ -1,0 +1,32 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {
+    "length": "um"
+  },
+  "mesh": {
+    "format": "lobules",
+    "lobule_radius_um": 300.0,
+    "rings": 1,
+    "jitter": 0.1,
+    "seed": 7,
+    "centre": {
+      "radius_um": 10.0,
+      "tag": "central_wall"
+    },
+    "corner": {
+      "radius_um": 65.0,
+      "tag": "portal_wall"
+    },
+    "outer_tag": "section_edge",
+    "area_tag": "tissue",
+    "size": {
+      "wall_um": 5.0,
+      "interior_um": 20.0
+    },
+    "zonation": {
+      "map": "zonation",
+      "um_per_px": 2.0
+    }
+  }
+}
