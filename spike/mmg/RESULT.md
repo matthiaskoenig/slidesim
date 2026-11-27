@@ -265,8 +265,15 @@ No source patch of Mmg.
 
 ## Files
 
+The throwaway code of the spike was removed at the end of milestone 4, once the mesher, the
+patches and the builds of `scripts/deps` had taken over what it showed; it is in the history up
+to d1c9659:
+
 - `build.sh`: the two PETSc builds.
-- `patches/petsc-wasi-0001-mmg-ptscotch-optional.patch`.
+- `patches/petsc-wasi-0001-mmg-ptscotch-optional.patch` (now
+  `scripts/deps/patches/petsc-0001-mmg-ptscotch-optional.patch`).
 - `lobule/`: the program (`run.sh [native|wasi|all] [options]` builds, runs both fixtures twice
   per host, compares hashes, prints the wasm sizes; outputs and VTUs in `lobule/target/runs`).
 - `run-node.mjs`: Node WASI runner with `/out` preopened for the VTU.
+
+Its logs (`logs/`) were never committed.
