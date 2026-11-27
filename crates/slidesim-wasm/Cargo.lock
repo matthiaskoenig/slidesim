@@ -97,7 +97,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1095,8 +1095,8 @@ dependencies = [
 
 [[package]]
 name = "sbmlsim-abi"
-version = "0.31.1"
-source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=85bfa545db7459ff16cbd9baab293ae26a95c0c0#85bfa545db7459ff16cbd9baab293ae26a95c0c0"
+version = "0.40.0"
+source = "git+https://github.com/matthiaskoenig/sbmlsim-core?rev=d3722c62f7e6b6b6efbc55b13bfc1140217ed6c0#d3722c62f7e6b6b6efbc55b13bfc1140217ed6c0"
 dependencies = [
  "serde",
  "thiserror",
