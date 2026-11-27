@@ -15,12 +15,13 @@
 //! builds one [`Problem`] per field and, with `cells`, the cells and their exchange with the
 //! fields (`Coupled`).
 //!
-//! [`Simulation::next_output`] steps the fields to each output time of `time.outputs` in turn,
-//! then to `time.end`: each field alone, or with `cells` all fields and the cells together by
-//! Strang splitting (`Coupled`). At each output time it records the values of the summary
-//! ([`Summary`], `summary.json`). The caller reads or writes the state of each output time
-//! before the next call: [`Simulation::field_values`], [`Simulation::cell_values`],
-//! [`Simulation::write_vtu`]. [`Simulation::write_vtu`] writes every field as
+//! [`Simulation::next_output`] steps the fields to each output time of `time.outputs` in turn
+//! (the last is `time.end`, as `study/1` requires): each field alone, or with `cells` all fields
+//! and the cells together by Strang splitting (`Coupled`). At each output time it records the
+//! values of the summary ([`Summary`], `summary.json`). The caller reads or writes the state of
+//! each output time before the next call: [`Simulation::field_values`],
+//! [`Simulation::cell_values`], [`Simulation::write_vtu`]. [`Simulation::write_vtu`] writes every
+//! field as
 //! `<out>/<field id>_<index>.vtu`, `<index>` the position of the time in `time.outputs`: point
 //! data `<field id>.mM` on the finest mesh level, Dirichlet values included, one file of the
 //! pieces of every process; with `cells`, the cells as `<out>/cells_<index>.vtu`: cell data of
@@ -95,6 +96,24 @@ impl fmt::Display for OnEveryProcess {
     }
 }
 
+/// The error and its causes, `error: cause: cause`, without a cause whose text the ones before
+/// already show (errors which print their source in their own message): how `slidesim run` and
+/// the browser build report an error.
+pub fn causes(e: &anyhow::Error) -> String {
+    let mut text = String::new();
+    for cause in e.chain() {
+        let cause = cause.to_string();
+        if text.contains(&cause) {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str(": ");
+        }
+        text.push_str(&cause);
+    }
+    text
+}
+
 /// The quality of a mesh in one line.
 pub fn quality_line(q: &Quality) -> String {
     let mut line = format!(
@@ -143,7 +162,8 @@ pub struct Simulation<'p> {
     next: usize,
     /// The index of the output time reached last, while it is the current state.
     current: Option<usize>,
-    /// Whether the simulation reached `time.end` after the last output time.
+    /// Whether [`Simulation::next_output`] returned `None`: the summary of the whole run is
+    /// complete.
     finished: bool,
 }
 
@@ -154,10 +174,11 @@ impl<'p> Simulation<'p> {
     /// line ([`quality_line`], on process 0), as soon as it is made. Collective.
     ///
     /// Errors: those of [`Inputs::load`]'s checks; a study without fields, or with `cells` and
-    /// no cell model in the inputs (both with [`OnEveryProcess`]); the cell model (one which
+    /// no cell model in the inputs (these with [`OnEveryProcess`]); the cell model (one which
     /// does not compile or does not fit the study), the mesh (with the context
     /// [`OnEveryProcess`] if every process has the error, see
-    /// [`mesh::MeshError::is_collective`]), the maps, the flow, the problems and the cells.
+    /// [`mesh::MeshError::is_collective`]), the maps (with [`OnEveryProcess`]), the flow, the
+    /// problems and the cells.
     pub fn new(
         petsc: &'p Petsc,
         inputs: Inputs,
@@ -274,10 +295,11 @@ impl<'p> Simulation<'p> {
 
     /// Steps to the next output time and records its values in the summary: `Some(index)`, its
     /// index in `time.outputs` (from 0). The first call at an output time 0 does not step (the
-    /// initial state). After the last output time, steps to `time.end`, records the statistics
-    /// of the cells and returns `None`; later calls return `None` and do nothing. The time
-    /// since the end of the last call (or of [`Simulation::new`]) counts as the phase `output`:
-    /// the caller's outputs. Collective.
+    /// initial state). After the last output time, which is `time.end`, records the statistics
+    /// of the cells and the phases of the whole run and returns `None` without a step: the
+    /// fields and the cells stay at the last output time. Later calls return `None` and do
+    /// nothing. The time since the end of the last call (or of [`Simulation::new`]) counts as
+    /// the phase `output`: the caller's outputs. Collective.
     ///
     /// Errors: those of the steps of the fields and the cells and of the values of the summary;
     /// the simulation is not to be stepped further after one.
@@ -288,7 +310,12 @@ impl<'p> Simulation<'p> {
         self.current = None;
         self.phases.end("output")?;
         let Some(&t) = self.study.time.outputs.get(self.next) else {
-            self.advance(self.study.time.end)?;
+            // `study/1` ends `time.outputs` at `time.end`: the run is there already.
+            debug_assert_eq!(
+                self.time(),
+                self.study.time.end,
+                "time.outputs ends at time.end"
+            );
             if let (Some(coupled), Some(cells)) = (&self.coupled, &mut self.summary.cells) {
                 let stats = coupled.stats(&self.comm)?;
                 (cells.steps, cells.rejected, cells.seconds, cells.attempts) =
@@ -354,8 +381,9 @@ impl<'p> Simulation<'p> {
     }
 
     /// The time the fields reached (s): 0 at the start, an output time after a
-    /// [`Simulation::next_output`] which returned its index, `time.end` after the one which
-    /// returned `None`. (A study has a field: [`Simulation::new`] checks it.)
+    /// [`Simulation::next_output`] which returned its index, still the last output time
+    /// (`time.end`) after the one which returned `None`. (A study has a field:
+    /// [`Simulation::new`] checks it.)
     pub fn time(&self) -> f64 {
         self.problems[0].time()
     }
@@ -486,7 +514,7 @@ impl<'p> Simulation<'p> {
         let origin = options.origin_um.unwrap_or(bounds[0]);
         raster::Raster::level0_shape(bounds, options.um_per_px, origin)
             .map(|_| ())
-            .map_err(|e| e.context(OnEveryProcess("cannot write result.zarr")))
+            .map_err(|e| e.context(result::CANNOT_WRITE))
     }
 
     /// Writes the flow as `<out>/pressure.vtu` and `<out>/velocity.vtu`; nothing without
@@ -522,7 +550,8 @@ fn cell_model(_comm: &Comm, inputs: &Inputs) -> Result<Option<CellModel>> {
 }
 
 /// The maps the study names, read for the cells of this process (nothing for a process without
-/// cells). A process which cannot read a map fails every process (collective).
+/// cells). A process which cannot read a map fails every process, with the context
+/// [`OnEveryProcess`]. Collective.
 fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<Maps> {
     let mut ids: Vec<&str> = Vec::new();
     for field in &study.fields {
@@ -568,11 +597,13 @@ fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<M
             }),
         None => Ok(Maps::default()),
     };
+    // Agreed: an error of one process is an error of every process.
     let failed = comm.max_int(read.is_err().into())?;
     match read {
         Ok(maps) if failed == 0 => Ok(maps),
-        Ok(_) => Err(anyhow::anyhow!("another process cannot read a map")),
-        Err(e) => Err(e.context("cannot read the maps")),
+        Ok(_) => Err(anyhow::anyhow!("another process cannot read a map")
+            .context(OnEveryProcess("cannot read the maps"))),
+        Err(e) => Err(e.context(OnEveryProcess("cannot read the maps"))),
     }
 }
 
@@ -599,7 +630,7 @@ fn zonation_map(spec: &LobuleSpec, bounds: [[f64; 2]; 2]) -> Result<Map> {
 
 #[cfg(test)]
 mod tests {
-    use super::significant;
+    use super::{OnEveryProcess, causes, significant};
 
     #[test]
     fn log_values_have_significant_digits() {
@@ -607,5 +638,17 @@ mod tests {
         assert_eq!(significant(0.012_345_6, 4), "0.01235");
         assert_eq!(significant(12_345.67, 4), "12346");
         assert_eq!(significant(0.0, 4), "0.000");
+    }
+
+    /// The chain of an error in one line, without a cause whose text an earlier one shows.
+    #[test]
+    fn causes_skip_repeated_text() {
+        let e = anyhow::anyhow!("no such file")
+            .context("cannot read map.zarr: no such file")
+            .context(OnEveryProcess("cannot read the maps"));
+        assert_eq!(
+            causes(&e),
+            "cannot read the maps: cannot read map.zarr: no such file"
+        );
     }
 }

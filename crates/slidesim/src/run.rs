@@ -8,12 +8,12 @@
 //! other files in `<out>` stay) and prints the notes of the simulation
 //! ([`Simulation::notes`]: fields without a mass balance over the output intervals, pressure
 //! islands of the flow), and the run writes the flow as `<out>/pressure.vtu` and
-//! `<out>/velocity.vtu` ([`Simulation::write_flow`]). It steps to each output time in turn
-//! ([`Simulation::next_output`], output 0 at time 0 before any step) and writes the fields and
-//! the cells there ([`Simulation::write_vtu`]: `<out>/<field id>_<index>.vtu`,
-//! `<out>/cells_<index>.vtu`), then to `time.end`. Beside the VTU files it writes the store
-//! `result/1`, `<out>/result.zarr` ([`ResultWriter`]: made before the first output time, an
-//! earlier store removed whole, each output time written as it is reached; `study` names the
+//! `<out>/velocity.vtu` ([`Simulation::write_flow`]). It steps to each output time in turn, the
+//! last at `time.end` ([`Simulation::next_output`], output 0 at time 0 before any step), and
+//! writes the fields and the cells there ([`Simulation::write_vtu`]:
+//! `<out>/<field id>_<index>.vtu`, `<out>/cells_<index>.vtu`). Beside the VTU files it writes the
+//! store `result/1`, `<out>/result.zarr` ([`ResultWriter`]: made before the first output time,
+//! an earlier store removed whole, each output time written as it is reached; `study` names the
 //! study by the file name given on the command line). At the end, process 0 writes the summary
 //! ([`Simulation::summary`], see [`simulation::Summary`]) as `<out>/summary.json`.
 

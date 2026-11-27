@@ -243,10 +243,17 @@ class Wasi {
 }
 
 /**
- * What a failed allocation writes: Rust's allocation error (then a trap), libCEED's (then a
- * trap), PETSc's (an error of slidesim).
+ * What a failed allocation writes, each message as its source words it: Rust's allocation error
+ * (then a trap), libCEED's `CeedMalloc`, `CeedCalloc` and `CeedRealloc` (then a trap), PETSc's
+ * `PETSC_ERR_MEM` (55) as the petsc crate formats it (an error of slidesim).
  */
-const ALLOCATION_FAILED = /memory allocation of \d+ bytes failed|failed to allocate|out of memory/i;
+const ALLOCATION_FAILED = new RegExp(
+  [
+    String.raw`memory allocation of \d+ bytes failed`,
+    String.raw`(?:posix_memalign|calloc|realloc) failed to allocate \d+ members of size \d+`,
+    String.raw`PETSc error 55: Out of memory`,
+  ].join("|"),
+);
 
 /** `bytes` in MiB, rounded. */
 const mebibytes = (bytes) => Math.round(bytes / (1 << 20));

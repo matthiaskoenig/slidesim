@@ -4,9 +4,7 @@
 #[cfg(feature = "native")]
 use std::path::Path;
 
-#[cfg(feature = "native")]
-use anyhow::Context;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 #[cfg(not(feature = "native"))]
 use cells::KernelLayout;
 use contracts::{Scene, Study, check_cells, check_maps};
@@ -45,12 +43,13 @@ impl Inputs {
     /// [`crate::Simulation::new`] checks it, so that an error of the study is reported first.
     /// With the feature `native`.
     ///
-    /// Errors: those of [`Study::load`], [`Scene::load`], [`check_maps`] and [`check_cells`], the
-    /// fields linked to the cells, and a cell model which cannot be read.
+    /// Errors: those of [`Study::load`], [`Scene::load`], [`check_maps`] and [`check_cells`] and
+    /// the fields linked to the cells, all with the context [`OnEveryProcess`] (every process
+    /// reads the same files), and a cell model which cannot be read.
     #[cfg(feature = "native")]
     pub fn load(study_path: &Path) -> Result<Inputs> {
-        let study = Study::load(study_path).context("cannot load the study")?;
-        let scene = Scene::load(&study.scene).context("cannot load the scene")?;
+        let study = Study::load(study_path).context(OnEveryProcess("cannot load the study"))?;
+        let scene = Scene::load(&study.scene).context(OnEveryProcess("cannot load the scene"))?;
         check(&study, &scene)?;
         let model_sbml = study
             .cells
@@ -88,13 +87,19 @@ const NO_CELL_MODEL: &str = "cells: the inputs have no cell model";
 const NO_CELL_MODEL: &str = "cells: the inputs have no kernel of the cell model";
 
 /// Checks the inputs before anything is made, as [`crate::Simulation::new`] does: a study of at
-/// least one field and, with cells, a cell model (both errors on every process, with
-/// [`OnEveryProcess`]: every process has the inputs), then [`check`].
+/// least one field, its times (again: a study may be changed after it was loaded) and, with
+/// cells, a cell model (errors on every process, with [`OnEveryProcess`]: every process has the
+/// inputs), then [`check`].
 pub(crate) fn check_inputs(inputs: &Inputs) -> Result<()> {
     ensure!(
         !inputs.study.fields.is_empty(),
         OnEveryProcess("the study has no fields")
     );
+    inputs
+        .study
+        .time
+        .validate()
+        .context(OnEveryProcess("invalid study"))?;
     check(&inputs.study, &inputs.scene)?;
     ensure!(
         inputs.study.cells.is_none() || inputs.has_cell_model(),
@@ -105,12 +110,16 @@ pub(crate) fn check_inputs(inputs: &Inputs) -> Result<()> {
 
 /// Checks the study against its scene before anything is solved: the maps the study names are
 /// in the scene ([`check_maps`]), its `cells` section against the study and the scene
-/// ([`check_cells`]) and the fields linked to the cells ([`linked_fields`]).
+/// ([`check_cells`]) and the fields linked to the cells ([`linked_fields`]). Every process has
+/// the same inputs, so an error carries the context [`OnEveryProcess`] (`invalid study`).
 pub(crate) fn check(study: &Study, scene: &Scene) -> Result<()> {
-    check_maps(study, scene)?;
-    check_cells(study, scene)?;
-    if let Some(spec) = &study.cells {
-        linked_fields(study, spec)?;
-    }
-    Ok(())
+    let checked = || -> Result<()> {
+        check_maps(study, scene)?;
+        check_cells(study, scene)?;
+        if let Some(spec) = &study.cells {
+            linked_fields(study, spec)?;
+        }
+        Ok(())
+    };
+    checked().context(OnEveryProcess("invalid study"))
 }

@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use contracts::{RESULT_VERSION, ResultMeta};
-use contracts::{RasterOptions, ResultOptions};
+use contracts::{RESULT_VERSION, RasterOptions, ResultMeta, ResultOptions};
 use mesh::CanonicalMesh;
 use petsc::Petsc;
 use simulation::raster::Raster;

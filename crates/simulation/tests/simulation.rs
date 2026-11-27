@@ -45,16 +45,17 @@ fn summary_without_timings(simulation: &Simulation) -> String {
     without_timings(&serde_json::to_string_pretty(simulation.summary()).unwrap())
 }
 
-/// The simulation of `cells_toy/spt` shortened to 4 output times and an end after the last:
+/// The simulation of `cells_toy/spt` shortened to 4 output times, the last at the end:
 /// `next_output` returns the indices in order, the first at time 0 without a step, each at its
-/// output time, then `None` at the end of the study, and `None` again after it.
+/// output time, then `None` without a step (the summary of the whole run complete), and `None`
+/// again after it.
 #[test]
 fn next_output_visits_every_output() {
     c_cache();
     let mut inputs = Inputs::load(&studies("cells_toy/spt.study.json")).unwrap();
     let times = [0.0, 60.0, 120.0, 240.0];
     inputs.study.time.outputs = times.to_vec();
-    inputs.study.time.end = 300.0;
+    inputs.study.time.end = 240.0;
     let petsc = Petsc::init(&[]).unwrap();
     let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     assert_eq!(simulation.output_times(), times);
@@ -84,15 +85,21 @@ fn next_output_visits_every_output() {
             assert_eq!(summary["cells"]["steps"].as_u64(), Some(0));
         }
     }
+    let last = simulation.field_values(0).unwrap();
     assert_eq!(simulation.next_output().unwrap(), None);
-    assert_eq!(simulation.time(), 300.0);
+    assert_eq!(simulation.time(), 240.0);
+    assert_eq!(
+        simulation.field_values(0).unwrap(),
+        last,
+        "no step after the last output"
+    );
     let summary = serde_json::to_value(simulation.summary()).unwrap();
     assert!(summary["cells"]["steps"].as_u64().unwrap() > 0);
     let phases = summary["phases"].as_object().unwrap();
     assert_eq!(phases.len(), 6);
     assert!(phases["cells"].as_f64().unwrap() > 0.0);
     assert_eq!(simulation.next_output().unwrap(), None);
-    assert_eq!(simulation.time(), 300.0);
+    assert_eq!(simulation.time(), 240.0);
 }
 
 /// A study whose first output time is after the start: the first `next_output` steps to it.
@@ -154,7 +161,8 @@ fn mesh_override_matches_generated() {
 
 /// Inputs built in memory (as the browser build builds them from JSON) are checked before
 /// anything is made, with errors which every process has: a study with cells but no cell model,
-/// and a study without fields (whose time would be no field's).
+/// a study without fields (whose time would be no field's), output times changed in code which
+/// `study/1` refuses (an end after the last), and a map the scene does not have.
 #[test]
 fn invalid_inputs_fail_on_every_process() {
     let petsc = Petsc::init(&[]).unwrap();
@@ -179,4 +187,24 @@ fn invalid_inputs_fail_on_every_process() {
         format!("{e:#}").contains("the study has no fields"),
         "{e:#}"
     );
+
+    let mut inputs = Inputs::load(&studies("tissue_oxygen/study.json")).unwrap();
+    inputs.study.time.outputs = vec![0.0, 1.0];
+    inputs.study.time.end = 2.0;
+    let e = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {})
+        .err()
+        .expect("an end after the last output time");
+    assert!(e.downcast_ref::<OnEveryProcess>().is_some(), "{e:#}");
+    assert_eq!(
+        format!("{e:#}"),
+        "invalid study: time.outputs must end at time.end 2, got 1"
+    );
+
+    let mut inputs = Inputs::load(&studies("lobule_toy/study.json")).unwrap();
+    inputs.scene.maps.clear();
+    let e = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {})
+        .err()
+        .expect("a map the scene does not have");
+    assert!(e.downcast_ref::<OnEveryProcess>().is_some(), "{e:#}");
+    assert!(format!("{e:#}").starts_with("invalid study: "), "{e:#}");
 }

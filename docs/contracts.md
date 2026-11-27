@@ -169,7 +169,7 @@ solvers.
 | `fields` | the diffusing fields, at least one, with unique ids |
 | `perfusion` | optional: the Darcy flow; required for fields with `advection` |
 | `cells` | optional: a cell model on the elements, coupled to the fields |
-| `time` | `end` (s), `dt` (s, the first step if adaptive), `adaptive` (default false), `outputs` (s, sorted, within `[0, end]`) |
+| `time` | `end` (s), `dt` (s, the first step if adaptive), `adaptive` (default false), `outputs` (s, required: at least one time, strictly increasing, the first >= 0 and the last equal to `end`; output index 0 is the state at the first time, the initial state when it is 0) |
 | `mesh` | `refinements`: the number of uniform refinements of the scene's mesh (default 0) |
 | `result` | optional: `raster` `{um_per_px, origin_um, levels}` also writes the fields as the raster pyramid of [`result/1`](#result1): `um_per_px` > 0 and finite, `origin_um` (finite, default the lower corner of the mesh's bounding box), `levels` >= 1 |
 | `solver` | `linear_rtol`: the relative tolerance of the linear solves of the transport, in (0, 1), default 1e-10 (the residual of each solve reduced by it; with fixed steps the time integration has no error estimate to derive it from, so the study sets it; `-ksp_rtol` in `petsc_options` overrides it); `petsc_options`: a PETSc options string, for example `-ksp_type cg -pc_type jacobi` |
@@ -294,8 +294,11 @@ holds its edges as vertex index pairs `[min, max]`, the pairs ascending. A tag o
 (points) is not written: no array and no entry of `tags`. `cells/element` is ascending; a study
 without cells has an empty `cells/element` (shape `[0]`) and no `cells/<value>`. The rows of
 `fields/<id>` and `cells/<value>` hold the fill value NaN until their output time is written:
-`slidesim run` writes each output time as it reaches it (the chunks first, then `written`), so a
-viewer may read a store while the run goes on.
+`slidesim run` writes each output time as it reaches it (the chunks first, then `written`, whose
+root attributes replace the old ones by a rename), so a viewer may read a store while the run goes
+on. That order holds against a crash of the process: a store left by a run which ended early is
+complete below `written`. It is not made durable against a power loss (no `fsync`): after one,
+the file system may hold a `written` newer than the chunks it counts.
 
 The raster pyramid (`result.raster` of the study) frames the results for a slide image. Level 0
 covers the bounding box of the mesh from `origin_um` (default: the lower corner of the box):
@@ -310,7 +313,11 @@ mean of the valid (not NaN) pixels of its block of 2 x 2 of level k, a block cut
 averaging the pixels it has, a block without a valid pixel NaN; levels past 1 x 1 stay 1 x 1.
 Each output time is one chunk per 256 x 256 block, written after the fields of that time and
 before `written` counts it. A raster of more than 2^28 pixels in level 0 is refused when the run
-starts, the message naming `result.raster.um_per_px`.
+starts, the message naming `result.raster.um_per_px`. Process 0 makes the raster and holds, per
+pixel of level 0, the triangle it lies in (4 bytes) and each output time the pyramid of a field
+(f32, about 5.3 bytes with the coarser levels) and the chunks it encodes: at the cap of 2^28
+pixels more than 3 GB, so a raster near the cap needs a machine with that much memory on
+process 0.
 
 The mesh is limited to about 40 million finest triangles: the writer gathers the canonical mesh
 onto process 0 (`Mesh::canonical`, about 44 bytes per triangle with its vertices and tags), and
@@ -334,30 +341,36 @@ Attributes (`ResultMeta`):
 ### Live API
 
 The browser build exposes the same arrays for a running simulation; the declarations are in
-`wasm/js/slidesim.d.ts` (type check: `npm run typecheck --prefix wasm/js`, TypeScript 5.6.3 of its
-lock), implemented by `wasm/js/slidesim.mjs`. `createSimulation(options)` resolves to a `Simulation` whose `mesh`
-holds `mesh/vertices`, `mesh/triangles`, `mesh/element` and `mesh/tags/*`, `times` is the `time`
-array and `meta` the `ResultMeta`. `step()` advances to the next output time and returns its index
-(`null` when done); `field(id)` is `fields/<id>` at the current time index, `cellIds` is
-`cells/element` and `cellValues(name)` is `cells/<name>` at the current time index. The arrays
-are copies the caller owns.
+`wasm/js/slidesim.d.ts` (type check: `npm run typecheck --prefix wasm/js`, TypeScript 5.6.3 of
+its lock), implemented by `wasm/js/slidesim.mjs`. `createSimulation(options)` resolves to a
+`Simulation` whose `mesh` holds `mesh/vertices`, `mesh/triangles`, `mesh/element` and
+`mesh/tags/*`, `times` is the `time` array and `meta` the `ResultMeta`. `step()` advances to the
+next output time and returns its index (`null` when done); `field(id)` is `fields/<id>` at the
+current time index, `cellIds` is `cells/element` and `cellValues(name)` is `cells/<name>` at the
+current time index. The arrays are copies the caller owns.
 
-Live semantics: after `createSimulation` resolves the simulation is at output index 0, the
-initial state: `time == times[0]`, `field()` and `cellValues()` return the values at index 0, and
-`meta.written == 1`. Each `step()` advances to the next output index and returns it (the first
-`step()` returns 1) and `null` when there is none left; then `meta.complete` is true. `written`
-is the number of output times reached so far, as in `result/1` where an index `t < written` is
-complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh,
-and `log()` the array `log` (the quality line of a generated mesh). `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
-are supplied by the caller (the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`, and the map `zonation`); slidesim fixes no names.
+Live semantics: after `createSimulation` resolves the simulation is at output index 0, the state
+at `times[0]` (the initial state when `times[0] == 0`; a later first output time is reached by a
+step within `createSimulation`): `time == times[0]`, `field()` and `cellValues()` return the
+values at index 0, and `meta.written == 1`. Each `step()` advances to the next output index and
+returns it (the first `step()` returns 1) and `null` when there is none left; then
+`meta.complete` is true, and the simulation stays at the last output time, which `study/1` makes
+`time.end`: `time` is the last of `times`, and `field()` and `cellValues()` return the values of
+the last index. `written` is the number of output times reached so far, as in `result/1` where an
+index `t < written` is complete. `meshQuality()` is the quality report of a generated mesh, `null`
+for a loaded mesh, and `log()` the array `log` (the quality line of a generated mesh).
+`lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names are supplied by the caller
+(the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`,
+and the map `zonation`); slidesim fixes no names.
+
 `CreateOptions.memory.maximumPages` caps the wasm memory: the maximum of the memory the host
 creates for the simulation, for a compiled module and bytes alike. Exceeding it is an `Error`
-naming the cap: an error of slidesim when PETSc's allocation failed (the simulation stays usable),
-a trap when Rust's or libCEED's did (the simulation is unusable). Mmg's own cap of 2 GiB in wasm,
-below, holds above it. Each simulation has its own instance of `slidesim.wasm` and its own
-memory, so a trap ends only the simulation it happened in. The getters of a `Simulation` throw
-after a trap and after `free()` like its methods; `mesh` is the simulation's own arrays, the same
-on every access (not copies).
+naming the cap: an error of slidesim when PETSc's allocation failed (the simulation stays
+usable), a trap when Rust's or libCEED's did (the simulation is unusable). Mmg's own cap of 2 GiB
+in wasm, below, holds above it. Each simulation has its own instance of `slidesim.wasm` and its
+own memory, so a trap ends only the simulation it happened in. The getters of a `Simulation`
+throw after a trap and after `free()` like its methods; `mesh` is the simulation's own arrays,
+the same on every access (not copies).
 
 Under the live API lies the C ABI of `slidesim.wasm` (`crates/slidesim-wasm`, a WASI reactor,
 `_initialize` first), over its memory, pointers and lengths `u32` byte offsets and counts. The
@@ -371,7 +384,7 @@ there.
 | --- | --- |
 | `slidesim_alloc(len) -> ptr`, `slidesim_free(ptr, len)` | memory for the caller's bytes |
 | `slidesim_create(ptr, len) -> i32` | the simulation of the JSON `{"scene", "study", "kernel", "mesh"?}`: its handle, -1 with the error |
-| `slidesim_next_output(h) -> i32` | steps to the next output time: its index (the first, at time 0, without a step), -1 when none is left, -2 with the error |
+| `slidesim_next_output(h) -> i32` | steps to the next output time: its index (the first at time 0 without a step), -1 when none is left (no step: the simulation stays at the last output time), -2 with the error |
 | `slidesim_time(h) -> f64` | the time reached (s) |
 | `slidesim_array(h, name_ptr, name_len) -> ptr`, `slidesim_array_len() -> u32` | the bytes of an array now, valid until the next `slidesim_array`; 0 with the error |
 | `slidesim_error_ptr() -> ptr`, `slidesim_error_len() -> u32` | the message of the last error (UTF-8) |
@@ -386,11 +399,12 @@ a scene whose mesh (without `mesh`) or maps are files is an error naming the fil
 `slidesim_kernel.assign`, which the host binds to the kernel's `sbmlsim_kernel_init`,
 `sbmlsim_kernel_advance` and `sbmlsim_kernel_assign` once the kernel is instantiated (`assign`
 evaluates the targets of the assignment rules in `cells.outputs`; with a kernel which has none,
-whose `kernel.json` has no `assigned_ids`, such an output is refused and `assign` never called). The arrays are the names of `result/1`, little endian (`fields/<id>`,
-`cells/<value>` and `raster/<field>/<level>` the row now), and `meta` (the `ResultMeta`, `written`
-and `complete` as above), `summary` (`summary.json`) and `quality` (`null` for a mesh of the
-inputs) as JSON, and `log`: what the simulation reported, UTF-8, one line each (the quality line
-of a generated mesh, which `slidesim run` prints); slidesim writes nothing to stdout or stderr.
+whose `kernel.json` has no `assigned_ids`, such an output is refused and `assign` never called).
+The arrays are the names of `result/1`, little endian (`fields/<id>`, `cells/<value>` and
+`raster/<field>/<level>` the row now), and `meta` (the `ResultMeta`, `written` and `complete` as
+above), `summary` (`summary.json`) and `quality` (`null` for a mesh of the inputs) as JSON, and
+`log`: what the simulation reported, UTF-8, one line each (the quality line of a generated mesh,
+which `slidesim run` prints); slidesim writes nothing to stdout or stderr.
 A memory growth past the host's cap fails the call (a trap or an error); Mmg, the remesher of the
 mesher, caps itself at 2 GiB in wasm (a constant of
 `scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`; PETSc's adaptor sets no

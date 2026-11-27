@@ -70,8 +70,12 @@ const ZSTD_LEVEL: i32 = 3;
 #[cfg(not(target_os = "wasi"))]
 const RASTER_CHUNK: u64 = 256;
 
-/// The context of every error of the writer.
-const CANNOT_WRITE: OnEveryProcess = OnEveryProcess("cannot write result.zarr");
+/// The context of every error of the layout and the writer: of the store of `slidesim run`, or
+/// of the arrays in memory of the browser build, which writes no store.
+#[cfg(not(target_os = "wasi"))]
+pub(crate) const CANNOT_WRITE: OnEveryProcess = OnEveryProcess("cannot write result.zarr");
+#[cfg(target_os = "wasi")]
+pub(crate) const CANNOT_WRITE: OnEveryProcess = OnEveryProcess("cannot set up the result arrays");
 
 /// Writes the store of a run, output time by output time (see the module).
 #[cfg(not(target_os = "wasi"))]
@@ -579,7 +583,7 @@ fn mesh_error(e: MeshError) -> anyhow::Error {
     if everywhere {
         e.context(CANNOT_WRITE)
     } else {
-        e.context("cannot write result.zarr")
+        e.context(CANNOT_WRITE.0)
     }
 }
 

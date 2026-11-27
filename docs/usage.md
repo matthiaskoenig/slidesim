@@ -15,14 +15,17 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 ```
 
 The same command runs on one process or on many under `mpiexec`: the mesh is partitioned over
-the processes (PT-Scotch). With fixed time steps, the linear solves to 1e-12
-(`solver.linear_rtol`) and the cells to rtol 1e-12 and atol 1e-16, every result agrees across 1,
-2 and 3 processes within 1e-10 relative, as the tests check. At the default settings (linear
-solves to 1e-10, the cell tolerances of the study) runs agree within what the tolerances allow:
-on the generated lobule the fields of 1 and 2 processes differ by 5e-11, the cells by up to
-1.4e-10, and a cell whose step control decides otherwise on inputs which differ in the last
-digits by its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve to 1e-6
-for speed, and agree to about that. `slidesim run --help` describes the outputs.
+the processes (PT-Scotch). With fixed time steps and tight settings, the linear solves to 1e-12
+(`solver.linear_rtol`) and the cells to rtol 1e-12 and atol 1e-16 (rtol 1e-14 for a stiff model
+such as SPT, whose step control otherwise decides differently on inputs which differ in the last
+digits), every result agrees across 1, 2 and 3 processes within 1e-10 relative, as the tests
+check. At the default settings (linear solves to 1e-10, the cell tolerances of the study) runs
+agree within what the tolerances allow: on the generated lobule the fields of 1 and 2 processes
+differ by 5e-11, the cells by up to 1.4e-10, and a cell whose step control decides otherwise by
+its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve the cells to rtol
+1e-6 for speed; how far their runs on different numbers of processes differ is not measured,
+but it is bounded by the integration error at that tolerance. `slidesim run --help` describes
+the outputs.
 
 ## What a run does
 
@@ -34,9 +37,9 @@ for speed, and agree to about that. `slidesim run --help` describes the outputs.
    process 0 first ([Meshing](methods/meshing.md)), and the run prints the quality of the mesh
    in one line; the zonation map of lobules is computed over the cells of each process.
 3. With `perfusion`: solves the steady Darcy flow once ([Perfusion](methods/perfusion.md)).
-4. Steps the fields to each output time of `time.outputs` in turn, then to `time.end`: each field
-   alone, or with `cells` all fields and the cells together by Strang splitting
-   ([Cell models](methods/cells.md)).
+4. Steps the fields to each output time of `time.outputs` in turn, the last of which is
+   `time.end`: each field alone, or with `cells` all fields and the cells together by Strang
+   splitting ([Cell models](methods/cells.md)).
 5. At each output time (time 0 before any step) writes every field, and with cells the cells,
    as VTU files and into `result.zarr`; at the end, process 0 writes `summary.json`.
 

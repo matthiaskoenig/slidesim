@@ -96,11 +96,14 @@ export interface SimulationMesh {
 }
 
 /**
- * A running simulation. After `createSimulation` resolves it is at output index 0, the initial
- * state: `time === times[0]`, `field()` and `cellValues()` return the values at index 0 and
- * `meta.written === 1`. Each `step()` advances to the next output index and returns it (the
- * first call returns 1), or returns `null` when there is none left, after which
- * `meta.complete` is true. `written` is the number of output times reached so far, as in the
+ * A running simulation. After `createSimulation` resolves it is at output index 0, the state at
+ * `times[0]` (the initial state when `times[0] == 0`; `study/1` requires at least one output
+ * time, strictly increasing from >= 0, the last at `time.end`): `time === times[0]`, `field()`
+ * and `cellValues()` return the values at index 0 and `meta.written === 1`. Each `step()`
+ * advances to the next output index and returns it (the first call returns 1), or returns `null`
+ * when there is none left, after which `meta.complete` is true and the simulation stays at the
+ * last output time: `time` is the last of `times` and `field()` and `cellValues()` return the
+ * values of the last index. `written` is the number of output times reached so far, as in the
  * `result/1` store where an index `t < written` is complete.
  */
 export interface Simulation {

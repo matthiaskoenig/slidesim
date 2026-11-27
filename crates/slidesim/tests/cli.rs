@@ -56,6 +56,12 @@ fn slidesim(args: &[String]) -> Run {
     slidesim_with_env(args, &[])
 }
 
+/// Whether the stderr of an `mpiexec` run tells of `MPI_Abort` (Open MPI writes `MPI_ABORT was
+/// invoked`, MPICH `application called MPI_Abort`).
+fn aborted(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("mpi_abort")
+}
+
 /// The C compiler cache of the tests: in the target directory, not the user's cache.
 fn c_cache() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("sbmlsim-c-cache")
@@ -682,6 +688,55 @@ fn unknown_tag_fails_cleanly() {
     if let Some(run) = slidesim_parallel(2, &args(&bad, &out, &[])) {
         assert!(!run.status.unwrap().success(), "{}", run.stderr);
         assert!(run.stderr.contains(expected), "{}", run.stderr);
+        assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    }
+}
+
+/// Errors which every process meets end a run on two processes without `MPI_Abort`: each
+/// process prints the error and exits with 1. A study naming a map its scene lacks (the checks
+/// before anything is made) and a map which no process can read (agreed between the processes).
+#[test]
+fn errors_on_every_process_end_without_abort() {
+    let dir = scratch("errors_on_every_process_end_without_abort");
+    let toy = lobule_study().parent().unwrap().to_path_buf();
+    let mut scene: Value =
+        serde_json::from_str(&std::fs::read_to_string(toy.join("scene.json")).unwrap()).unwrap();
+    let mesh = std::path::absolute(toy.join(scene["mesh"]["path"].as_str().unwrap())).unwrap();
+    scene["mesh"]["path"] = Value::from(mesh.display().to_string());
+    // A map store without arrays: the scene names it, reading it fails.
+    std::fs::create_dir_all(dir.join("broken.zarr")).unwrap();
+    scene["maps"][0]["path"] = Value::from(dir.join("broken.zarr").display().to_string());
+    std::fs::write(dir.join("scene.json"), scene.to_string()).unwrap();
+    let study = |name: &str, edit: &dyn Fn(&mut Value)| {
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(lobule_study()).unwrap()).unwrap();
+        doc["scene"] = Value::from(dir.join("scene.json").display().to_string());
+        edit(&mut doc);
+        let path = dir.join(name);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        path
+    };
+    let unknown = study("unknown_map.json", &|doc| {
+        doc["perfusion"]["direction"]["map"] = Value::from("nope");
+    });
+    let unreadable = study("unreadable_map.json", &|_| {});
+    for (path, expected) in [
+        (unknown, "invalid study: "),
+        (unreadable, "cannot read the maps: "),
+    ] {
+        let Some(run) = slidesim_parallel(2, &args(&path, &dir.join("out"), &[])) else {
+            return;
+        };
+        assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+        for rank in 0..2 {
+            let prefix = format!("[rank {rank}] error: {expected}");
+            assert!(
+                run.stderr.lines().any(|l| l.starts_with(&prefix)),
+                "no '{prefix}': {}",
+                run.stderr
+            );
+        }
+        assert!(!aborted(&run.stderr), "{}", run.stderr);
         assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
     }
 }
@@ -1399,7 +1454,7 @@ fn mesher_failure_on_process_0_stops_all() {
         assert!(line.contains("cross at (50, 50) um"), "{line}");
     }
     assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
-    assert!(!run.stderr.contains("MPI_Abort"), "{}", run.stderr);
+    assert!(!aborted(&run.stderr), "{}", run.stderr);
 }
 
 /// A study with `result.raster` writes the raster pyramid into `result.zarr`; one without it

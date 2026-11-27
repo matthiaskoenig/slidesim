@@ -31,8 +31,8 @@
 //!   handle (>= 0), or -1 with the error. Every check, the mesh, the maps, the flow and the setup
 //!   of the fields and the cells (`simulation::Simulation::new`).
 //! - `slidesim_next_output(h) -> i32`: steps to the next output time and gives its index (the
-//!   first at time 0 without a step), -1 when there is none left (after a step to `time.end`),
-//!   -2 with the error.
+//!   first at time 0 without a step), -1 when there is none left (without a step: the last
+//!   output time is `time.end`, and the arrays stay those of it), -2 with the error.
 //! - `slidesim_time(h) -> f64`: the time the simulation reached (s).
 //! - `slidesim_array(h, name_ptr, name_len) -> ptr` and `slidesim_array_len() -> u32`: the bytes
 //!   of the array `name` now, valid until the next call of `slidesim_array`; the pointer 0 with
@@ -65,10 +65,11 @@
 //!
 //! Memory: a wasm32 memory has at most 4 GiB; the host may cap it lower (the maximum of the
 //! memory it creates: `wasm/host`, `CreateOptions.memory` of the JavaScript API), and an
-//! allocation past the cap fails the call (a trap, or an error of PETSc or Mmg). Mmg, the remesher of the mesher, caps itself at 2 GiB
-//! in wasm (the constant of `scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`: half the
-//! address space by Mmg's own rule): PETSc's adaptor sets no `MMG2D_IPARAM_mem`, so the cap of
-//! the host cannot reach Mmg's own limit.
+//! allocation past the cap fails the call (a trap, or an error of PETSc or Mmg). Mmg, the
+//! remesher of the mesher, caps itself at 2 GiB in wasm (the constant of
+//! `scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`: half the address space by Mmg's own
+//! rule): PETSc's adaptor sets no `MMG2D_IPARAM_mem`, so the cap of the host cannot reach Mmg's
+//! own limit.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -80,7 +81,7 @@ use contracts::{MeshSource, Scene, Study};
 use mesher::{Quality, TaggedMesh};
 use petsc::Petsc;
 use serde_json::Value;
-use simulation::{Inputs, ResultLayout, Simulation};
+use simulation::{Inputs, ResultLayout, Simulation, causes};
 
 /// The name of the study in `meta.study`: the inputs carry its JSON, not a file.
 const STUDY: &str = "study.json";
@@ -108,23 +109,6 @@ thread_local! {
 
 fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> T {
     STATE.with(|state| f(&mut state.borrow_mut()))
-}
-
-/// The error and its causes, `error: cause: cause`, without a cause whose text the ones before
-/// already show (as `slidesim run` prints them).
-fn causes(e: &anyhow::Error) -> String {
-    let mut text = String::new();
-    for cause in e.chain() {
-        let cause = cause.to_string();
-        if text.contains(&cause) {
-            continue;
-        }
-        if !text.is_empty() {
-            text.push_str(": ");
-        }
-        text.push_str(&cause);
-    }
-    text
 }
 
 impl State {

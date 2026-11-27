@@ -175,7 +175,7 @@ fn mesh(args: &MeshArgs) -> ExitCode {
     match mesh_command::mesh(&petsc, &args.scene, &args.out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {}", causes(&e));
+            eprintln!("error: {}", simulation::causes(&e));
             ExitCode::FAILURE
         }
     }
@@ -199,32 +199,15 @@ fn run_command(args: &RunArgs, started: Instant) -> ExitCode {
         Err(e) => {
             let comm = petsc.comm();
             if comm.size() > 1 {
-                eprintln!("[rank {}] error: {}", comm.rank(), causes(&e));
+                eprintln!("[rank {}] error: {}", comm.rank(), simulation::causes(&e));
                 if e.downcast_ref::<simulation::OnEveryProcess>().is_some() {
                     // Every process has it: none waits for another.
                     return ExitCode::FAILURE;
                 }
                 petsc.abort_world(1);
             }
-            eprintln!("error: {}", causes(&e));
+            eprintln!("error: {}", simulation::causes(&e));
             ExitCode::FAILURE
         }
     }
-}
-
-/// The error and its causes, `error: cause: cause`, without a cause whose text the ones before
-/// already show (errors which print their source in their own message).
-fn causes(e: &anyhow::Error) -> String {
-    let mut text = String::new();
-    for cause in e.chain() {
-        let cause = cause.to_string();
-        if text.contains(&cause) {
-            continue;
-        }
-        if !text.is_empty() {
-            text.push_str(": ");
-        }
-        text.push_str(&cause);
-    }
-    text
 }

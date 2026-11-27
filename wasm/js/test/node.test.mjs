@@ -204,6 +204,13 @@ test("node_matches_wasmtime", async () => {
     compared += 1;
   }
   assert.equal(compared, 3);
+  // After step() returned null: no step past the last output time (study/1 ends time.outputs
+  // at time.end), so the time and every array are those of the last output, bitwise.
+  const last = `outputs/${compared - 1}`;
+  assert.equal(sim.time, sim.times[sim.times.length - 1]);
+  same(`${last}/time`, Float64Array.of(sim.time));
+  for (const { id } of fields) same(`${last}/fields/${id}`, sim.field(id));
+  for (const name of cellValues) same(`${last}/cells/${name}`, sim.cellValues(name));
   assert.deepEqual(sim.meta, JSON.parse(wasmtime("meta.json")));
   // The summary but its wall times.
   const timeless = (summary) => {
@@ -351,6 +358,21 @@ test("error_is_not_a_trap", async () => {
   assert.equal(sim.step(), null);
   assert.ok(sim.field("S").some((v) => v > 0));
   sim.free();
+});
+
+test("oversized_raster_is_refused_by_name", async () => {
+  // More than 2^28 pixels in level 0: refused before anything is written, naming the option. The
+  // browser build writes no store: the context names the arrays in memory, not result.zarr.
+  const study = { ...diffusionStudy(), result: { raster: { um_per_px: 0.01, levels: 1 } } };
+  await assert.rejects(
+    createSimulation({ ...(await modules()), scene: lobuleScene({}, TAGS), study }),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^cannot set up the result arrays: .*result\.raster\.um_per_px/);
+      assert.doesNotMatch(error.message, /result\.zarr/);
+      return true;
+    },
+  );
 });
 
 test("memory_option_is_checked", async () => {
