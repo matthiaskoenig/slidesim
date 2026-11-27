@@ -77,11 +77,12 @@ kill_case() {
     *-KILL) kill -KILL "$pid" ;;
     *-INT) kill -INT -- "-$pgid" ;;
     esac
+    # The shell reports a job which a KILL ended ("Killed") while it polls: not to the log.
     for i in $(seq 1 30); do
         left=$(( $(marked "sleep 600\\.$n" | wc -l) + $(marked "$dummy" | wc -l) ))
         ((left == 0)) && break
         sleep 0.5
-    done
+    done 2>/dev/null
     { wait "$pid"; } 2>/dev/null
     if ((left == 0)); then
         echo "ok   $case: nothing left after $((i / 2)) s"
