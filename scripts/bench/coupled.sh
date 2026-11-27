@@ -5,9 +5,11 @@
 # solve are the deterministic measure, the wall times depend on the load of the machine.
 #
 # - quick: the generated lobule on the scene's mesh, unrefined, 1 h,
-#   testdata/studies/lobules/spt_quick.study.json, on 1 process;
-# - lobule: the generated lobule, testdata/studies/lobules/spt_batched.study.json, on 1 process;
-# - lobules7: the 7 lobules of testdata/studies/lobules/ring1_spt_batched.study.json, 1 process;
+#   testdata/studies/lobules/spt_quick.study.json, on 1 process (or NP);
+# - lobule: the generated lobule, testdata/studies/lobules/spt_batched.study.json, on 1 process
+#   (or NP);
+# - lobules7: the 7 lobules of testdata/studies/lobules/ring1_spt_batched.study.json, 1 process
+#   (or NP);
 # - field: the real-slide field 281mg_m1, testdata/studies/slide_fields/281mg_m1, on NP
 #   processes;
 # - slide: the 281 mg/kg slide of milestone 3 (41,252 cells, 165,008 triangles after one
@@ -19,16 +21,18 @@
 #
 # Prints per run the phases of summary.json (s), the linear solves of the transport (KSPSolve
 # events), their Krylov iterations (the sum over the solves of `-ksp_converged_reason`), the
-# preconditioner setups (PCSetUp events of the outer solvers: the multigrid), the wall time of
-# the run and the load average before and after (uptime). The run folders keep summary.json,
-# log_view.txt and run.log.
+# preconditioner setups (PCSetUp events of the outer solvers: the multigrid), the imbalance of
+# the cells (the step attempts of a process, the sum over the cell steps of the largest over
+# their mean, `cells.attempts` of summary.json, "-" for a binary without it; and the largest
+# time of a process in its cells over the mean), the wall time of the run and the load average
+# before and after (uptime). The run folders keep summary.json, log_view.txt and run.log.
 #
 # Settings (environment variables, defaults in brackets):
 #   STUDIES        the studies to run: quick, lobule, lobules7, field, slide [quick]
 #   SLIDE_DATA     folder of the 281 mg/kg study and scene [.superpowers/data/m3-baseline]
 #   OUT            output folder of the runs [target/bench/coupled]
 #   TAG            name of this variant, the prefix of the run folders [run]
-#   NP             processes of the field and slide studies [4]
+#   NP             processes of the runs [field and slide: 4, the others: 1]
 #   END            simulated time in s, the outputs hourly up to it [7200; quick: 3600, the
 #                  outputs half-hourly]
 #   LIMIT          wall-clock limit of each run, a `timeout` duration [5m]
@@ -48,7 +52,7 @@ STUDIES=${STUDIES:-quick}
 SLIDE_DATA=$(realpath -m "${SLIDE_DATA:-$ROOT/.superpowers/data/m3-baseline}")
 OUT=$(realpath -m "${OUT:-$ROOT/target/bench/coupled}")
 TAG=${TAG:-run}
-NP=${NP:-4}
+NP=${NP:-}
 END_SET=${END:-}
 END=${END:-7200}
 LIMIT=${LIMIT:-5m}
@@ -74,27 +78,27 @@ study() {
     slide)
         source=$SLIDE_DATA/spt_batched.study.json
         scene=$SLIDE_DATA/scene/scene.json
-        np=$NP
+        np=${NP:-4}
         ;;
     quick)
         source=$ROOT/testdata/studies/lobules/spt_quick.study.json
         scene=$ROOT/testdata/studies/lobules/scene.json
-        np=1
+        np=${NP:-1}
         ;;
     lobule)
         source=$ROOT/testdata/studies/lobules/spt_batched.study.json
         scene=$ROOT/testdata/studies/lobules/scene.json
-        np=1
+        np=${NP:-1}
         ;;
     lobules7)
         source=$ROOT/testdata/studies/lobules/ring1_spt_batched.study.json
         scene=$ROOT/testdata/studies/lobules/ring1.scene.json
-        np=1
+        np=${NP:-1}
         ;;
     field)
         source=$ROOT/testdata/studies/slide_fields/281mg_m1/spt_batched.study.json
         scene=$ROOT/testdata/studies/slide_fields/281mg_m1/scene.json
-        np=$NP
+        np=${NP:-4}
         ;;
     *)
         echo "unknown study $1 (quick, lobule, lobules7, field, slide)" >&2
@@ -115,8 +119,9 @@ study() {
     echo "$path $np"
 }
 
-printf '%-16s %8s %8s %9s %9s %8s %8s %7s %8s %9s %7s %7s  %s\n' run setup pressure transport \
-    exchange cells output solves iters/sol pc_setups wall_s load0 load1
+printf '%-16s %3s %8s %8s %9s %9s %8s %8s %7s %8s %9s %8s %8s %7s %7s  %s\n' run np setup \
+    pressure transport exchange cells output solves iters/sol pc_setups att_imb sec_imb wall_s \
+    load0 load1
 for name in $STUDIES; do
     read -r path np < <(study "$name")
     dir=$OUT/${TAG}_$name
@@ -138,12 +143,16 @@ for name in $STUDIES; do
     # nested setups of the levels; the count of the outermost is that of the KSPSetUp of the
     # TS's solvers, which -log_view does not separate, so the PCSetUp count is printed whole.
     pc_setups=$(awk '$1 == "PCSetUp" { print $2; exit }' "$dir/log_view.txt")
-    jq -r '.phases | [.setup, .pressure, .transport, .exchange, .cells, .output]
+    jq -r '(.phases | [.setup, .pressure, .transport, .exchange, .cells, .output]) +
+        [(.cells.attempts // null | if . then .max / .mean else "-" end),
+         (.cells.seconds // null | if . then .max / .mean else "-" end)]
         | map(tostring) | join(" ")' "$dir/summary.json" |
-        awk -v run="${TAG}_$name" -v solves="$solves" -v iterations="$iterations" \
-            -v setups="$pc_setups" -v wall="$wall" -v l0="$load0" -v l1="$load1" '{
-            printf "%-16s %8.1f %8.1f %9.1f %9.1f %8.1f %8.1f %7d %8.2f %9d %7.0f %7s %7s\n",
-                run, $1, $2, $3, $4, $5, $6, solves, (solves ? iterations / solves : 0),
-                setups, wall, l0, l1 }'
+        awk -v run="${TAG}_$name" -v np="$np" -v solves="$solves" -v iterations="$iterations" \
+            -v setups="$pc_setups" -v wall="$wall" -v l0="$load0" -v l1="$load1" '
+            function ratio(x) { return x == "-" ? "-" : sprintf("%.3f", x) }
+            {
+            printf "%-16s %3d %8.1f %8.1f %9.1f %9.1f %8.1f %8.1f %7d %8.2f %9d %8s %8s %7.0f %7s %7s\n",
+                run, np, $1, $2, $3, $4, $5, $6, solves, (solves ? iterations / solves : 0),
+                setups, ratio($7), ratio($8), wall, l0, l1 }'
 done
 echo "logs: $OUT"

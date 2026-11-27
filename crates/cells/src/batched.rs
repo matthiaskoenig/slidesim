@@ -17,6 +17,7 @@ use sbmlsim_c::{
 };
 use sbmlsim_engine::Stepper;
 
+use crate::balance::Balance;
 use crate::model::{Link, Outputs, QModel, Work};
 use crate::{
     CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Poison, Result, agree,
@@ -45,7 +46,8 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 /// per cell, strided restrictions, no basis), the QFunction of the model
 /// ([`sbmlsim_c::generate_qfunction`]: the model with the Rosenbrock integrator RODAS4, step
 /// attempts per point until it reaches the end of the advance, at most `MAX_ATTEMPTS`, 10^6)
-/// compiled once per process (`sbmlsim_c`, cached across processes and runs).
+/// compiled once and loaded by every process ([`CellModel::new`]; `sbmlsim_c`, cached across
+/// processes and runs).
 ///
 /// The cells are initialized as the engine path initializes its steppers (a
 /// [`sbmlsim_engine::Stepper`] of the model of the C target per cell, the defaults, the cell's
@@ -64,6 +66,12 @@ const _: () = assert!(size_of::<RosenbrockContext>() == 5 * size_of::<f64>());
 /// unit of the model) or too small to advance the time, which rejected steps cause (an error
 /// estimate above the tolerances, values which are not finite, a singular Jacobian), or after
 /// `MAX_ATTEMPTS` step attempts in one advance.
+///
+/// With the balance of the work ([`CellsSpec::balance`], `Balance`), the points of the operator
+/// are the cells this process keeps and those other processes send it (their states with the
+/// blood, parameters and controls), whose states, controls and counts go back after the
+/// application. Where the points do not fit, the operator is made again with room for an eighth
+/// more; the points beyond those of an advance are done, so the QFunction copies them.
 pub struct BatchedCells {
     species: Vec<String>,
     state_ids: Vec<String>,
@@ -74,10 +82,16 @@ pub struct BatchedCells {
     /// Of every cell, in the order of the parameters of the description (the field
     /// `parameters` of the QFunction).
     parameters: Vec<f64>,
+    /// The number of parameters of a cell.
+    n_parameters: usize,
     /// The control of every cell (`t`, `h`, done, failed), after the last advance.
     control: Vec<f64>,
     /// The accepted and rejected steps of every cell in the last advance.
     counts: Vec<f64>,
+    /// The points of the operator in an advance: the cells this process keeps, then those of
+    /// other processes it advances ([`Balance`]); their states (with the blood), parameters and
+    /// controls, then their states, controls and counts after it.
+    points: Points,
     /// Of each linked species.
     links: Vec<Link>,
     outputs: Outputs,
@@ -89,8 +103,14 @@ pub struct BatchedCells {
     comm: OwnedComm,
     /// The error of a failed advance, after which the cells are not advanced again.
     poison: Poison,
-    /// None where this process has no cells.
+    /// The operator of the points, of room for at least as many; none before an advance with
+    /// points on a process without cells.
     batch: Option<Batch>,
+    /// The work of the cells spread over the processes.
+    balance: Balance,
+    /// The QFunction of the model, for a larger operator.
+    qmodel: Arc<QModel>,
+    ceed: Ceed,
     /// The time the cells reached (s).
     t: f64,
 }
@@ -106,13 +126,26 @@ impl std::fmt::Debug for BatchedCells {
     }
 }
 
-/// The operator of the cells of a process and its vectors.
+/// The points of an advance on a process ([`BatchedCells::points`]).
+#[derive(Default)]
+struct Points {
+    states: Vec<f64>,
+    parameters: Vec<f64>,
+    control: Vec<f64>,
+    next: Vec<f64>,
+    counts: Vec<f64>,
+}
+
+/// The operator of the points of a process and its vectors, of room for `capacity` points: the
+/// points beyond those of an advance are done, so the QFunction copies them.
 struct Batch {
+    capacity: usize,
     qfunction: QFunction,
     /// Reads the states, controls and counts of the first of each pair of vectors (and the
     /// parameters) and writes those of the second.
     operator: Operator,
     state: [CVector; 2],
+    parameters: CVector,
     control: [CVector; 2],
     counts: [CVector; 2],
     /// The library of the function of the QFunction, dropped after the QFunction and the
@@ -121,15 +154,8 @@ struct Batch {
 }
 
 impl Batch {
-    /// The operator of the QFunction of `qmodel` on `ceed` for the `n` cells of the
-    /// `parameters`, with `context`.
-    fn new(
-        ceed: &Ceed,
-        qmodel: &QModel,
-        parameters: &[f64],
-        n: usize,
-        context: &RosenbrockContext,
-    ) -> Result<Batch> {
+    /// The operator of the QFunction of `qmodel` on `ceed` for `n` points, with `context`.
+    fn new(ceed: &Ceed, qmodel: &QModel, n: usize, context: &RosenbrockContext) -> Result<Batch> {
         let q = &qmodel.q;
         let (ns, np) = (q.state_ids.len(), q.parameter_ids.len());
         let model_error = |e: sbmlsim_c::CError| CellsError::Model {
@@ -167,7 +193,7 @@ impl Batch {
             Ok([CVector::new(ceed, n * size)?, CVector::new(ceed, n * size)?])
         };
         let (state, control, counts) = (pair(ns)?, pair(CONTROL)?, pair(COUNTS)?);
-        let parameters = CVector::from_slice(ceed, parameters)?;
+        let parameters = CVector::new(ceed, n * np)?;
         let mut operator = Operator::new(ceed, &qfunction)?;
         let read = [&state[0], &parameters, &control[0], &counts[0]];
         for ((name, r), v) in INPUTS.iter().zip(&restrictions).zip(read) {
@@ -179,37 +205,55 @@ impl Batch {
             operator.set_field(name, Some(r), None, FieldVector::Passive(v))?;
         }
         Ok(Batch {
+            capacity: n,
             qfunction,
             operator,
             state,
+            parameters,
             control,
             counts,
             _library: Arc::clone(&qmodel.library),
         })
     }
 
-    /// Applies the operator once, with `context` (whose attempts are [`MAX_ATTEMPTS`]): every
-    /// cell steps until it is done or failed, or has made `MAX_ATTEMPTS` step attempts, from the
-    /// states `fill` writes and the controls `control`. Afterwards `control` holds the controls,
-    /// `counts` the steps of this run and `states` the states. Whether every cell is done or
-    /// failed.
-    fn run(
-        &mut self,
-        context: &RosenbrockContext,
-        fill: impl FnOnce(&mut [f64]),
-        control: &mut [f64],
-        counts: &mut [f64],
-        states: &mut [f64],
-    ) -> Result<bool> {
-        self.state[0].with_array_mut(fill)?;
-        self.control[0].with_array_mut(|a| a.copy_from_slice(control))?;
+    /// Applies the operator once, with `context` (whose attempts are [`MAX_ATTEMPTS`]), to the
+    /// points of `points` (at most `capacity`): every point steps until it is done or failed, or
+    /// has made `MAX_ATTEMPTS` step attempts, from its state, parameters and control. Afterwards
+    /// `points.control` holds the controls, `points.counts` the steps of this run and
+    /// `points.next` the states.
+    fn run(&mut self, context: &RosenbrockContext, points: &mut Points) -> Result<()> {
+        let n = points.control.len() / CONTROL;
+        debug_assert!(n <= self.capacity);
+        // The points beyond `n`: done at the end of the advance, copied.
+        let unused = [context.t1, 0.0, 1.0, 0.0];
+        /// Writes `values`, then `rest` over and over.
+        fn fill<'a>(values: &'a [f64], rest: &'a [f64]) -> impl FnOnce(&mut [f64]) + 'a {
+            move |a: &mut [f64]| {
+                a[..values.len()].copy_from_slice(values);
+                for (k, v) in a[values.len()..].iter_mut().enumerate() {
+                    *v = rest[k % rest.len()];
+                }
+            }
+        }
+        self.state[0].with_array_mut(fill(&points.states, &[0.0]))?;
+        self.parameters
+            .with_array_mut(fill(&points.parameters, &[0.0]))?;
+        self.control[0].with_array_mut(fill(&points.control, &unused))?;
         self.counts[0].set_value(0.0)?;
         self.qfunction.set_context(&words(context))?;
         self.operator.apply_passive()?;
-        self.control[1].with_array(|a| control.copy_from_slice(a))?;
-        self.counts[1].with_array(|a| counts.copy_from_slice(a))?;
-        self.state[1].with_array(|a| states.copy_from_slice(a))?;
-        Ok(finished(control))
+        /// Takes the first `count` values into `out`.
+        fn take(out: &mut Vec<f64>, count: usize) -> impl FnOnce(&[f64]) + '_ {
+            move |a: &[f64]| {
+                out.clear();
+                out.extend_from_slice(&a[..count]);
+            }
+        }
+        let ns = points.states.len() / n.max(1);
+        self.control[1].with_array(take(&mut points.control, n * CONTROL))?;
+        self.counts[1].with_array(take(&mut points.counts, n * COUNTS))?;
+        self.state[1].with_array(take(&mut points.next, n * ns))?;
+        Ok(())
     }
 }
 
@@ -305,9 +349,14 @@ impl BatchedCells {
             h_min: H_MIN,
             attempts: f64::from(MAX_ATTEMPTS),
         };
-        let batch = (n > 0).then(|| Batch::new(ceed, qmodel, &parameters, n, &context));
+        let batch = (n > 0).then(|| Batch::new(ceed, qmodel, n, &context));
         let batch = agree(&comm.comm(), batch.transpose())?;
         Ok(BatchedCells {
+            points: Points::default(),
+            balance: Balance::new(comm.clone(), n, spec.balance),
+            qmodel: Arc::clone(qmodel),
+            ceed: ceed.clone(),
+            n_parameters: qmodel.q.parameter_ids.len(),
             species: spec.species.iter().map(|l| l.species.clone()).collect(),
             state_ids: qmodel.q.state_ids.clone(),
             next: vec![0.0; states.len()],
@@ -335,40 +384,47 @@ impl BatchedCells {
     /// copies on the host. The QFunction and its library, which the cells share, are not
     /// counted.
     pub fn memory_bytes(&self) -> usize {
-        let n = self.elements.len();
-        let (ns, np) = (self.state_ids.len(), self.parameters.len() / n.max(1));
+        let (ns, np) = (self.state_ids.len(), self.n_parameters);
+        let points = &self.points;
         let host = self.states.capacity()
             + self.next.capacity()
             + self.parameters.capacity()
             + self.control.capacity()
-            + self.counts.capacity();
-        let operators = n * (2 * (ns + CONTROL + COUNTS) + np);
+            + self.counts.capacity()
+            + points.states.capacity()
+            + points.parameters.capacity()
+            + points.control.capacity()
+            + points.next.capacity()
+            + points.counts.capacity();
+        let capacity = self.batch.as_ref().map_or(0, |b| b.capacity);
+        let operators = capacity * (2 * (ns + CONTROL + COUNTS) + np);
         (host + operators) * size_of::<f64>()
     }
 
     /// The advance of every cell of this process; a failure an error of the first element
-    /// which failed.
+    /// which failed. With the balance on, the cells this process keeps and those of other
+    /// processes it is sent are advanced here, and the others of this process elsewhere
+    /// ([`Balance`]). Collective, if the balance is on.
     fn advance_local(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
         let n = self.elements.len();
-        let (ns, nb) = (self.state_ids.len(), self.links.len());
-        let np = self.parameters.len() / n.max(1);
-        if blood.len() != n * nb {
-            return Err(CellsError::Invalid(format!(
+        let (ns, nb, np) = (self.state_ids.len(), self.links.len(), self.n_parameters);
+        let valid = if blood.len() != n * nb {
+            Err(CellsError::Invalid(format!(
                 "{} blood values for {n} cells of {nb} species",
                 blood.len()
-            )));
-        }
-        if !(t0.is_finite() && t1.is_finite() && t0 <= t1) {
-            return Err(CellsError::Invalid(format!(
+            )))
+        } else if !(t0.is_finite() && t1.is_finite() && t0 <= t1) {
+            Err(CellsError::Invalid(format!(
                 "an advance of the cells from t = {t0} s to t = {t1} s"
-            )));
-        }
-        let start = Instant::now();
-        let mut stats = CellStats::default();
-        let Some(batch) = &mut self.batch else {
-            self.t = t1;
-            return Ok(stats);
+            )))
+        } else {
+            Ok(())
         };
+        // Where a process cannot advance, none does: the error of the one which cannot.
+        if !self.balance.plan(valid.is_ok())? {
+            return valid.map(|()| CellStats::default());
+        }
+        let mut stats = CellStats::default();
         let (m0, m1) = (t0 / self.time_unit_s, t1 / self.time_unit_s);
         // Every cell which has not failed starts at t0, with the step it ended the last
         // advance with.
@@ -378,6 +434,40 @@ impl BatchedCells {
                 control[CONTROL_DONE] = 0.0;
             }
         }
+        // The state of each cell with the concentrations of the blood, into `next`.
+        self.next.copy_from_slice(&self.states);
+        for i in 0..n {
+            let y = &mut self.next[i * ns..(i + 1) * ns];
+            let p = &self.parameters[i * np..(i + 1) * np];
+            for (link, c) in self.links.iter().zip(&blood[i * nb..(i + 1) * nb]) {
+                let volume = link.volume.of(p, y);
+                y[link.state] = c * volume;
+            }
+        }
+        // The points: the cells kept, then those of other processes.
+        let (next, parameters, control) = (&self.next, &self.parameters, &self.control);
+        let sent = ns + np + CONTROL;
+        let guests = self.balance.scatter(sent, |i, out| {
+            out.extend_from_slice(&next[i * ns..(i + 1) * ns]);
+            out.extend_from_slice(&parameters[i * np..(i + 1) * np]);
+            out.extend_from_slice(&control[i * CONTROL..(i + 1) * CONTROL]);
+        })?;
+        let kept = self.balance.kept();
+        let points = &mut self.points;
+        points.states.clear();
+        points.states.extend_from_slice(&next[..kept * ns]);
+        points.parameters.clear();
+        points
+            .parameters
+            .extend_from_slice(&parameters[..kept * np]);
+        points.control.clear();
+        points.control.extend_from_slice(&control[..kept * CONTROL]);
+        for record in guests.chunks_exact(sent) {
+            points.states.extend_from_slice(&record[..ns]);
+            points.parameters.extend_from_slice(&record[ns..ns + np]);
+            points.control.extend_from_slice(&record[ns + np..]);
+        }
+        let m = kept + self.balance.guests();
         let context = RosenbrockContext {
             t1: m1,
             rtol: self.rtol,
@@ -385,33 +475,60 @@ impl BatchedCells {
             h_min: H_MIN,
             attempts: f64::from(MAX_ATTEMPTS),
         };
-        let (states, parameters, links) = (&self.states, &self.parameters, &self.links);
-        let blood_in: &[f64] = blood;
-        let fill = |state: &mut [f64]| {
-            state.copy_from_slice(states);
-            for i in 0..n {
-                let y = &mut state[i * ns..(i + 1) * ns];
-                let p = &parameters[i * np..(i + 1) * np];
-                for (link, c) in links.iter().zip(&blood_in[i * nb..(i + 1) * nb]) {
-                    let volume = link.volume.of(p, y);
-                    y[link.state] = c * volume;
-                }
-            }
+        let start = Instant::now();
+        // An error here is reported after the results went back, so that no process waits.
+        let ran = if m == 0 {
+            Ok(())
+        } else {
+            self.run_points(&context, m)
         };
-        let finished = batch.run(
-            &context,
-            fill,
-            &mut self.control,
-            &mut self.counts,
-            &mut self.next,
-        )?;
+        stats.seconds = start.elapsed().as_secs_f64();
+        let points = &mut self.points;
+        if ran.is_err() {
+            points.next.resize(m * ns, f64::NAN);
+            points.control.resize(m * CONTROL, 0.0);
+            points.counts.resize(m * COUNTS, 0.0);
+        }
+        for c in points.counts.chunks(COUNTS) {
+            stats.steps += c[0] as u64;
+            stats.rejected += c[1] as u64;
+        }
+        // The results: of the cells kept, and of those of other processes, sent back.
+        self.next[..kept * ns].copy_from_slice(&points.next[..kept * ns]);
+        self.control[..kept * CONTROL].copy_from_slice(&points.control[..kept * CONTROL]);
+        self.counts[..kept * COUNTS].copy_from_slice(&points.counts[..kept * COUNTS]);
+        let back = ns + CONTROL + COUNTS;
+        let results: Vec<f64> = (kept..m)
+            .flat_map(|j| {
+                points.next[j * ns..(j + 1) * ns]
+                    .iter()
+                    .chain(&points.control[j * CONTROL..(j + 1) * CONTROL])
+                    .chain(&points.counts[j * COUNTS..(j + 1) * COUNTS])
+                    .copied()
+            })
+            .collect();
+        let (next, control, counts) = (&mut self.next, &mut self.control, &mut self.counts);
+        self.balance.gather(back, &results, |i, record| {
+            next[i * ns..(i + 1) * ns].copy_from_slice(&record[..ns]);
+            control[i * CONTROL..(i + 1) * CONTROL].copy_from_slice(&record[ns..ns + CONTROL]);
+            counts[i * COUNTS..(i + 1) * COUNTS].copy_from_slice(&record[ns + CONTROL..]);
+        })?;
+        ran?;
+        for (w, c) in self
+            .balance
+            .weights_mut()
+            .iter_mut()
+            .zip(self.counts.chunks(COUNTS))
+        {
+            *w = (c[0] + c[1]) as u64;
+        }
         let element = |i: usize, message: String| CellsError::Element {
             element: self.elements[i],
             centroid: self.centroids[i],
             message,
         };
         let reached = |i: usize| self.control[i * CONTROL + CONTROL_T] * self.time_unit_s;
-        if !finished {
+        if !finished(&self.control) {
             let i = (0..n)
                 .find(|&i| {
                     let c = &self.control[i * CONTROL..(i + 1) * CONTROL];
@@ -439,10 +556,6 @@ impl BatchedCells {
                 ),
             ));
         }
-        for c in self.counts.chunks(COUNTS) {
-            stats.steps += c[0] as u64;
-            stats.rejected += c[1] as u64;
-        }
         std::mem::swap(&mut self.states, &mut self.next);
         for i in 0..n {
             let y = &self.states[i * ns..(i + 1) * ns];
@@ -451,9 +564,22 @@ impl BatchedCells {
                 *c = y[link.state] / link.volume.of(p, y);
             }
         }
-        stats.seconds = start.elapsed().as_secs_f64();
         self.t = t1;
         Ok(stats)
+    }
+
+    /// Applies the operator to the `m` points of [`BatchedCells::points`], for an operator of
+    /// room for them first if there is none (an eighth more than `m`, so that a few more points
+    /// in later advances fit).
+    fn run_points(&mut self, context: &RosenbrockContext, m: usize) -> Result<()> {
+        if self.batch.as_ref().is_none_or(|b| b.capacity < m) {
+            self.batch = None;
+            self.batch = Some(Batch::new(&self.ceed, &self.qmodel, m + m / 8, context)?);
+        }
+        self.batch
+            .as_mut()
+            .expect("an operator")
+            .run(context, &mut self.points)
     }
 }
 
@@ -488,8 +614,7 @@ impl CellSolver for BatchedCells {
     fn outputs(&self, out: &mut Vec<f64>) {
         out.clear();
         let n = self.elements.len();
-        let ns = self.state_ids.len();
-        let np = self.parameters.len() / n.max(1);
+        let (ns, np) = (self.state_ids.len(), self.n_parameters);
         let t = self.t / self.time_unit_s;
         let mut work = Work::default();
         for i in 0..n {

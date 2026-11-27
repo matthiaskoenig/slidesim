@@ -301,6 +301,20 @@ fn conservation(name: &str, study: &str, adaptive: bool) {
         seconds["max"].as_f64().unwrap(),
     );
     assert!(mean > 0.0 && max >= mean, "{seconds}");
+    // The step attempts of a process: on one process, all of them in each step.
+    let attempts = &summary["cells"]["attempts"];
+    let total = summary["cells"]["steps"].as_u64().unwrap()
+        + summary["cells"]["rejected"].as_u64().unwrap();
+    assert_eq!(
+        attempts["mean"].as_f64().unwrap(),
+        total as f64,
+        "{attempts}"
+    );
+    assert_eq!(
+        attempts["max"].as_f64().unwrap(),
+        total as f64,
+        "{attempts}"
+    );
     for phase in [
         "setup",
         "pressure",

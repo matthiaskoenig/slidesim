@@ -85,6 +85,14 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn yes() -> bool {
+    true
+}
+
 /// A coefficient: a constant (a JSON number) or a piecewise linear function of the values of a
 /// scene map (a JSON object, see [`Table`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -341,6 +349,14 @@ pub struct CellsSpec {
     /// start against the compiled model); default none.
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// Spread the work of the cells evenly over the processes, default true: before each step
+    /// of the cells, cells move from processes of more work to processes of less, by their step
+    /// attempts in the step before (the mesh partition stays). A cell takes the same steps
+    /// wherever it is advanced, so the results are the same either way, bit for bit. The
+    /// engine path does not move the cells of a model with events, discontinuities or
+    /// algebraic rules (its integrator keeps state from one step to the next).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub balance: bool,
 }
 
 /// A model species exchanged with a field.

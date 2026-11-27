@@ -10,6 +10,7 @@
 //!  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
 //!                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
 //!  "cells": {"count": <n>, "steps": <n>, "rejected": <n>, "seconds": {"mean": ..., "max": ...},
+//!            "attempts": {"mean": ..., "max": ...},
 //!            "exchanged": {"<field id>": [...]}, "amounts": {"<species id>": [...]}},
 //!  "phases": {"setup": ..., "pressure": ..., "transport": ..., "exchange": ...,
 //!             "cells": ..., "output": ...}}
@@ -33,7 +34,11 @@
 //! `cells` is there for a study with cells: their number, the steps and rejected steps of
 //! their integrators summed over the cells and the run, the time of a process in its cells (s,
 //! the mean over the processes and the largest; the phase `cells` is the largest and the wait
-//! of the others for it), and per output time the amount each
+//! of the others for it), the step attempts (steps and rejected steps) of the cells a process
+//! advanced over the run ([`Attempts`]: the mean over the processes, and the sum over the steps
+//! of the cells of the largest of a process in each, so that their ratio is the share of the
+//! work the processes would wait for, with the work of a cell in proportion to its attempts;
+//! with `cells.balance` a process advances cells of others), and per output time the amount each
 //! linked field received from the cells since t = 0 (mM*um^2) and the amount of each species
 //! of the cell compartment in all cells, in the units of the fields (mM*um^2: its
 //! concentration times the cell volume of the model, times the blood volume of the element in
@@ -89,6 +94,16 @@ pub struct Seconds {
     pub max: f64,
 }
 
+/// The step attempts (steps and rejected steps) of the cells a process advanced, over the
+/// run: `mean`, their mean over the processes; `max`, the sum over the steps of the cells of the
+/// largest of a process in each step. `max / mean >= 1` is the imbalance of the work, step by
+/// step.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct Attempts {
+    pub mean: f64,
+    pub max: f64,
+}
+
 /// The cells of the study.
 #[derive(Debug, Default, Serialize)]
 pub struct CellsSummary {
@@ -100,6 +115,8 @@ pub struct CellsSummary {
     /// The time of each process in its cells (without the wait for the others) over the
     /// processes: the mean and the largest; their ratio is the imbalance of the work.
     pub seconds: Seconds,
+    /// The step attempts of a process ([`Attempts`]).
+    pub attempts: Attempts,
     /// Per linked field and output time, the amount the cells gave to the field since t = 0:
     /// mM*um^2.
     pub exchanged: BTreeMap<String, Vec<f64>>,

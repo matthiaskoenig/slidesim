@@ -7,9 +7,8 @@ use std::rc::Rc;
 use contracts::Coefficient;
 use maps::Maps;
 use mesh::Mesh;
-use petsc::Vector;
+use petsc::{InsertMode, Vector};
 
-use crate::operators::PointValues;
 use crate::{
     Discretization, Exchanged, PdeError, Problem, Result, SourceField, UNTAGGED, coefficient_values,
 };
@@ -32,9 +31,12 @@ use crate::{
 ///   `int phi u` ([`Problem::total_mass`]), changes by exactly `sum_i A_i` plus the resupply,
 ///   which `give_back` returns per Dirichlet tag (inflow through the tag).
 ///
-/// Both are libCEED operators on the quadrature points of the problem's level: the values of
-/// the field at the points, and the integral of values at the points against the test
-/// functions `v_j` ([`SourceField`]).
+/// Both use the weights `w_ij = int_(e_i) phi v_j` of the nodes `j` of each cell (below),
+/// computed once by the quadrature of the problem's level: the integral of the field over a
+/// cell is `sum_j w_ij u_j`, and the integral of a value `x_i` per cell against the test
+/// function `v_j` is `sum_i x_i w_ij`, sparse sums over the nodes of the cells instead of
+/// operators on every quadrature point. The vectors of these sums are kept from one call to the
+/// next.
 ///
 /// How an amount is distributed: the field has P1 nodal values `u_j`. With
 /// `w_ij = int_(e_i) phi v_j` (`sum_j w_ij = V_i`, over every node of the element) and the
@@ -69,8 +71,11 @@ pub struct Exchange {
     disc: Discretization,
     /// The number of cells.
     n: usize,
-    /// For each local cell of the level, the cell of the exchange its coarse element is.
-    owner: Vec<Option<usize>>,
+    /// `w_ij`: of cell `i`, the local dofs `dofs[starts[i]..starts[i + 1]]` (each once, in
+    /// ascending order) and their weights `w` at the same indices.
+    starts: Vec<usize>,
+    dofs: Vec<usize>,
+    w: Vec<f64>,
     /// The porosity at the quadrature points of the level.
     porosity: Vec<f64>,
     /// `V_i`.
@@ -86,9 +91,20 @@ pub struct Exchange {
     tag_volumes: Vec<Vec<f64>>,
     /// `m_j`, a global vector.
     lumped: Vector,
-    values: PointValues,
-    /// The integral of values at the points against the test functions.
-    source: RefCell<SourceField>,
+    /// The vectors of the sums, kept from one call to the next.
+    work: RefCell<Work>,
+}
+
+/// The vectors of [`Exchange`], kept from one call to the next.
+#[derive(Debug)]
+struct Work {
+    /// A local vector: the field, then the integral of values per cell before its assembly.
+    local: Vector,
+    /// The values of the field at the local dofs, `u^+`.
+    positive: Vec<f64>,
+    /// The global vectors of [`Exchange::give_back`]: `sum_i c_i w_ij` and `sum_i r_i w_ij`.
+    increase: Vector,
+    share: Vector,
 }
 
 impl Exchange {
@@ -140,37 +156,76 @@ impl Exchange {
                 problem.unwrap_or_else(|| "invalid cells on another process".into())
             )));
         }
-        let owner: Vec<Option<usize>> = (0..fine_cells)
-            .map(|e| index[mesh.coarse_cell(level, e)])
-            .collect();
-
         let porosity = coefficient_values(&disc, porosity, maps)?;
+        // The weights w_ij: the fine cells of each cell, then the sum over their points of
+        // `w phi v_j` per node.
+        let mut fine: Vec<Vec<usize>> = vec![Vec::new(); cells.len()];
+        for e in 0..fine_cells {
+            if let Some(i) = index[mesh.coarse_cell(level, e)] {
+                fine[i].push(e);
+            }
+        }
+        let (weights, basis, cell_dofs) = (
+            disc.quadrature_weights(),
+            disc.basis_values(),
+            disc.cell_dofs(),
+        );
+        let nodes = basis.len() / q.max(1);
+        let (mut starts, mut dofs, mut w) = (vec![0], Vec::new(), Vec::new());
+        let mut entries: Vec<(usize, f64)> = Vec::new();
+        for elements in &fine {
+            entries.clear();
+            for &e in elements {
+                for k in 0..q {
+                    let f = weights[e * q + k] * porosity[e * q + k];
+                    for b in 0..nodes {
+                        entries.push((cell_dofs[e * nodes + b], f * basis[k * nodes + b]));
+                    }
+                }
+            }
+            // Stable: the contributions to a node are summed in the order of the points.
+            entries.sort_by_key(|&(dof, _)| dof);
+            for &(dof, value) in &entries {
+                if dofs.len() > *starts.last().expect("a start") && dofs.last() == Some(&dof) {
+                    *w.last_mut().expect("a weight") += value;
+                } else {
+                    dofs.push(dof);
+                    w.push(value);
+                }
+            }
+            starts.push(dofs.len());
+        }
         let (tags, tag_of) = dirichlet_tags(&disc)?;
-        let values = PointValues::new(&disc)?;
+        let mut lumped = disc.global_vector()?;
+        let mut source = SourceField::new(&disc)?;
+        source.values_mut().copy_from_slice(&porosity);
+        source.apply(&mut lumped)?;
+        let work = Work {
+            local: disc.local_vector()?,
+            positive: Vec::new(),
+            increase: disc.global_vector()?,
+            share: disc.global_vector()?,
+        };
         let mut exchange = Exchange {
             n: cells.len(),
-            owner,
+            starts,
+            dofs,
+            w,
             porosity,
             volumes: Vec::new(),
             free_volumes: Vec::new(),
             tags,
             tag_of,
             tag_volumes: Vec::new(),
-            lumped: disc.global_vector()?,
-            values,
-            source: RefCell::new(SourceField::new(&disc)?),
+            lumped,
+            work: RefCell::new(work),
             disc,
         };
-        exchange.volumes = exchange.per_cell(&vec![1.0; exchange.porosity.len()]);
         let ones = vec![1.0; exchange.tag_of.len()];
-        let (free, tagged) = exchange.split(&ones)?;
+        exchange.volumes = exchange.per_cell(&ones);
+        let (free, tagged) = exchange.split(&ones);
         exchange.free_volumes = free;
         exchange.tag_volumes = tagged;
-        {
-            let mut source = exchange.source.borrow_mut();
-            source.values_mut().copy_from_slice(&exchange.porosity);
-            source.apply(&mut exchange.lumped)?;
-        }
         Ok(exchange)
     }
 
@@ -203,11 +258,13 @@ impl Exchange {
     /// the exchange (its discretization and porosity), or `out` is not one value per cell.
     pub fn means(&self, problem: &Problem, out: &mut [f64]) -> Result<()> {
         self.collective(self.check(problem, out.len()))?;
-        let u = self.point_values(&problem.local_solution()?)?;
-        let amounts = self.per_cell(&u);
-        for ((m, a), v) in out.iter_mut().zip(amounts).zip(&self.volumes) {
-            *m = a / v;
-        }
+        let mut work = self.work.borrow_mut();
+        problem.local_solution_into(&mut work.local)?;
+        work.local.with_array(|u| {
+            for (i, (m, v)) in out.iter_mut().zip(&self.volumes).enumerate() {
+                *m = self.cell_sum(i, |j| u[j]) / v;
+            }
+        })?;
         Ok(())
     }
 
@@ -236,12 +293,14 @@ impl Exchange {
             }
         }))?;
         // The substance at the nodes, u^+, split into the free nodes and each Dirichlet tag.
-        let mut positive = problem.local_solution()?;
-        let positive = positive.with_array_mut(|u| {
-            u.iter_mut().for_each(|u| *u = u.max(0.0));
-            u.to_vec()
+        let mut guard = self.work.borrow_mut();
+        let work = &mut *guard;
+        problem.local_solution_into(&mut work.local)?;
+        work.local.with_array(|u| {
+            work.positive.clear();
+            work.positive.extend(u.iter().map(|u| u.max(0.0)));
         })?;
-        let (free, tagged) = self.split(&positive)?;
+        let (free, tagged) = self.split(&work.positive);
         // Per cell: the increase per unit of `w_ij` (`c_i`) and the share of the substance taken
         // (`r_i`); per tag the resupply.
         let mut increase = vec![0.0; self.len()];
@@ -264,8 +323,9 @@ impl Exchange {
                 *r += share[i] * tagged[t][i] - increase[i] * self.tag_volumes[t][i];
             }
         }
-        let b_increase = self.integrate(&increase)?;
-        let b_share = self.integrate(&share)?;
+        self.integrate(&increase, &mut work.local, &mut work.increase)?;
+        self.integrate(&share, &mut work.local, &mut work.share)?;
+        let (b_increase, b_share) = (&work.increase, &work.share);
         let comm = self.disc.dm().comm();
         let amount: f64 = delta.iter().zip(&self.volumes).map(|(d, v)| d * v).sum();
         let resupply = self
@@ -332,68 +392,57 @@ impl Exchange {
         Ok(())
     }
 
+    /// `sum_j w_ij x(j)` of cell `i`, over the nodes `j` of its element.
+    fn cell_sum(&self, i: usize, x: impl Fn(usize) -> f64) -> f64 {
+        let range = self.starts[i]..self.starts[i + 1];
+        self.dofs[range.clone()]
+            .iter()
+            .zip(&self.w[range])
+            .map(|(&j, w)| w * x(j))
+            .sum()
+    }
+
+    /// `int_(e_i) phi x` per cell of the interpolant of the nodal values `x` (of the local
+    /// entries).
+    fn per_cell(&self, x: &[f64]) -> Vec<f64> {
+        (0..self.n).map(|i| self.cell_sum(i, |j| x[j])).collect()
+    }
+
     /// The nodal values `x` (of the local entries) split by node: `int_(e_i) phi x` per cell of
     /// the interpolant of `x` at the free nodes only (and zero elsewhere), and of `x` at the
     /// Dirichlet nodes of each tag only (`[tag][cell]`).
-    fn split(&self, x: &[f64]) -> Result<(Vec<f64>, Vec<Vec<f64>>)> {
-        let mut local = self.disc.local_vector()?;
-        let mut part = |tag: Option<usize>| -> Result<Vec<f64>> {
-            local.with_array_mut(|values| {
-                for ((v, x), t) in values.iter_mut().zip(x).zip(&self.tag_of) {
-                    *v = if *t == tag { *x } else { 0.0 };
-                }
-            })?;
-            Ok(self.per_cell(&self.point_values(&local)?))
-        };
-        let free = part(None)?;
-        let tagged = (0..self.tags.len())
-            .map(|t| part(Some(t)))
-            .collect::<Result<Vec<_>>>()?;
-        Ok((free, tagged))
-    }
-
-    /// The values of the local vector `local` at the quadrature points.
-    fn point_values(&self, local: &Vector) -> Result<Vec<f64>> {
-        let mut values = vec![0.0; self.porosity.len()];
-        self.values.apply(local, &mut values)?;
-        Ok(values)
-    }
-
-    /// `sum_(points of e_i) w phi f` of the values `f` at the quadrature points, per cell.
-    fn per_cell(&self, values: &[f64]) -> Vec<f64> {
-        let q = self.disc.points_per_cell();
-        let weights = self.disc.quadrature_weights();
-        let mut sums = vec![0.0; self.n];
-        for (e, owner) in self.owner.iter().enumerate() {
-            if let Some(i) = owner {
-                for k in e * q..(e + 1) * q {
-                    sums[*i] += weights[k] * self.porosity[k] * values[k];
+    fn split(&self, x: &[f64]) -> (Vec<f64>, Vec<Vec<f64>>) {
+        let mut free = vec![0.0; self.n];
+        let mut tagged = vec![vec![0.0; self.n]; self.tags.len()];
+        for i in 0..self.n {
+            let range = self.starts[i]..self.starts[i + 1];
+            for (&j, w) in self.dofs[range.clone()].iter().zip(&self.w[range]) {
+                match self.tag_of[j] {
+                    None => free[i] += w * x[j],
+                    Some(t) => tagged[t][i] += w * x[j],
                 }
             }
         }
-        sums
+        (free, tagged)
     }
 
-    /// `sum_i x_i w_ij` for the free dofs `j`, a global vector: `int phi x v_j` of the values
-    /// `x_i` per cell. Collective.
-    fn integrate(&self, x: &[f64]) -> Result<Vector> {
-        let q = self.disc.points_per_cell();
-        let mut source = self.source.borrow_mut();
-        for (e, (values, owner)) in source
-            .values_mut()
-            .chunks_exact_mut(q)
-            .zip(&self.owner)
-            .enumerate()
-        {
-            let porosity = &self.porosity[e * q..(e + 1) * q];
-            let x = owner.map_or(0.0, |i| x[i]);
-            for (value, phi) in values.iter_mut().zip(porosity) {
-                *value = phi * x;
+    /// `sum_i x_i w_ij` for the free dofs `j`, into the global vector `b`: `int phi x v_j` of the
+    /// values `x_i` per cell, summed in `local` first. Collective.
+    fn integrate(&self, x: &[f64], local: &mut Vector, b: &mut Vector) -> Result<()> {
+        local.with_array_mut(|y| {
+            y.fill(0.0);
+            for (i, &xi) in x.iter().enumerate() {
+                let range = self.starts[i]..self.starts[i + 1];
+                for (&j, w) in self.dofs[range.clone()].iter().zip(&self.w[range]) {
+                    y[j] += xi * w;
+                }
             }
-        }
-        let mut b = self.disc.global_vector()?;
-        source.apply(&mut b)?;
-        Ok(b)
+        })?;
+        b.set(0.0)?;
+        self.disc
+            .dm()
+            .local_to_global(&*local, InsertMode::Add, b)?;
+        Ok(())
     }
 }
 

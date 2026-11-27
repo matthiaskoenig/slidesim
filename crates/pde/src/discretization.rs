@@ -103,6 +103,12 @@ pub(crate) struct Shared {
     cell_tags: Vec<Option<u32>>,
     /// The gradients of the basis functions on the reference cell (constant for P1).
     reference_gradients: Vec<[f64; 2]>,
+    /// The local dofs of the nodes of each local cell, [cell][node] (closure order, the order of
+    /// the basis).
+    cell_dofs: Vec<usize>,
+    /// The values of the basis functions at the quadrature points of the reference cell,
+    /// [point][node].
+    basis_values: Vec<f64>,
     /// Events on the discretization, for tests of the reuse of operators.
     pub(crate) counts: Counts,
 }
@@ -327,6 +333,8 @@ impl Discretization {
         let basis_x = basis_of(ceed, &fe, dim)?;
         // P1: the gradients at the first quadrature point, [q][p][d].
         let tabulation = fe.tabulation()?;
+        let basis_values = tabulation.values.clone();
+        let cell_dofs = offsets.offsets.iter().map(|&d| d as usize).collect();
         let reference_gradients = (0..tabulation.num_basis)
             .map(|b| {
                 let at = b * tabulation.dim;
@@ -439,6 +447,8 @@ impl Discretization {
                 area_tags,
                 cell_tags,
                 reference_gradients,
+                cell_dofs,
+                basis_values,
                 counts: Counts::default(),
             }),
         })
@@ -480,6 +490,19 @@ impl Discretization {
     /// inverse Jacobians of the quadrature data are taken (constant for P1).
     pub(crate) fn reference_gradients(&self) -> &[[f64; 2]] {
         &self.shared.reference_gradients
+    }
+
+    /// The local dofs of the nodes of each local cell, `nodes_per_cell` per cell (in the order
+    /// of [`Discretization::basis_values`]).
+    pub(crate) fn cell_dofs(&self) -> &[usize] {
+        &self.shared.cell_dofs
+    }
+
+    /// The values of the basis functions at the quadrature points of a cell, [point][node]:
+    /// the value of a field at point `q` of cell `e` is
+    /// `sum_b basis_values[q * nodes + b] u[cell_dofs[e * nodes + b]]`.
+    pub(crate) fn basis_values(&self) -> &[f64] {
+        &self.shared.basis_values
     }
 
     /// The inverse Jacobian `dX_j/dx_c` at each quadrature point of the local cells, as

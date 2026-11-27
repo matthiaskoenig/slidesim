@@ -566,7 +566,8 @@ fn cells_json() -> serde_json::Value {
         "split_step": 1.0,
         "rtol": 1e-5,
         "atol": 1e-8,
-        "outputs": ["flux"]
+        "outputs": ["flux"],
+        "balance": false
     })
 }
 
@@ -594,6 +595,7 @@ fn cells_defaults() {
     assert_eq!(spec.areas, None);
     assert_eq!((spec.rtol, spec.atol), (1e-6, 1e-9));
     assert!(spec.outputs.is_empty());
+    assert!(spec.balance);
 }
 
 #[test]

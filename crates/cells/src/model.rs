@@ -1,5 +1,5 @@
-//! The cell model of a study: compiled once per process and checked against the spec
-//! ([`CellModel`]), the links of its species to the blood, and the outputs of a cell
+//! The cell model of a study: compiled once, loaded by every process, and checked against the
+//! spec ([`CellModel`]), the links of its species to the blood, and the outputs of a cell
 //! ([`Outputs`]), which both paths share.
 
 use std::fs;
@@ -76,8 +76,9 @@ impl std::fmt::Debug for CellModel {
 }
 
 impl CellModel {
-    /// The model `model_sbml` (an SBML document), translated to C and compiled once per process
-    /// (`sbmlsim_c`, cached across processes and runs, see [`sbmlsim_c::Library::build`]), and
+    /// The model `model_sbml` (an SBML document), translated to C and compiled once (`sbmlsim_c`,
+    /// cached across processes and runs, see [`sbmlsim_c::Library::build`]: process 0 first,
+    /// then the others, which load it from the cache, see `first_on_root`), and
     /// checked as `spec` uses it: every linked species is a species state of the model in the
     /// blood compartment, both volumes are settable compartments, every parameter a settable
     /// entity, every output a state or the target of an assignment rule, and both tolerances
@@ -95,16 +96,15 @@ impl CellModel {
                 return Err(CellsError::Tolerance { what, value });
             }
         }
-        let (model, description) = agree(comm, compile(model_sbml))?;
+        let (model, description) = first_on_root(comm, || compile(model_sbml))?;
         let links = links(&description, spec)?;
         check_volumes(&description, spec)?;
         check_parameters(&description, spec)?;
         check_outputs(&description, spec)?;
         let qfunction = match spec.solver {
-            CellSolverKind::Batched => Some(Arc::new(agree(
-                comm,
-                QModel::new(model_sbml, &description),
-            )?)),
+            CellSolverKind::Batched => Some(Arc::new(first_on_root(comm, || {
+                QModel::new(model_sbml, &description)
+            })?)),
             CellSolverKind::Engine => None,
         };
         Ok(CellModel {
@@ -114,6 +114,19 @@ impl CellModel {
             qfunction,
         })
     }
+}
+
+/// `build()` on process 0, then on the others: a library which is not in the cache of the
+/// compiled models is compiled by process 0 alone, and the others load it from the cache,
+/// instead of every process compiling it at once. The error of process 0 on every process (the
+/// others do not build then), else the first error of the others. Collective.
+fn first_on_root<T>(comm: &Comm, build: impl Fn() -> Result<T>) -> Result<T> {
+    let first = (comm.rank() == 0).then(&build);
+    let local = match agree(comm, first.transpose())? {
+        Some(built) => Ok(built),
+        None => build(),
+    };
+    agree(comm, local)
 }
 
 /// The QFunction of a model for the batched path ([`sbmlsim_c::generate_qfunction`]): the model

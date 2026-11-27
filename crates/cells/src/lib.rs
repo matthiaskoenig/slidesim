@@ -21,10 +21,15 @@
 //! Processes: each process holds the cells of its coarse elements. Errors one process finds
 //! (a map without value in a cell's tissue, a cell model which fails) are errors on every
 //! process, the same on each ([`CellsError::Element`] names the element by its element id,
-//! the same on any number of processes, and its centroid), so that no process waits for another which left a
-//! collective call. A cell's step control is its own: it depends on no other cell and not on
-//! the number of processes.
+//! the same on any number of processes, and its centroid), so that no process waits for
+//! another which left a collective call. A cell's step control is its own: it depends on no
+//! other cell and not on the number of processes. With [`CellsSpec::balance`] the processes
+//! share the work of each advance by the step attempts of their cells in the advance before:
+//! a process advances some cells of others and sends some of its own, whose results come back,
+//! the same as where they were (`balance`). The first cell which fails is the first in the
+//! order of the processes and their cells, wherever it was advanced.
 
+mod balance;
 mod batched;
 mod engine;
 mod model;
@@ -159,14 +164,16 @@ pub struct OutputValue {
     pub compartment: Option<String>,
 }
 
-/// The work of one [`CellSolver::advance`] on this process.
+/// The work of one [`CellSolver::advance`] on this process: of the cells it advanced (with
+/// [`CellsSpec::balance`], some of other processes and not all of its own).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CellStats {
     /// The steps of the integrators of the cells, summed.
     pub steps: u64,
     /// The rejected step attempts (failed error tests and nonlinear solves), summed.
     pub rejected: u64,
-    /// The wall time of advancing the cells (s).
+    /// The wall time of the integration of the cells (s), without sending cells and results to
+    /// and from other processes.
     pub seconds: f64,
 }
 
@@ -230,19 +237,39 @@ pub type Result<T, E = CellsError> = std::result::Result<T, E>;
 /// [`CellsError::Element`] and a [`CellsError::Unsupported`] as they are, any other error as
 /// its message in a [`CellsError::Model`] or [`CellsError::Invalid`]). Collective.
 pub(crate) fn agree<T>(comm: &Comm, local: Result<T>) -> Result<T> {
-    let rank = PetscInt::try_from(comm.rank()).expect("a rank is a PETSc integer");
-    // The lowest rank with an error, as the maximum of its negation.
-    let key = comm.max_int(if local.is_err() { -rank } else { PetscInt::MIN })?;
-    if key == PetscInt::MIN {
+    agree_first(comm, local, position(comm.rank(), 0))
+}
+
+/// As [`agree`], the error of the process whose error has the smallest `key` (the
+/// [`position`] of the cell which failed, on the process whose cell it is), on every process.
+/// Collective.
+pub(crate) fn agree_first<T>(comm: &Comm, local: Result<T>, key: u64) -> Result<T> {
+    debug_assert!(key < 1 << f64::MANTISSA_DIGITS, "{key} is exact as a float");
+    // The smallest key with an error, as the maximum of its negation (exact as a float).
+    let mine = if local.is_err() {
+        -(key as f64)
+    } else {
+        f64::NEG_INFINITY
+    };
+    let best = comm.max_real(mine)?;
+    if best == f64::NEG_INFINITY {
         return local;
     }
-    let root = usize::try_from(-key).expect("a rank");
+    let rank = PetscInt::try_from(comm.rank()).expect("a rank is a PETSc integer");
+    let root = comm.max_int(if mine == best { rank } else { -1 })?;
+    let root = usize::try_from(root).expect("a rank");
     let mut bytes = match &local {
         Err(e) if comm.rank() == root => encode(e),
         _ => Vec::new(),
     };
     comm.broadcast_bytes(root, &mut bytes)?;
     Err(decode(&bytes))
+}
+
+/// The key of [`agree_first`] of the cell `index` of the process `rank`: the processes in the
+/// order of their ranks, the cells of each in their order.
+pub(crate) fn position(rank: usize, index: usize) -> u64 {
+    ((rank as u64) << 32) | index as u64
 }
 
 /// The error of a failed advance of the cells, kept: after it, the cells are not advanced again,

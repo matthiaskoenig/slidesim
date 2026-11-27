@@ -1,6 +1,7 @@
 # Milestone 4: transport solves
 
-Status: 2026-11-27, slidesim branch `feat/m4-lobules` (task 11 of the milestone 4 plan). Verdict:
+Status: 2026-11-27, slidesim branch `feat/m4-lobules` (tasks 11 and 12 of the milestone 4 plan;
+task 12 in "Cell work, the exchange and the compilation"). Verdict of task 11:
 the linear solves of the transport take 5.8 times fewer flops on the generated lobule (one
 process, 2 h of the batched SPT study), from four changes: a larger direct solve at the bottom of
 the coarse solve (algebraic multigrid down to 5000 equations), LU as the coarse solve on one
@@ -170,6 +171,83 @@ runs and the slide at the final settings were not repeated (the runs were limite
 problems); the slide's targets of the plan (573 s to at most 300 s) remain to be measured on a
 quiet machine.
 
+## Cell work, the exchange and the compilation
+
+Task 12 of the plan. Three changes, each measured on its own:
+
+- **Cell work balance** (`cells.balance`, default true). Before each step of the cells, a
+  process whose cells made more step attempts in the step before than the mean of the
+  processes sends the cells beyond the mean (its last ones) to the processes below it, with
+  their states, parameters and step control, and gets their results back
+  (`Comm::exchange_bytes`, `MPI_Alltoallv`); the mesh partition, the outputs and the exchange
+  with the fields stay. A cell takes the same steps wherever it is advanced, so the results are
+  those without the balance, bit for bit (tests on 2 and 3 processes, both paths). The engine
+  path moves the cells of models without events, discontinuities and algebraic rules; a process
+  keeps a stepper per cell of another process while the cell comes.
+- **The exchange** on precomputed weights. A profile of the exchange (timers in its parts,
+  `quick`, 1 process; `perf` is not permitted on the machine) gave 0.95 s, of it 0.50 s in the
+  two integrals of the give-back against the test functions and 0.31 s in the split of the
+  field into its free and Dirichlet nodes, each a libCEED operator on every quadrature point,
+  and 0.07 s in the means; the allocations of the vectors were small. The weights
+  `w_ij = int_(e_i) phi v_j` of the nodes of each cell are now computed once, the means, the
+  split and the integrals are sparse sums over the nodes of the cells, and the vectors are kept
+  from one call to the next. The results change by rounding (1.9e-13 of the largest term of a
+  balance, `quick`, 1 process).
+- **One compilation on a cold cache.** Process 0 compiles the cell model (and its QFunction)
+  first; the others load the libraries from the cache. Before, every process compiled them at
+  once (3 compilations of the model on 3 processes, `compile_once_on_cold_cache`).
+
+Back-to-back runs, the machine shared (load average in the table), `scripts/bench/coupled.sh`,
+`native-opt`; `base` is 45cdd22, `off` the new binary with `cells.balance` false, `on` with
+it true. Times in s; `attempts` is the imbalance of the step attempts (the sum over the cell
+steps of the largest attempts of a process over their mean, `cells.attempts` of
+`summary.json`), `seconds` the largest time of a process in its cells over the mean.
+
+| Case | Variant | Exchange | Cells | Transport | Attempts | Seconds | Wall | Load |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| quick, 1 process | base | 0.249, 0.251 | 10.2, 10.2 | 0.33, 0.33 | | 1.000 | 12, 12 | 2.7 to 2.2 |
+| quick, 1 process | new | 0.026, 0.026 | 10.2, 10.3 | 0.33, 0.33 | 1.000 | 1.000 | 11, 11 | 2.5 to 2.2 |
+| quick, 2 processes | base | 0.1, 0.1 | 5.2, 5.3 | 0.5, 0.5 | | 1.004, 1.003 | 7, 7 | 2.1 to 2.5 |
+| quick, 2 processes | off | 0.0, 0.0 | 5.3, 5.3 | 0.5, 0.5 | 1.001, 1.001 | 1.005, 1.003 | 6, 6 | 2.3 to 2.5 |
+| quick, 2 processes | on | 0.0, 0.0 | 5.3, 5.2 | 0.5, 0.5 | 1.000, 1.000 | 1.004, 1.000 | 6, 6 | 2.4 to 2.5 |
+| quick, 4 processes | base | 0.1, 0.1 | 2.7, 2.7 | 0.4, 0.3 | | 1.016, 1.020 | 4, 4 | 2.5 to 3.3 |
+| quick, 4 processes | off | 0.0, 0.0 | 2.7, 2.7 | 0.4, 0.3 | 1.016, 1.016 | 1.018, 1.017 | 4, 4 | 2.7 to 3.7 |
+| quick, 4 processes | on | 0.0, 0.0 | 2.6, 2.6 | 0.4, 0.3 | 1.004, 1.004 | 1.007, 1.005 | 4, 4 | 2.7 to 3.7 |
+| 7 lobules, 4 h, 4 processes | base | 8.4, 8.2 | 66.7, 66.5 | 34.2, 33.1 | | 1.029, 1.030 | 114, 113 | 6.6 to 4.4 |
+| 7 lobules, 4 h, 4 processes | off | 0.9, 0.8 | 67.2, 66.8 | 33.7, 32.8 | 1.027, 1.027 | 1.021, 1.021 | 107, 105 | 4.7 to 4.3 |
+| 7 lobules, 4 h, 4 processes | on | 0.8, 0.8 | 65.5, 65.7 | 32.8, 32.6 | 1.001, 1.001 | 1.009, 1.016 | 104, 104 | 4.4 to 4.5 |
+
+(`quick` is 1 h of the generated lobule unrefined; the 7 lobules are
+`ring1_spt_batched.study.json` shortened to 4 h, 350 million cell step attempts in all,
+`END=14400 NP=4 STUDIES=lobules7`.)
+
+- The exchange takes 9 to 10 times less time: 0.25 to 0.026 s on `quick`, 8.3 to 0.85 s on
+  the 7 lobules on 4 processes, where it was 7 % of the run.
+- The balance takes the imbalance of the step attempts from 1.027 to 1.001 on the 7 lobules
+  and from 1.016 to 1.004 on `quick` on 4 processes, and the phase `cells` 2 % down (67.0 to
+  65.6 s), as much as the imbalance it removes: these cases are nearly balanced by the
+  partition in their first hours. Milestone 3 measured 1.36 (the time in the cells) on the
+  281 mg/kg slide at 24 h, where the necrosis concentrates the work, which the balance now
+  removes at the cost of the sends: the phase `cells` less the largest integration time of a
+  process (the sends and the waits) is 0.9 and 1.0 s without the balance and 0.6 and 0.4 s
+  with it. The test `balance_evens_the_work`
+  (process 0 with 10 times the attempts) goes from 1.82 to 1.002 on 2 processes and from 2.50
+  to 1.0004 on 3.
+- The compilation on a cold cache: the setup of `quick` on 4 processes 0.94 and 0.96 s
+  (`base`) against 0.92 and 0.94 s; the wall time hardly changes on an idle machine, three
+  compilations of the four are gone.
+- Parity: the balance is bit for bit neutral in the tests of the cells. Whole runs on 2
+  processes are too (`quick`, `off` against `on`: equal); on 4 processes, runs of the same
+  binary and settings are not reproducible bit for bit (`base` against `base`: up to 4e-13 of
+  the largest term of a balance; on the 7 lobules once a rejected step in 4e7), and `off`
+  against `on` differ by as much (up to 6e-13), so the balance adds nothing beyond that noise.
+  The parity of 1, 2 and 3 processes at the tight settings (1e-10, the same step counts of the
+  cells) holds (`cells_parallel_matches_one`, `two_ranks_match_one`). The mass balances close
+  as before.
+
+The slide target (573 s to at most 300 s, 8 processes, 24 h) was not re-measured, by ruling:
+the runs stayed within 10 CPUs and 4 processes on the shared machine.
+
 ## Reproduce
 
 ```bash
@@ -177,6 +255,10 @@ scripts/bench/coupled.sh                                   # quick
 STUDIES=lobule END=7200 TAG=r6 scripts/bench/coupled.sh
 STUDIES=lobule END=7200 TAG=r12 EDIT='.solver.linear_rtol = 1e-12' scripts/bench/coupled.sh
 EDIT='.solver.petsc_options = "-ts_bdf_initial_guess_extrapolate 1"' scripts/bench/coupled.sh
+NP=4 TAG=on scripts/bench/coupled.sh                       # task 12
+NP=4 TAG=off EDIT='.cells.balance = false' scripts/bench/coupled.sh
+NP=4 END=14400 STUDIES=lobules7 TAG=on scripts/bench/coupled.sh
+SLIDESIM=<binary of 45cdd22> NP=4 END=14400 STUDIES=lobules7 TAG=base scripts/bench/coupled.sh
 ```
 
 The run folders under `target/bench/coupled` keep `summary.json`, `log_view.txt` and the outputs

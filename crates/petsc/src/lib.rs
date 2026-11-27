@@ -479,6 +479,111 @@ impl<'a> Comm<'a> {
         ))
     }
 
+    /// The bytes `sends[q]` of every process `p` on the process `q`, for every pair of processes
+    /// (`MPI_Alltoall` of the lengths, `MPI_Alltoallv`): `sends` holds one vector per process
+    /// in the order of the ranks (its own included, which it gets back), the result one vector
+    /// per process, the bytes it sent to this one, in the order of the ranks. Collective.
+    ///
+    /// Errors (on every process) if a process gives other than one vector per process, or if
+    /// the bytes one process sends or receives exceed `i32::MAX` (MPI counts them in an
+    /// `int`).
+    pub fn exchange_bytes(&self, sends: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
+        error::ensure_alive("MPI_Alltoallv")?;
+        let size = self.size();
+        /// The sum of `lengths`, if MPI can count it.
+        fn total(mut lengths: impl Iterator<Item = usize>) -> Option<c_int> {
+            c_int::try_from(lengths.try_fold(0usize, |sum, n| sum.checked_add(n))?).ok()
+        }
+        // -1: a length MPI cannot count.
+        let mut send_counts: Vec<c_int> = sends
+            .iter()
+            .map(|v| c_int::try_from(v.len()).unwrap_or(-1))
+            .collect();
+        let mut problem = if sends.len() != size {
+            Some(format!(
+                "{} vectors of bytes to exchange among {size} processes",
+                sends.len()
+            ))
+        } else if total(sends.iter().map(Vec::len)).is_none() {
+            Some("more bytes to send than MPI counts in a 32-bit integer".to_string())
+        } else {
+            None
+        };
+        if problem.is_some() {
+            send_counts = vec![0; size];
+        }
+        if size == 1 {
+            return match problem {
+                Some(message) => Err(Error::new(sys::PETSC_ERR_ARG_OUTOFRANGE, message)),
+                None => Ok(vec![sends[0].clone()]),
+            };
+        }
+        let mut receive_counts: Vec<c_int> = vec![0; size];
+        // SAFETY: one int per process in and out.
+        let ierr = unsafe {
+            sys::petsc_sys_mpi_alltoall_int(
+                send_counts.as_ptr(),
+                receive_counts.as_mut_ptr(),
+                self.0,
+            )
+        };
+        mpi_result(ierr, "MPI_Alltoall")?;
+        if receive_counts.iter().any(|&n| n < 0)
+            || total(receive_counts.iter().map(|&n| n as usize)).is_none()
+        {
+            problem.get_or_insert_with(|| {
+                "more bytes to receive than MPI counts in a 32-bit integer".to_string()
+            });
+        }
+        if self.max_int(problem.is_some().into())? > 0 {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                problem.unwrap_or_else(|| "an invalid exchange of bytes on another process".into()),
+            ));
+        }
+        let offsets = |counts: &[c_int]| -> Vec<c_int> {
+            counts
+                .iter()
+                .scan(0, |offset, &n| {
+                    let o = *offset;
+                    *offset += n;
+                    Some(o)
+                })
+                .collect()
+        };
+        let (send_offsets, receive_offsets) = (offsets(&send_counts), offsets(&receive_counts));
+        // MPICH refuses the dangling buffer of an empty vector: at least one byte each.
+        let mut send: Vec<u8> =
+            Vec::with_capacity(sends.iter().map(Vec::len).sum::<usize>().max(1));
+        for v in sends {
+            send.extend_from_slice(v);
+        }
+        if send.is_empty() {
+            send.push(0);
+        }
+        let received: usize = receive_counts.iter().map(|&n| n as usize).sum();
+        let mut receive = vec![0u8; received.max(1)];
+        // SAFETY: `send` holds the bytes of `send_counts` at `send_offsets`, `receive` those of
+        // `receive_counts` at `receive_offsets`, one count and offset per process each.
+        let ierr = unsafe {
+            sys::petsc_sys_mpi_alltoallv_bytes(
+                send.as_ptr().cast(),
+                send_counts.as_ptr(),
+                send_offsets.as_ptr(),
+                receive.as_mut_ptr().cast(),
+                receive_counts.as_ptr(),
+                receive_offsets.as_ptr(),
+                self.0,
+            )
+        };
+        mpi_result(ierr, "MPI_Alltoallv")?;
+        Ok(receive_offsets
+            .iter()
+            .zip(&receive_counts)
+            .map(|(&o, &n)| receive[o as usize..(o + n) as usize].to_vec())
+            .collect())
+    }
+
     /// `MPI_Bcast` of `count` values of `datatype` at `buffer` from `root`.
     fn broadcast(
         &self,

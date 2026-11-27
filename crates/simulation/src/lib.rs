@@ -59,8 +59,8 @@ use crate::coupled::Coupled;
 pub use crate::inputs::Inputs;
 use crate::phases::Phases;
 pub use crate::summary::{
-    BalanceSummary, CellsSummary, FieldSummary, InflowSummary, IslandsSummary, PerfusionSummary,
-    Seconds, SolverSummary, Summary,
+    Attempts, BalanceSummary, CellsSummary, FieldSummary, InflowSummary, IslandsSummary,
+    PerfusionSummary, Seconds, SolverSummary, Summary,
 };
 
 /// The context of an error which every process meets at the same point of a simulation, with
@@ -272,8 +272,8 @@ impl<'p> Simulation<'p> {
             self.advance(self.study.time.end)?;
             if let (Some(coupled), Some(cells)) = (&self.coupled, &mut self.summary.cells) {
                 let stats = coupled.stats(&self.comm)?;
-                (cells.steps, cells.rejected, cells.seconds) =
-                    (stats.steps, stats.rejected, stats.seconds);
+                (cells.steps, cells.rejected, cells.seconds, cells.attempts) =
+                    (stats.steps, stats.rejected, stats.seconds, stats.attempts);
             }
             self.phases.end("output")?;
             self.summary.phases = self.phases.seconds().clone();

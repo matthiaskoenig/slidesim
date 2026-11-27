@@ -73,6 +73,11 @@ fn slidesim_with_env(args: &[String], env: &[(&str, &Path)]) -> Run {
 
 /// `slidesim` on `ranks` processes, or `None` without `mpiexec`.
 fn slidesim_parallel(ranks: usize, args: &[String]) -> Option<Run> {
+    slidesim_parallel_with_env(ranks, args, &[])
+}
+
+/// [`slidesim_parallel`] with the environment variables `env` (name, value).
+fn slidesim_parallel_with_env(ranks: usize, args: &[String], env: &[(&str, &Path)]) -> Option<Run> {
     let Some(mpiexec) = Mpiexec::find() else {
         eprintln!("skipped: no mpiexec");
         return None;
@@ -80,7 +85,8 @@ fn slidesim_parallel(ranks: usize, args: &[String]) -> Option<Run> {
     let mut cmd = mpiexec.command(ranks, env!("CARGO_BIN_EXE_slidesim"));
     cmd.args(args)
         .env_remove("LD_LIBRARY_PATH")
-        .env("SBMLSIM_C_CACHE", c_cache());
+        .env("SBMLSIM_C_CACHE", c_cache())
+        .envs(env.iter().copied());
     Some(finished(run_with_timeout(cmd, TIMEOUT)))
 }
 
@@ -969,6 +975,48 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path, steps_tolerance: f64)
         assert!(cells < 1e-10, "{cells:e}");
     }
     true
+}
+
+/// On 3 processes with an empty cache of compiled models, each library of the cell model is
+/// compiled once, by one process, which the others load from the cache: one compilation of the
+/// model on the engine path, two on the batched path (the model and its QFunction). `CC` is a
+/// script which logs its arguments and calls the compiler; each process asks it for its version
+/// and its predefined macros (the key of the cache), which compile nothing.
+#[test]
+fn compile_once_on_cold_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("compile_once_on_cold_cache");
+    let log = dir.join("cc.log");
+    let cc = dir.join("cc.sh");
+    let real = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    std::fs::write(
+        &cc,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec {real} \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (solver, libraries) in [("engine", 1), ("batched", 2)] {
+        let study = with_solver(&cells_study(), solver, &dir);
+        let cache = dir.join(format!("cache_{solver}"));
+        let _ = std::fs::remove_file(&log);
+        let out = dir.join(solver);
+        let env = [("CC", cc.as_path()), ("SBMLSIM_C_CACHE", cache.as_path())];
+        let Some(run) = slidesim_parallel_with_env(3, &args(&study, &out, &[]), &env) else {
+            return;
+        };
+        assert_success(&run);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let compilations: Vec<&str> = text.lines().filter(|l| l.contains(" -o ")).collect();
+        assert_eq!(
+            compilations.len(),
+            libraries,
+            "{solver}: {} compilations:\n{text}",
+            compilations.len()
+        );
+    }
 }
 
 /// Without a C compiler for the cell model, the run fails at the start, before anything is

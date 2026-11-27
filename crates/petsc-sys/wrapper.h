@@ -20,6 +20,10 @@ MPI_Op petsc_sys_mpi_replace(void);
 int petsc_sys_mpi_gather_int(int value, int *values, int root, MPI_Comm comm);
 int petsc_sys_mpi_gatherv_bytes(const void *data, int count, void *gathered, const int *counts, const int *offsets, int root, MPI_Comm comm);
 
+/* MPI_Alltoall of one int per process pair, MPI_Alltoallv of bytes (macros in MPIUNI too). */
+int petsc_sys_mpi_alltoall_int(const int *sends, int *receives, MPI_Comm comm);
+int petsc_sys_mpi_alltoallv_bytes(const void *sends, const int *send_counts, const int *send_offsets, void *receives, const int *receive_counts, const int *receive_offsets, MPI_Comm comm);
+
 /* PetscFree of an array PETSc allocated for the caller. */
 PetscErrorCode petsc_sys_free(void *p);
 

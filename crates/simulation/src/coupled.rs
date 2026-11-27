@@ -13,7 +13,7 @@ use pde::{Exchange, Problem};
 use petsc::Comm;
 
 use crate::phases::Phases;
-use crate::summary::Seconds;
+use crate::summary::{Attempts, Seconds};
 use crate::vtu::CellWriter;
 
 /// The steps of the cells of every process ([`Coupled::stats`]).
@@ -21,6 +21,7 @@ pub(crate) struct CellStats {
     pub(crate) steps: u64,
     pub(crate) rejected: u64,
     pub(crate) seconds: Seconds,
+    pub(crate) attempts: Attempts,
 }
 
 /// The cells of a study coupled to its fields by Strang splitting.
@@ -57,10 +58,13 @@ pub(crate) struct Coupled {
     blood: Vec<f64>,
     before: Vec<f64>,
     work: Vec<f64>,
-    /// The steps and rejected steps of the cells of this process, and its time in them (s).
+    /// The steps and rejected steps of the cells this process advanced, and its time in them
+    /// (s).
     steps: u64,
     rejected: u64,
     seconds: f64,
+    /// Over the cell steps, the largest step attempts of a process in each, summed.
+    attempts_max: u64,
     /// For each linked species, the amount the cells gave to its field since t = 0 (mM*um^2),
     /// over every process.
     exchanged: Vec<f64>,
@@ -76,6 +80,8 @@ pub(crate) struct Coupled {
     writer: CellWriter,
     /// The number of cells of every process.
     count: usize,
+    /// The communicator of the cells.
+    comm: petsc::OwnedComm,
 }
 
 impl Coupled {
@@ -160,6 +166,7 @@ impl Coupled {
             steps: 0,
             rejected: 0,
             seconds: 0.0,
+            attempts_max: 0,
             exchanged: vec![0.0; spec.species.len()],
             setup,
             scale,
@@ -167,6 +174,7 @@ impl Coupled {
             cells_compartment: spec.volumes.cells.clone(),
             writer,
             count,
+            comm: comm.duplicate()?,
         })
     }
 
@@ -240,6 +248,9 @@ impl Coupled {
         self.steps += stats.steps;
         self.rejected += stats.rejected;
         self.seconds += stats.seconds;
+        // Exact as a float: far below 2^53.
+        let attempts = (stats.steps + stats.rejected) as f64;
+        self.attempts_max += self.comm.comm().max_real(attempts)? as u64;
         self.t = t1;
         phases.end("cells")?;
         for (s, (field, exchange)) in self.links.iter().enumerate() {
@@ -259,21 +270,26 @@ impl Coupled {
         self.count
     }
 
-    /// The steps and the rejected steps of the cells of every process, and the mean and the
-    /// largest time of a process in its cells (s, without the wait for the others).
-    /// Collective.
+    /// The steps and the rejected steps of the cells of every process, the mean and the
+    /// largest time of a process in its cells (s, without the wait for the others), and the
+    /// step attempts of a process ([`Attempts`]). Collective.
     pub(crate) fn stats(&self, comm: &Comm) -> Result<CellStats> {
         let sum = |x: u64| -> Result<u64> {
             Ok(u64::try_from(
                 comm.sum_int(petsc::sys::PetscInt::try_from(x)?)?,
             )?)
         };
+        let (steps, rejected) = (sum(self.steps)?, sum(self.rejected)?);
         Ok(CellStats {
-            steps: sum(self.steps)?,
-            rejected: sum(self.rejected)?,
+            steps,
+            rejected,
             seconds: Seconds {
                 mean: comm.sum_real(self.seconds)? / comm.size() as f64,
                 max: comm.max_real(self.seconds)?,
+            },
+            attempts: Attempts {
+                mean: (steps + rejected) as f64 / comm.size() as f64,
+                max: self.attempts_max as f64,
             },
         })
     }

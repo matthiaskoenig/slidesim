@@ -754,6 +754,17 @@ impl Problem {
         Ok(local)
     }
 
+    /// The solution into `local`, a local vector of [`Problem::discretization`], as
+    /// [`Problem::local_solution`] gives it, without a new vector. Collective.
+    pub(crate) fn local_solution_into(&self, local: &mut Vector) -> Result<()> {
+        local.set(0.0)?;
+        for (tag, value) in &self.dirichlet {
+            self.disc.set_essential_values(local, tag, *value)?;
+        }
+        self.disc.dm().global_to_local(&self.u, local)?;
+        Ok(())
+    }
+
     /// The solution at each local vertex of the finest level, in the order of the local vertices
     /// (depth 0), ghosts and Dirichlet values included: the input of
     /// `mesh::Mesh::gather_vertex_values`. Collective.

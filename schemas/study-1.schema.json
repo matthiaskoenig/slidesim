@@ -136,6 +136,10 @@
           "format": "double",
           "type": "number"
         },
+        "balance": {
+          "description": "Spread the work of the cells evenly over the processes, default true: before each step\nof the cells, cells move from processes of more work to processes of less, by their step\nattempts in the step before (the mesh partition stays). A cell takes the same steps\nwherever it is advanced, so the results are the same either way, bit for bit. The\nengine path does not move the cells of a model with events, discontinuities or\nalgebraic rules (its integrator keeps state from one step to the next).",
+          "type": "boolean"
+        },
         "model": {
           "description": "SBML model, relative to the study file (`Study::load` leaves it as written).",
           "type": "string"
