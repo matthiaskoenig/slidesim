@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use contracts::{RESULT_VERSION, ResultMeta};
+use contracts::{RasterOptions, ResultOptions};
 use mesh::CanonicalMesh;
 use petsc::Petsc;
+use simulation::raster::Raster;
 use simulation::{
     Inputs, OnEveryProcess, RESULT_STORE, ResultData, ResultWriter, Simulation, read_result,
 };
@@ -74,6 +76,8 @@ fn inputs(tight: bool) -> Inputs {
         let cells = inputs.study.cells.as_mut().unwrap();
         cells.rtol = 1e-14;
         cells.atol = 1e-16;
+        // The partition independence includes the raster.
+        inputs.study.result = raster_options(3.0, 2);
     }
     inputs
 }
@@ -416,8 +420,262 @@ fn compare(one: &ResultData, many: &ResultData, ranks: usize) {
         assert!(d < 1e-10, "cell value {name} on {ranks} processes: {d:e}");
         differences.push(format!("{name} {d:.1e}"));
     }
+    assert_eq!(one.rasters.len(), one.fields.len());
+    for ((id, a), (_, b)) in one.rasters.iter().zip(&many.rasters) {
+        for (k, (a, b)) in a.iter().zip(b).enumerate() {
+            assert_eq!(a.len(), b.len());
+            let same = a.iter().zip(b).all(|(x, y)| {
+                (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-6 * x.abs().max(1e-3)
+            });
+            assert!(same, "raster of {id} level {k} on {ranks} processes");
+        }
+    }
     eprintln!(
         "result on {ranks} processes against 1, relative differences: {}",
         differences.join(", ")
+    );
+}
+
+/// An L shaped mesh of three squares of side 2 um ([0, 2] x [0, 2], [2, 4] x [0, 2] and
+/// [0, 2] x [2, 4]; the square [2, 4] x [2, 4] is missing), each split into two triangles,
+/// counterclockwise.
+fn l_mesh() -> CanonicalMesh {
+    let mut vertices = Vec::new();
+    let mut index = |x: f64, y: f64| {
+        let k = vertices
+            .iter()
+            .position(|v| *v == [x, y])
+            .unwrap_or_else(|| {
+                vertices.push([x, y]);
+                vertices.len() - 1
+            });
+        k as u32
+    };
+    let mut triangles = Vec::new();
+    for (x, y) in [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)] {
+        let a = index(x, y);
+        let b = index(x + 2.0, y);
+        let c = index(x + 2.0, y + 2.0);
+        let d = index(x, y + 2.0);
+        triangles.push([a, b, c]);
+        triangles.push([a, c, d]);
+    }
+    CanonicalMesh {
+        vertices,
+        element: vec![0; triangles.len()],
+        triangles,
+        tags: Vec::new(),
+    }
+}
+
+/// `x + 2 y` at the vertices.
+fn linear(mesh: &CanonicalMesh) -> Vec<f64> {
+    mesh.vertices.iter().map(|v| v[0] + 2.0 * v[1]).collect()
+}
+
+/// A level 0 pixel of a linear field is the field at its centre (within f32 rounding), NaN
+/// outside the mesh; row 0 is at the smallest y; the shapes follow the bounding box.
+#[test]
+fn raster_of_a_linear_field_is_exact() {
+    let mesh = l_mesh();
+    let raster = Raster::new(&mesh, 0.5, None, 3).unwrap();
+    let meta = raster.meta();
+    assert_eq!(
+        (meta.um_per_px, meta.origin_um, meta.levels),
+        (0.5, [0.0, 0.0], 3)
+    );
+    assert_eq!(meta.shapes, [[8, 8], [4, 4], [2, 2]]);
+    let level0 = &raster.pyramid(&linear(&mesh))[0];
+    let mut inside = 0;
+    for r in 0..8 {
+        for c in 0..8 {
+            let (x, y) = ((c as f64 + 0.5) * 0.5, (r as f64 + 0.5) * 0.5);
+            let v = level0[r * 8 + c];
+            if x > 2.0 && y > 2.0 {
+                assert!(v.is_nan(), "({r}, {c}) is outside: {v}");
+            } else {
+                inside += 1;
+                assert!(
+                    (f64::from(v) - (x + 2.0 * y)).abs() < 1e-6,
+                    "({r}, {c}): {v}"
+                );
+            }
+        }
+    }
+    assert_eq!(inside, 48);
+    // An extent that is no multiple of the pixel: ceil, and a pixel size beyond the mesh is one
+    // pixel.
+    assert_eq!(
+        Raster::new(&mesh, 0.7, None, 1).unwrap().meta().shapes,
+        [[6, 6]]
+    );
+    assert_eq!(
+        Raster::new(&mesh, 100.0, None, 3).unwrap().meta().shapes,
+        [[1, 1]; 3]
+    );
+    // The origin given: the pixels start there, pixel centres at origin + (c + 0.5) h.
+    let shifted = Raster::new(&mesh, 0.5, Some([1.0, -1.0]), 1).unwrap();
+    assert_eq!(shifted.meta().origin_um, [1.0, -1.0]);
+    assert_eq!(shifted.meta().shapes, [[10, 6]]);
+    let level0 = &shifted.pyramid(&linear(&mesh))[0];
+    for r in 0..10 {
+        for c in 0..6 {
+            let (x, y) = (1.0 + (c as f64 + 0.5) * 0.5, -1.0 + (r as f64 + 0.5) * 0.5);
+            let v = level0[r * 6 + c];
+            if y < 0.0 || (x > 2.0 && y > 2.0) {
+                assert!(v.is_nan(), "({r}, {c}): {v}");
+            } else {
+                assert!(
+                    (f64::from(v) - (x + 2.0 * y)).abs() < 1e-6,
+                    "({r}, {c}): {v}"
+                );
+            }
+        }
+    }
+}
+
+/// Level k + 1 is the mean of the valid pixels of 2 x 2 of level k (the edge blocks of an odd
+/// shape the pixels they have, a block without a valid pixel is NaN).
+#[test]
+fn pyramid_levels_are_means() {
+    let mesh = l_mesh();
+    let raster = Raster::new(&mesh, 0.6, None, 4).unwrap();
+    let shapes = raster.meta().shapes;
+    assert_eq!(shapes, [[7, 7], [4, 4], [2, 2], [1, 1]]);
+    let levels = raster.pyramid(&linear(&mesh));
+    assert_eq!(levels.len(), 4);
+    let mut nan_blocks = 0;
+    let mut partial_blocks = 0;
+    for k in 0..3 {
+        let [rows, cols] = shapes[k].map(|n| n as usize);
+        let [next_rows, next_cols] = shapes[k + 1].map(|n| n as usize);
+        assert_eq!(levels[k].len(), rows * cols);
+        assert_eq!(levels[k + 1].len(), next_rows * next_cols);
+        for r in 0..next_rows {
+            for c in 0..next_cols {
+                let mut values = Vec::new();
+                for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                    let (rr, cc) = (2 * r + dr, 2 * c + dc);
+                    if rr < rows && cc < cols && !levels[k][rr * cols + cc].is_nan() {
+                        values.push(f64::from(levels[k][rr * cols + cc]));
+                    }
+                }
+                let got = levels[k + 1][r * next_cols + c];
+                if values.is_empty() {
+                    nan_blocks += 1;
+                    assert!(got.is_nan(), "level {} ({r}, {c}): {got}", k + 1);
+                } else {
+                    partial_blocks += usize::from(values.len() < 4);
+                    let mean = values.iter().sum::<f64>() / values.len() as f64;
+                    assert!(
+                        (f64::from(got) - mean).abs() < 1e-6,
+                        "level {} ({r}, {c}): {got} against {mean}",
+                        k + 1
+                    );
+                }
+            }
+        }
+    }
+    assert!(nan_blocks > 0 && partial_blocks > 0);
+}
+
+fn raster_options(um_per_px: f64, levels: u32) -> Option<ResultOptions> {
+    Some(ResultOptions {
+        raster: Some(RasterOptions {
+            um_per_px,
+            origin_um: None,
+            levels,
+        }),
+    })
+}
+
+/// A study without `result.raster` writes no `raster` group and no `raster` attribute.
+#[test]
+fn no_raster_without_the_option() {
+    c_cache();
+    let petsc = Petsc::init(&[]).unwrap();
+    let out = scratch("no_raster_without_the_option", None);
+    run(&petsc, inputs(false), &out, 2);
+    let store = out.join(RESULT_STORE);
+    assert!(!store.join("raster").exists());
+    let data = read_result(&store).unwrap();
+    assert!(data.meta.raster.is_none() && data.rasters.is_empty());
+    let text = std::fs::read_to_string(store.join("zarr.json")).unwrap();
+    assert!(!text.contains("raster"), "{text}");
+}
+
+/// With `result.raster` every field has its pyramid in the store, an output time a chunk of each
+/// 256 x 256 block, written before `written` is raised; the arrays are those of
+/// [`Raster::pyramid`] of the fields of the store, and the attributes validate.
+#[test]
+fn store_holds_the_raster_pyramid() {
+    c_cache();
+    let petsc = Petsc::init(&[]).unwrap();
+    let out = scratch("store_holds_the_raster_pyramid", None);
+    let mut inputs = inputs(false);
+    inputs.study.result = raster_options(3.0, 3);
+    run(&petsc, inputs, &out, 3);
+    let store = out.join(RESULT_STORE);
+    let data = read_result(&store).unwrap();
+    let meta = data.meta.raster.clone().expect("raster attributes");
+    meta.um_per_px.partial_cmp(&3.0).unwrap();
+    assert_eq!((meta.levels, meta.shapes.len()), (3, 3));
+    let [rows, cols] = meta.shapes[0];
+    assert!(
+        rows > 256 || cols > 256 || rows * cols > 1000,
+        "{rows} x {cols}"
+    );
+    let raster = Raster::new(&data.mesh, 3.0, None, 3).unwrap();
+    assert_eq!(raster.meta(), meta);
+    assert_eq!(data.rasters.len(), data.fields.len());
+    let storage = Arc::new(FilesystemStore::new(&store).unwrap());
+    for ((id, nodal), (rid, levels)) in data.fields.iter().zip(&data.rasters) {
+        assert_eq!(id, rid);
+        assert_eq!(levels.len(), 3);
+        let v = data.mesh.vertices.len();
+        for t in 0..data.meta.written {
+            let expected = raster.pyramid(&nodal[t * v..(t + 1) * v]);
+            for (k, level) in levels.iter().enumerate() {
+                let [r, c] = meta.shapes[k].map(|n| n as usize);
+                let got = &level[t * r * c..(t + 1) * r * c];
+                assert!(
+                    got.iter()
+                        .zip(&expected[k])
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "field {id} level {k} time {t}"
+                );
+            }
+        }
+        let array = Array::open(storage.clone(), &format!("/raster/{id}/0")).unwrap();
+        assert_eq!(array.shape(), [4, rows, cols]);
+        assert_eq!(array.chunk_shape(&[0, 0, 0]).unwrap()[0].get(), 1);
+        assert_eq!(
+            array.chunk_grid_shape(),
+            [4, rows.div_ceil(256), cols.div_ceil(256)]
+        );
+    }
+    // The time not reached is NaN everywhere, the others have values inside the mesh.
+    let first = &data.rasters[0].1[0];
+    let [r, c] = meta.shapes[0].map(|n| n as usize);
+    assert!(first[..r * c].iter().any(|v| v.is_finite()));
+    assert!(first[3 * r * c..].iter().all(|v| v.is_nan()));
+}
+
+/// A raster whose level 0 would have more than 2^28 pixels is refused by name of the option,
+/// before anything is written to the store.
+#[test]
+fn huge_raster_is_refused() {
+    c_cache();
+    let petsc = Petsc::init(&[]).unwrap();
+    let out = scratch("huge_raster_is_refused", None);
+    let mut inputs = inputs(false);
+    inputs.study.result = raster_options(1e-3, 1);
+    let simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+    let e = ResultWriter::create(&out, &simulation, &spt())
+        .err()
+        .expect("refused");
+    assert!(
+        format!("{e:#}").contains("result.raster.um_per_px"),
+        "{e:#}"
     );
 }

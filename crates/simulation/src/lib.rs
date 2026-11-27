@@ -42,6 +42,7 @@
 mod coupled;
 mod inputs;
 mod phases;
+pub mod raster;
 mod result;
 mod summary;
 pub mod vtu;

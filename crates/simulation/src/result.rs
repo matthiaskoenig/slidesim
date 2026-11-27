@@ -40,10 +40,11 @@ use mesh::{CanonicalMesh, CanonicalTag, MeshError};
 use petsc::Comm;
 use serde_json::Value;
 use zarrs::array::codec::ZstdCodec;
-use zarrs::array::{Array, ArrayBuilder, CodecOptions, DataType, data_type};
+use zarrs::array::{Array, ArrayBuilder, ArraySubset, CodecOptions, DataType, data_type};
 use zarrs::filesystem::FilesystemStore;
 use zarrs::group::{Group, GroupBuilder};
 
+use crate::raster::Raster;
 use crate::{OnEveryProcess, Simulation};
 
 /// The name of the store in the output directory.
@@ -54,6 +55,9 @@ const FIELD_UNITS: &str = "mM";
 
 /// The zstd level of every array: fast, about as small as higher levels for these values.
 const ZSTD_LEVEL: i32 = 3;
+
+/// The side of the chunks of the raster arrays, in pixels.
+const RASTER_CHUNK: u64 = 256;
 
 /// The context of every error of the writer.
 const CANNOT_WRITE: OnEveryProcess = OnEveryProcess("cannot write result.zarr");
@@ -79,6 +83,9 @@ struct Store {
     cells: Vec<Array<FilesystemStore>>,
     /// The element ids of the cells, `cells/element`.
     cell_elements: Vec<u64>,
+    /// The raster pyramid, with its arrays `raster/<field>/<level>` of each field (in the order
+    /// of the fields) and level.
+    raster: Option<(Raster, Vec<Vec<Array<FilesystemStore>>>)>,
 }
 
 /// Everything in a store ([`read_result`]).
@@ -98,6 +105,9 @@ pub struct ResultData {
     /// `cells/<value>` of each name of `meta.cell_values`: the name and the `[T, C]` values, row
     /// by row.
     pub cells: Vec<(String, Vec<f64>)>,
+    /// `raster/<field>/<level>` of each field of `meta.fields` when `meta.raster` is set (else
+    /// empty): the id and, per level, the `[T, rows, cols]` values, row by row.
+    pub rasters: Vec<(String, Vec<Vec<f32>>)>,
 }
 
 impl ResultWriter {
@@ -133,40 +143,50 @@ impl ResultWriter {
         let times = study_data.time.outputs.clone();
         let store = match (canonical, cell_elements) {
             (Some(canonical), Some(cell_elements)) => {
-                let meta = ResultMeta {
-                    version: RESULT_VERSION.to_string(),
-                    study: file_name(study),
-                    scene: file_name(&study_data.scene),
-                    refinements: study_data.mesh.refinements,
-                    times: times.clone(),
-                    written: 0,
-                    complete: times.is_empty(),
-                    fields: simulation
-                        .field_ids()
-                        .into_iter()
-                        .map(|id| ResultField {
-                            id: id.to_string(),
-                            units: FIELD_UNITS.to_string(),
-                        })
-                        .collect(),
-                    cell_values: names,
-                    tags: canonical
-                        .tags
-                        .iter()
-                        .filter(|t| matches!(t.dim, 1 | 2))
-                        .map(|t| ResultTag {
-                            name: t.name.clone(),
-                            dim: u32::from(t.dim),
-                        })
-                        .collect(),
-                    raster: None,
-                };
-                Some(Store::create(
-                    &out.join(RESULT_STORE),
-                    meta,
-                    &canonical,
-                    cell_elements,
-                ))
+                let raster = study_data
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.raster.as_ref())
+                    .map(|r| Raster::new(&canonical, r.um_per_px, r.origin_um, r.levels))
+                    .transpose()
+                    .context("cannot make the raster");
+                Some(raster.and_then(|raster| {
+                    let meta = ResultMeta {
+                        version: RESULT_VERSION.to_string(),
+                        study: file_name(study),
+                        scene: file_name(&study_data.scene),
+                        refinements: study_data.mesh.refinements,
+                        times: times.clone(),
+                        written: 0,
+                        complete: times.is_empty(),
+                        fields: simulation
+                            .field_ids()
+                            .into_iter()
+                            .map(|id| ResultField {
+                                id: id.to_string(),
+                                units: FIELD_UNITS.to_string(),
+                            })
+                            .collect(),
+                        cell_values: names,
+                        tags: canonical
+                            .tags
+                            .iter()
+                            .filter(|t| matches!(t.dim, 1 | 2))
+                            .map(|t| ResultTag {
+                                name: t.name.clone(),
+                                dim: u32::from(t.dim),
+                            })
+                            .collect(),
+                        raster: raster.as_ref().map(Raster::meta),
+                    };
+                    Store::create(
+                        &out.join(RESULT_STORE),
+                        meta,
+                        &canonical,
+                        cell_elements,
+                        raster,
+                    )
+                }))
             }
             _ => None,
         };
@@ -208,7 +228,8 @@ impl ResultWriter {
             let values = simulation.field_values(field)?;
             let gathered = mesh.gather_vertex_values(&values).map_err(mesh_error)?;
             if let (Some(values), Some(store), Ok(())) = (gathered, &self.store, &written) {
-                written = store_row(&store.fields[field], t, &values);
+                written = store_row(&store.fields[field], t, &values)
+                    .and_then(|()| store.write_raster(field, t, &values));
             }
         }
         if let Some((ids, table)) = simulation.cell_values() {
@@ -245,6 +266,7 @@ impl Store {
         meta: ResultMeta,
         canonical: &CanonicalMesh,
         cell_elements: Vec<u64>,
+        raster: Option<Raster>,
     ) -> Result<Store> {
         if dir.is_dir() {
             std::fs::remove_dir_all(dir)
@@ -262,9 +284,14 @@ impl Store {
             fields: Vec::new(),
             cells: Vec::new(),
             cell_elements,
+            raster: None,
         };
         store.write_meta()?;
-        for group in ["/mesh", "/mesh/tags", "/fields", "/cells"] {
+        let groups = ["/mesh", "/mesh/tags", "/fields", "/cells"];
+        for group in groups
+            .into_iter()
+            .chain(raster.is_some().then_some("/raster"))
+        {
             GroupBuilder::new()
                 .build(storage.clone(), group)?
                 .store_metadata()?;
@@ -332,11 +359,51 @@ impl Store {
             .iter()
             .map(|name| per_time(format!("/cells/{name}"), c))
             .collect::<Result<_>>()?;
+        let raster = match raster {
+            Some(raster) => {
+                let mut arrays = Vec::new();
+                for field in &store.meta.fields {
+                    GroupBuilder::new()
+                        .build(storage.clone(), &format!("/raster/{}", field.id))?
+                        .store_metadata()?;
+                    let mut levels = Vec::new();
+                    for (k, [rows, cols]) in raster.meta().shapes.into_iter().enumerate() {
+                        levels.push(new_array(
+                            &storage,
+                            &format!("/raster/{}/{k}", field.id),
+                            vec![t, rows, cols],
+                            vec![1, RASTER_CHUNK, RASTER_CHUNK],
+                            data_type::float32(),
+                        )?);
+                    }
+                    arrays.push(levels);
+                }
+                Some((raster, arrays))
+            }
+            None => None,
+        };
         Ok(Store {
             fields,
             cells,
+            raster,
             ..store
         })
+    }
+
+    /// Writes the pyramid of the field `field` at the output time `t` from its nodal `values`
+    /// (nothing without a raster).
+    fn write_raster(&self, field: usize, t: u64, values: &[f64]) -> Result<()> {
+        let Some((raster, arrays)) = &self.raster else {
+            return Ok(());
+        };
+        for (array, level) in arrays[field].iter().zip(raster.pyramid(values)) {
+            let shape = array.shape();
+            let subset = ArraySubset::new_with_ranges(&[t..t + 1, 0..shape[1], 0..shape[2]]);
+            array
+                .store_array_subset_opt(&subset, level, &one_thread())
+                .with_context(|| format!("cannot write {} at {t}", array.path()))?;
+        }
+        Ok(())
     }
 
     /// Writes the rows `table` of the cells `ids` (one value per cell value) as the output time
@@ -403,6 +470,8 @@ fn new_array(
     let chunks: Vec<u64> = chunks.into_iter().map(|c| c.max(1)).collect();
     let mut builder = if data_type == data_type::float64() {
         ArrayBuilder::new(shape, chunks, data_type, f64::NAN)
+    } else if data_type == data_type::float32() {
+        ArrayBuilder::new(shape, chunks, data_type, f32::NAN)
     } else if data_type == data_type::uint32() {
         ArrayBuilder::new(shape, chunks, data_type, 0u32)
     } else {
@@ -539,6 +608,19 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
             ))
         })
         .collect::<Result<_>>()?;
+    let rasters = match &meta.raster {
+        Some(raster) => meta
+            .fields
+            .iter()
+            .map(|f| {
+                let levels = (0..raster.levels)
+                    .map(|k| read_all(&storage, &format!("/raster/{}/{k}", f.id), 1))
+                    .collect::<Result<_>>()?;
+                Ok((f.id.clone(), levels))
+            })
+            .collect::<Result<_>>()?,
+        None => Vec::new(),
+    };
     Ok(ResultData {
         meta,
         time,
@@ -551,6 +633,7 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
         fields,
         cell_elements,
         cells,
+        rasters,
     })
 }
 

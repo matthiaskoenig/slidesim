@@ -573,6 +573,42 @@
       ],
       "type": "object"
     },
+    "RasterOptions": {
+      "additionalProperties": false,
+      "description": "The raster pyramid of the fields (`result.raster`).",
+      "properties": {
+        "levels": {
+          "description": "Number of levels, at least 1; level k+1 halves level k.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "origin_um": {
+          "description": "Coordinates in um of the corner of pixel (0, 0) of level 0; default: the lower corner of\nthe mesh's bounding box.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "um_per_px": {
+          "description": "Pixel size of level 0 in um, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "um_per_px",
+        "levels"
+      ],
+      "type": "object"
+    },
     "Replace": {
       "additionalProperties": false,
       "description": "Where the element mean of `map` is above `above`, the parameter takes `value` instead.",
@@ -630,6 +666,24 @@
         "above",
         "value"
       ],
+      "type": "object"
+    },
+    "ResultOptions": {
+      "additionalProperties": false,
+      "description": "Options of the result store `result/1`.",
+      "properties": {
+        "raster": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RasterOptions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Also write the fields as a raster pyramid (`raster/<field>/<level>`), the frame of a slide\nimage a viewer overlays the results on."
+        }
+      },
       "type": "object"
     },
     "SolverOptions": {
@@ -762,6 +816,17 @@
         }
       ],
       "description": "Darcy perfusion of the tissue; required for fields with `advection`."
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResultOptions"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What the result store holds besides the mesh values."
     },
     "scene": {
       "description": "Path of the `scene/1` file; relative paths resolve against the\ndirectory of the study file (`Study::load` stores the absolute path).",

@@ -22,9 +22,9 @@ pub use scene::{
 };
 pub use study::{
     BoundarySpec, CellParameter, CellSolverKind, CellsSpec, Coefficient, Condition,
-    DEFAULT_LINEAR_RTOL, Direction, FieldSpec, MeshOptions, Perfusion, PressureBoundary, Replace,
-    STUDY_VERSION, SolverOptions, SpeciesLink, Study, Table, TimeSpec, VolumeLink, check_cells,
-    check_maps, schema_study,
+    DEFAULT_LINEAR_RTOL, Direction, FieldSpec, MeshOptions, Perfusion, PressureBoundary,
+    RasterOptions, Replace, ResultOptions, STUDY_VERSION, SolverOptions, SpeciesLink, Study, Table,
+    TimeSpec, VolumeLink, check_cells, check_maps, schema_study,
 };
 
 use std::path::{Path, PathBuf};

@@ -53,7 +53,7 @@ for speed, and agree to about that. `slidesim run --help` describes the outputs.
 | `pressure.vtu` | with perfusion: the pressure, point data `pressure.Pa` |
 | `velocity.vtu` | with perfusion: the point vectors `velocity` (the conservative velocity the fields are carried by) and `primal_velocity` (`-K grad p / mu`), um/s |
 | `summary.json` | per field and output time: norms, amounts and the mass balance; flows, cells and the time per phase |
-| `result.zarr` | the store [`result/1`](contracts.md#result1) for viewers (Zarr v3, zstd): the finest mesh, and per output time every field at its vertices and every value of the cells |
+| `result.zarr` | the store [`result/1`](contracts.md#result1) for viewers (Zarr v3, zstd): the finest mesh, and per output time every field at its vertices and every value of the cells; with `result.raster` in the study also the fields as a raster pyramid |
 
 ## result.zarr
 
@@ -73,6 +73,18 @@ meta = root.attrs.asdict()  # ResultMeta: times, written, fields, cell_values, t
 vertices = root["mesh/vertices"][:]  # [V, 2], um
 triangles = root["mesh/triangles"][:]  # [N, 3]
 S = root["fields/S"][meta["written"] - 1]  # [V], mM, the last output time written
+```
+
+With `"result": {"raster": {"um_per_px": 10, "levels": 4}}` in the study (`origin_um` optional)
+the store also holds each field sampled on a pixel grid, `raster/<field>/<level>`: `[T, rows, cols]`
+f32 in chunks of 256 x 256, level 0 at `um_per_px` over the mesh's bounding box, row 0 at the
+smallest y, NaN outside the mesh, each further level the mean of 2 x 2 pixels of the one before.
+`meta["raster"]` has the pixel size, the origin and the shape of each level; see
+[`result/1`](contracts.md#result1). A viewer overlays it on a slide image of the tissue by the
+origin and the pixel size.
+
+```python
+level0 = root["raster/S/0"][meta["written"] - 1]  # [rows, cols], mM
 ```
 
 ## summary.json

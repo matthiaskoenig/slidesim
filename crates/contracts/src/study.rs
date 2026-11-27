@@ -33,6 +33,35 @@ pub struct Study {
     pub mesh: MeshOptions,
     #[serde(default)]
     pub solver: SolverOptions,
+    /// What the result store holds besides the mesh values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultOptions>,
+}
+
+/// Options of the result store `result/1`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultOptions {
+    /// Also write the fields as a raster pyramid (`raster/<field>/<level>`), the frame of a slide
+    /// image a viewer overlays the results on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<RasterOptions>,
+}
+
+/// The raster pyramid of the fields (`result.raster`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RasterOptions {
+    /// Pixel size of level 0 in um, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub um_per_px: f64,
+    /// Coordinates in um of the corner of pixel (0, 0) of level 0; default: the lower corner of
+    /// the mesh's bounding box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_um: Option<[f64; 2]>,
+    /// Number of levels, at least 1; level k+1 halves level k.
+    #[schemars(range(min = 1))]
+    pub levels: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -658,7 +687,30 @@ impl Study {
             c.validate()?;
         }
         self.solver.validate()?;
+        if let Some(r) = self.result.as_ref().and_then(|r| r.raster.as_ref()) {
+            r.validate()?;
+        }
         self.time.validate()
+    }
+}
+
+impl RasterOptions {
+    fn validate(&self) -> Result<(), ContractError> {
+        finite("result.raster.um_per_px", self.um_per_px)?;
+        if self.um_per_px <= 0.0 {
+            return Err(invalid(format!(
+                "result.raster.um_per_px must be > 0, got {}",
+                self.um_per_px
+            )));
+        }
+        if self.levels < 1 {
+            return Err(invalid("result.raster.levels must be >= 1".into()));
+        }
+        if let Some([x, y]) = self.origin_um {
+            finite("result.raster.origin_um", x)?;
+            finite("result.raster.origin_um", y)?;
+        }
+        Ok(())
     }
 }
 
@@ -800,6 +852,62 @@ mod tests {
     fn study() -> Study {
         let text = include_str!("../../../testdata/contracts/study-minimal.json");
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn raster_options_are_checked() {
+        let with = |raster: serde_json::Value| {
+            let mut s = study();
+            s.result =
+                Some(serde_json::from_value(serde_json::json!({ "raster": raster })).unwrap());
+            s.validate()
+        };
+        with(serde_json::json!({"um_per_px": 2.0, "levels": 3})).unwrap();
+        with(serde_json::json!({"um_per_px": 2.0, "levels": 1, "origin_um": [-5.0, 1.0]})).unwrap();
+        for (raster, message) in [
+            (
+                serde_json::json!({"um_per_px": 0.0, "levels": 1}),
+                "result.raster.um_per_px must be > 0",
+            ),
+            (
+                serde_json::json!({"um_per_px": -1.0, "levels": 1}),
+                "result.raster.um_per_px must be > 0",
+            ),
+            (
+                serde_json::json!({"um_per_px": 1.0, "levels": 0}),
+                "result.raster.levels must be >= 1",
+            ),
+        ] {
+            let e = with(raster).unwrap_err().to_string();
+            assert!(e.contains(message), "{e}");
+        }
+        let mut s = study();
+        s.result = Some(ResultOptions {
+            raster: Some(RasterOptions {
+                um_per_px: f64::NAN,
+                origin_um: None,
+                levels: 1,
+            }),
+        });
+        assert!(
+            s.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result.raster.um_per_px")
+        );
+        s.result = Some(ResultOptions {
+            raster: Some(RasterOptions {
+                um_per_px: 1.0,
+                origin_um: Some([0.0, f64::INFINITY]),
+                levels: 1,
+            }),
+        });
+        assert!(
+            s.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result.raster.origin_um")
+        );
     }
 
     #[test]

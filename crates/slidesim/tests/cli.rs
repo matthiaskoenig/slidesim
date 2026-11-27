@@ -1402,6 +1402,41 @@ fn mesher_failure_on_process_0_stops_all() {
     assert!(!run.stderr.contains("MPI_Abort"), "{}", run.stderr);
 }
 
+/// A study with `result.raster` writes the raster pyramid into `result.zarr`; one without it
+/// writes none, and a raster too large for the mesh is refused by name of the option.
+#[test]
+fn run_writes_the_raster_when_asked() {
+    let dir = scratch("run_writes_the_raster_when_asked");
+    let with = variant(&lobule_study(), &dir, "raster", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 10.0, "levels": 3}});
+    });
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&with, &out, &[])));
+    let data = simulation::read_result(&out.join(simulation::RESULT_STORE)).unwrap();
+    let raster = data.meta.raster.expect("raster attributes");
+    assert_eq!((raster.um_per_px, raster.levels), (10.0, 3));
+    assert_eq!(raster.shapes.len(), 3);
+    let (id, levels) = &data.rasters[0];
+    assert_eq!(id, "sucrose");
+    let [rows, cols] = raster.shapes[0];
+    let last = data.meta.written - 1;
+    let level0 = &levels[0][last * (rows * cols) as usize..];
+    assert!(level0.iter().any(|v| v.is_finite()) && level0.iter().any(|v| v.is_nan()));
+    let huge = variant(&lobule_study(), &dir, "huge", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 1e-5, "levels": 1}});
+    });
+    let run = slidesim(&args(&huge, &dir.join("huge_out"), &[]));
+    assert!(!run.status.unwrap().success(), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("result.raster.um_per_px"),
+        "{}",
+        run.stderr
+    );
+    let plain = dir.join("plain");
+    assert_success(&slidesim(&args(&lobule_study(), &plain, &[])));
+    assert!(!plain.join(simulation::RESULT_STORE).join("raster").exists());
+}
+
 /// `result.zarr` of an earlier run in the output directory is replaced whole: `lobule_toy` (the
 /// field `sucrose`) and then the SPT cells on `cells_toy` (the fields `S` and `P`) into one
 /// `--out` leave the store of the second run alone, without `fields/sucrose`. The root

@@ -171,6 +171,7 @@ solvers.
 | `cells` | optional: a cell model on the elements, coupled to the fields |
 | `time` | `end` (s), `dt` (s, the first step if adaptive), `adaptive` (default false), `outputs` (s, sorted, within `[0, end]`) |
 | `mesh` | `refinements`: the number of uniform refinements of the scene's mesh (default 0) |
+| `result` | optional: `raster` `{um_per_px, origin_um, levels}` also writes the fields as the raster pyramid of [`result/1`](#result1): `um_per_px` > 0 and finite, `origin_um` (finite, default the lower corner of the mesh's bounding box), `levels` >= 1 |
 | `solver` | `linear_rtol`: the relative tolerance of the linear solves of the transport, in (0, 1), default 1e-10 (the residual of each solve reduced by it; with fixed steps the time integration has no error estimate to derive it from, so the study sets it; `-ksp_rtol` in `petsc_options` overrides it); `petsc_options`: a PETSc options string, for example `-ksp_type cg -pc_type jacobi` |
 
 ### Coefficients
@@ -295,6 +296,21 @@ without cells has an empty `cells/element` (shape `[0]`) and no `cells/<value>`.
 `fields/<id>` and `cells/<value>` hold the fill value NaN until their output time is written:
 `slidesim run` writes each output time as it reaches it (the chunks first, then `written`), so a
 viewer may read a store while the run goes on.
+
+The raster pyramid (`result.raster` of the study) frames the results for a slide image. Level 0
+covers the bounding box of the mesh from `origin_um` (default: the lower corner of the box):
+`cols = ceil((x_max - x0) / um_per_px)` and `rows = ceil((y_max - y0) / um_per_px)`, at least 1
+each. Row 0 is at the smallest y (y grows with the row index). Pixel `(r, c)` has its centre at
+`(x0 + (c + 0.5) h, y0 + (r + 0.5) h)` with `h = um_per_px`, and holds the P1 value of the field
+there, as f32; a centre outside the mesh is NaN, a centre on a shared edge or vertex takes any
+containing triangle (the field is continuous). With an `origin_um` right of or above the mesh's
+lower corner the pixels cover only from the origin on: nothing left of or below it is stored.
+Level k+1 has `ceil(rows / 2)` x `ceil(cols / 2)` pixels (`shapes[k]` is `[rows, cols]`), each the
+mean of the valid (not NaN) pixels of its block of 2 x 2 of level k, a block cut by the edge
+averaging the pixels it has, a block without a valid pixel NaN; levels past 1 x 1 stay 1 x 1.
+Each output time is one chunk per 256 x 256 block, written after the fields of that time and
+before `written` counts it. A raster of more than 2^28 pixels in level 0 is refused when the run
+starts, the message naming `result.raster.um_per_px`.
 
 The mesh is limited to about 40 million finest triangles: the writer gathers the canonical mesh
 onto process 0 (`Mesh::canonical`, about 44 bytes per triangle with its vertices and tags), and
