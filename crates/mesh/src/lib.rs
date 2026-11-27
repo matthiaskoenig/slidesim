@@ -105,13 +105,14 @@ pub enum MeshError {
 }
 
 impl MeshError {
-    /// Whether every process of [`Mesh::load`] has this error, with the same message, at the
-    /// same point: [`MeshError::NotFound`] and [`MeshError::Mesher`] (process 0 finds them and
-    /// tells the others), [`MeshError::Dimension`] (every process reads the dimension of the
-    /// same mesh), [`MeshError::Gather`] and [`MeshError::Distribute`] (the processes agree on
-    /// them). After such an error no process waits for another, so a caller may end each
-    /// process alone. A PETSc error, or one of reading (the collective read may fail on one
-    /// process only), may be on some processes only.
+    /// Whether every process has this error, with the same message, at the same point (of
+    /// [`Mesh::load`], [`Mesh::from_tagged`] or a gather of the mesh): [`MeshError::NotFound`]
+    /// and [`MeshError::Mesher`] (process 0 finds them and tells the others),
+    /// [`MeshError::Dimension`] (every process reads the dimension of the same mesh),
+    /// [`MeshError::Gather`] and [`MeshError::Distribute`] (the processes agree on them). After
+    /// such an error no process waits for another, so a caller may end each process alone. A
+    /// PETSc error, or one of reading (the collective read may fail on one process only), may be
+    /// on some processes only.
     pub fn is_collective(&self) -> bool {
         matches!(
             self,

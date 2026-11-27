@@ -135,7 +135,10 @@ pub enum MesherError {
 ///   most `t` there);
 ///
 /// the lobules of any valid spec, polygonized circles and the pixel steps of masks with pixels of
-/// `min / 4` or more are such inputs.
+/// `min / 4` or more are such inputs. These bounds rest on the local improvement lifting the
+/// elements Mmg leaves below them to its margin (`GOOD` of `improve.rs`), which it does not
+/// guarantee: the quality sweeps of the tests check it (`quality_sweep_heavy`, rings 2 to 4, in
+/// a release step of CI).
 /// Inputs with sharper corners, narrower gaps, shorter segments or steeper size fields may give
 /// less, which the caller reads from the [`Quality`].
 pub fn generate(

@@ -23,7 +23,8 @@ MPI_Op petsc_sys_mpi_replace(void) { return MPI_REPLACE; }
    one process) defines them as macros, which bindgen cannot translate. */
 int petsc_sys_mpi_comm_rank(MPI_Comm comm, int *rank) { return MPI_Comm_rank(comm, rank); }
 int petsc_sys_mpi_comm_size(MPI_Comm comm, int *size) { return MPI_Comm_size(comm, size); }
-int petsc_sys_mpi_allreduce(const void *send, void *receive, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm)
+int petsc_sys_mpi_allreduce(const void *send, void *receive, int count, MPI_Datatype datatype,
+                            MPI_Op op, MPI_Comm comm)
 {
   return MPI_Allreduce(send, receive, count, datatype, op, comm);
 }
@@ -39,7 +40,8 @@ int petsc_sys_mpi_gather_int(int value, int *values, int root, MPI_Comm comm)
 {
   return MPI_Gather(&value, 1, MPI_INT, values, 1, MPI_INT, root, comm);
 }
-int petsc_sys_mpi_gatherv_bytes(const void *data, int count, void *gathered, const int *counts, const int *offsets, int root, MPI_Comm comm)
+int petsc_sys_mpi_gatherv_bytes(const void *data, int count, void *gathered, const int *counts,
+                                const int *offsets, int root, MPI_Comm comm)
 {
   return MPI_Gatherv(data, count, MPI_BYTE, gathered, counts, offsets, MPI_BYTE, root, comm);
 }
@@ -51,15 +53,20 @@ int petsc_sys_mpi_alltoall_int(const int *sends, int *receives, MPI_Comm comm)
 {
   return MPI_Alltoall(sends, 1, MPI_INT, receives, 1, MPI_INT, comm);
 }
-int petsc_sys_mpi_alltoallv_bytes(const void *sends, const int *send_counts, const int *send_offsets, void *receives, const int *receive_counts, const int *receive_offsets, MPI_Comm comm)
+int petsc_sys_mpi_alltoallv_bytes(const void *sends, const int *send_counts, const int *send_offsets,
+                                  void *receives, const int *receive_counts,
+                                  const int *receive_offsets, MPI_Comm comm)
 {
 #if defined(PETSC_HAVE_MPIUNI)
   (void)comm;
   (void)receive_counts;
-  if (send_counts[0] > 0) memcpy((char *)receives + receive_offsets[0], (const char *)sends + send_offsets[0], (size_t)send_counts[0]);
+  if (send_counts[0] > 0)
+    memcpy((char *)receives + receive_offsets[0], (const char *)sends + send_offsets[0],
+           (size_t)send_counts[0]);
   return MPI_SUCCESS;
 #else
-  return MPI_Alltoallv(sends, send_counts, send_offsets, MPI_BYTE, receives, receive_counts, receive_offsets, MPI_BYTE, comm);
+  return MPI_Alltoallv(sends, send_counts, send_offsets, MPI_BYTE, receives, receive_counts,
+                       receive_offsets, MPI_BYTE, comm);
 #endif
 }
 

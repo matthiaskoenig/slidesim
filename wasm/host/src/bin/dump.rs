@@ -8,8 +8,9 @@
 //! directory gets the arrays of `result/1` under their names, as little endian bytes (`time`,
 //! `mesh/vertices`, `mesh/triangles`, `mesh/element`, `mesh/tags/<name>`, `cells/element`), each
 //! output time `k` in `outputs/<k>/` (`time`, the f64 of `slidesim_time`, `fields/<id>`,
-//! `cells/<value>`, `raster/<field>/<level>` (f32), `meta.json`), and `meta.json`, `summary.json`, `quality.json` and `log.txt`
-//! of the end. An existing out directory is replaced.
+//! `cells/<value>`, `raster/<field>/<level>` (f32), `meta.json`), and `meta.json`,
+//! `summary.json`, `quality.json` and `log.txt` of the end. An existing out directory is
+//! replaced.
 
 use std::path::{Path, PathBuf};
 

@@ -26,7 +26,7 @@ dependencies are in [Installation](installation.md).
 | `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
 | `scripts/wasm/` | the build of the browser build and of what its tests need (`build.sh`), and the bundle of the lobule demo (`bundle.sh`) |
 | `scripts/e2e/`, `scripts/bench/` | the end-to-end runs on real slides, and the benchmarks |
-| `spike/petsc-wasm/`, `spike/mmg/` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`) |
+| `spike/petsc-wasm/`, `spike/mmg/RESULT.md` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`: its result; the code is in the history) |
 | `docs/` | these pages; `docs/superpowers/` holds the design documents and plans of the milestones, which are not part of the site |
 
 ## Tests
@@ -106,18 +106,18 @@ import in the custom section `slidesim.memory`), and writes their paths to
 `target/wasm/artifacts.env`.
 
 The tests of `wasm/host` run `slidesim.wasm` in wasmtime as a page runs it: the kernel
-instantiated with slidesim's memory (which the host creates, `env.memory`) and mathlib, slidesim's imports `slidesim_kernel.init`,
-`slidesim_kernel.advance` and `slidesim_kernel.assign` bound to it. `lobule_matches_native` runs the SPT study of an hour on
-the lobule (`testdata/studies/lobules/spt_1h.study.json`) natively and in wasm on the native
-mesh: the mesh arrays agree bitwise, the fields within 1e-5 of their maximum and the cell values
-within `1e-4 |y| + 1e-8` (measured: about 1e-14 relative; the math functions of mathlib and of the
-C library differ in the last bits). `rule_outputs_match_native` does the same for the targets of
-assignment rules which read a state (`necrosis_trigger` of the SPT model, its threshold lowered so
-that it moves within the hour), evaluated by the kernel's `sbmlsim_kernel_assign`. The others
-check the lobule meshed in wasm against the
-mesher's bounds and twice the same, the refusals of the engine path and of a file scene, and a
-cap of the memory (an error naming it, the host lives on). `mesher_wall_times` (ignored) prints
-the time of the mesher in wasm.
+instantiated with slidesim's memory (which the host creates, `env.memory`) and mathlib,
+slidesim's imports `slidesim_kernel.init`, `slidesim_kernel.advance` and `slidesim_kernel.assign`
+bound to it. `lobule_matches_native` runs the SPT study of an hour on the lobule
+(`testdata/studies/lobules/spt_1h.study.json`) natively and in wasm on the native mesh: the mesh
+arrays agree bitwise, the fields within 1e-5 of their maximum and the cell values within
+`1e-4 |y| + 1e-8` (measured: about 1e-14 relative; the math functions of mathlib and of the C
+library differ in the last bits). `rule_outputs_match_native` does the same for the targets of
+assignment rules which read a state (`necrosis_trigger` of the SPT model, its threshold lowered
+so that it moves within the hour), evaluated by the kernel's `sbmlsim_kernel_assign`. The others
+check the lobule meshed in wasm against the mesher's bounds and twice the same, the refusals of
+the engine path and of a file scene, and a cap of the memory (an error naming it, the host lives
+on). `mesher_wall_times` (ignored) prints the time of the mesher in wasm.
 
 The JavaScript glue `wasm/js/slidesim.mjs` implements the live API
 ([Contracts](contracts.md#live-api)) over the exports of `slidesim.wasm`: WASI preview 1 over
@@ -155,8 +155,10 @@ CARGO_TARGET_DIR=target/wasm cargo clippy --target wasm32-wasip1 \
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request: the format, Clippy,
-the tests and the doctests, on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 with MPICH, against
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: the format, the
+process hygiene of the scripts, Clippy, the tests, the doctests and, in a release build, the
+heavy quality sweep of the mesher (`quality_sweep_heavy`: rings 2 to 4, about 30 meshes, ignored
+in the debug test run), on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 with MPICH, against
 the `native-check` dependencies, which it caches (the key covers `deps/versions.env` but for the
 revision of sbmlsim-core, the build scripts and the patches). The job `wasm` then runs the
 browser build on Ubuntu 24.04: the wasi dependencies and sbmlsim-core's artifacts cached,
@@ -165,6 +167,13 @@ browser build on Ubuntu 24.04: the wasi dependencies and sbmlsim-core's artifact
 `.github/workflows/docs.yml` builds these pages (below), and in a job of its own the browser build
 (`build.sh --browser`, the wasi dependencies from the cache of the job `wasm`), whose bundle goes
 to `demo/lobule/` of the site.
+
+Before a pull request is merged, check on its CI run that `fixture_mesh_is_stable`
+(`crates/mesher/tests/mesher.rs`) passed on both legs of the job `check`: it compares the hash of
+the mesher's mesh of a fixture with the stored `FIXTURE_HASH`, so a green leg means the mesh of
+that image (its compiler, MPI and PETSc build) is bit for bit the stored one. Both legs run it in
+the test step; whether the images agree with each other and with a local build is known only
+from that run.
 
 ## Benchmarks and end-to-end runs
 
@@ -192,11 +201,13 @@ These need the slides, which are not in the repository, and run on the optimized
 All of these scripts source `scripts/lib/proc.sh` and start every `slidesim` and `mpiexec` run
 through its `run_sim <limit> <cmd...>`: a wall-clock limit (`LIMIT`), the CPUs `PROC_CPUS` (default
 `0-9`, so at most 10 CPUs) at nice 10, and at most 4 MPI processes by default. The script runs in
-a session of its own and takes down every process it started when it ends, however it ends: normally,
-by an error, by TERM, INT or HUP, or by KILL of the script or of the shell which started it.
-`scripts/tests/proc_kill.sh` checks this with a dummy script (no slidesim needed, a few seconds):
-it stops the script in each of these ways, checks that no process of it remains within 15 s, and
-checks the exit status of a normal run, a failing command and a time-limit hit. CI runs it.
+a session of its own and takes down every process it started when it ends, however it ends:
+normally, by an error, by TERM, INT or HUP, or by KILL of the script or of the shell which started
+it; it needs no exec bit (`bash script.sh` works as well). `scripts/tests/proc_kill.sh` checks
+this with a dummy script (no slidesim needed, a few seconds): it stops the script in each of
+these ways, checks that no process of it remains within 15 s, and checks the exit status of a
+normal run, a failing command and a time-limit hit, and of a run started by `bash` without the
+exec bit. CI runs it.
 
 ## Contributing
 

@@ -76,8 +76,8 @@ of runs at a load below 12 where available (base: 53.8 to 97.4 s over five runs 
 | BiCGStab | `-ksp_type bcgs` | 11.27 | 1033.3 |
 
 Kept: the coarse limit of 5000 equations (PETSc's default is 50), 23 % fewer iterations and 20 %
-less transport time, 61 % fewer messages and 15 % fewer flops in the solves: fewer levels in the algebraic
-multigrid, with a larger direct solve at its bottom. A redundant LU of the whole coarse level
+less transport time, 61 % fewer messages and 15 % fewer flops in the solves: fewer levels in the
+algebraic multigrid, with a larger direct solve at its bottom. A redundant LU of the whole coarse level
 (21,000 equations on every process) halves the iterations but makes each one far more expensive.
 
 ### The coarse solve on one process
@@ -239,8 +239,9 @@ steps of the largest attempts of a process over their mean, `cells.attempts` of
 - Parity: the balance is bit for bit neutral in the tests of the cells. Whole runs on 2
   processes are too (`quick`, `off` against `on`: equal); on 4 processes, runs of the same
   binary and settings are not reproducible bit for bit (`base` against `base`: up to 4e-13 of
-  the largest term of a balance; on the 7 lobules once a rejected step in 4e7), and `off`
-  against `on` differ by as much (up to 6e-13), so the balance adds nothing beyond that noise.
+  the largest term of a balance; on the 7 lobules, `on` against `on`, one rejected step in the
+  350 million step attempts of a run), and `off` against `on` differ by as much (up to 6e-13),
+  so the balance adds nothing beyond that noise.
   The parity of 1, 2 and 3 processes at the tight settings (1e-10, the same step counts of the
   cells) holds (`cells_parallel_matches_one`, `two_ranks_match_one`). The mass balances close
   as before.

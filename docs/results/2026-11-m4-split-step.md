@@ -1,18 +1,19 @@
 # Milestone 4: split step of the coupled SPT runs
 
 Status: 2026-11-27, slidesim branch `feat/m4-lobules` (task 11b of the milestone 4 plan). Verdict:
-at the split step of 60 s of the example SPT studies, the Strang splitting of cells and transport
-costs 1.7 % of the substrate uptake and delays the necrosis front by a few cells. A split step of
-30 s is the choice for the substrate and the necrosis: it is the largest measured split step
-whose substrate (S) uptake stays within 1 % of the reference and whose necrotic share and Dice
-coefficient stay within 0.01, at 1.6 to 1.7 times the wall time of 60 s. It does not meet the
-1 % for everything: the product P given back is off by 4.2 % at 30 s (lobule, 1 h; on the coarse
-mesh 0.69 % at 4 h but 4.2 % at 1 h), and on the 7 lobules the S uptake in the first 15 min is
-off by 1.7 % at the end and 13 % at 5 min. The necrosis numbers come from a coarser mesh over
-4 h and are not measured on the production mesh at 24 h (see Setup). The splitting is of order 1.3 to 1.7 over the measured split steps, because a cell
-step of seconds to minutes is long against the few seconds in which the perfusion refills a
-cell's blood. The lobule and slide field example SPT studies use `split_step` 30 s since the commit
-"feat(examples): split step 30 s in the SPT examples" (the user's decision of 2026-11-27); a
+at the split step of 60 s, which the example SPT studies had before 2ee0cb5, the Strang splitting
+of cells and transport costs 1.7 % of the substrate uptake and delays the necrosis front by a few
+cells. A split step of 30 s is the choice for the substrate and the necrosis: it is the largest
+measured split step whose substrate (S) uptake stays within 1 % of the reference and whose
+necrotic share and Dice coefficient stay within 0.01, at 1.6 to 1.7 times the wall time of 60 s
+(measured over 1 to 4 h; for the 24 h runs an estimate). It does not meet the 1 % for
+everything: the product P given back is off by 4.2 % at 30 s (lobule, 1 h; on the coarse mesh
+0.69 % at 4 h but 4.2 % at 1 h), and on the 7 lobules the S uptake in the first 15 min is off by
+1.7 % at the end and 13 % at 5 min. The necrosis numbers come from a coarser mesh over 4 h and
+are not measured on the production mesh at 24 h (see Setup). The splitting is of order 1.3 to
+1.7 over the measured split steps, because a cell step of seconds to minutes is long against the
+few seconds in which the perfusion refills a cell's blood. The lobule and slide field example
+SPT studies use `split_step` 30 s since 2ee0cb5 (the user's decision of 2026-11-27); a
 supply-aware coupling is a separate design task after milestone 4.
 
 ## Setup
@@ -106,8 +107,10 @@ differences of successive runs 1.39 / 0.92 (120, 60, 30) and 1.40 / 1.18 (60, 30
   1 h output); in hours 2 to 4 the S uptake per hour at 30 s is within 0.1 to 0.7 % of the
   reference, higher in hours 3 and 4 because fewer cells are necrotic.
 - Observed orders (S / P / necrotic share): 1.31 / 1.27 / 1.52 (120 to 60 s), 1.53 / 1.50 /
-  1.43 (60 to 30), 1.69 / 1.66 (30 to 15), 1.39 / 1.41 (15 to 10); from the differences of
-  successive runs 1.17 / 1.12 (120, 60, 30) and 1.45 / 1.42 (60, 30, 15).
+  1.43 (60 to 30), 1.69 / 1.66 / - (30 to 15), 1.39 / 1.41 / - (15 to 10); from the differences
+  of successive runs 1.17 / 1.12 (120, 60, 30) and 1.45 / 1.42 (60, 30, 15). "-": the errors of
+  the necrotic share are equal at 30, 15 and 10 s (0.0019, the two cells mid-ramp above), so
+  they give no order.
 
 ## Seven lobules, 15 min, against 10 s
 
@@ -140,21 +143,24 @@ and exchange phases grow with it (dt 10 s, and a restart of BDF2 per split step)
 
 1. **Split step 30 s, the choice for the substrate and the necrosis.** It is the largest
    measured split step whose substrate (S) uptake error is below 1 % and whose necrotic share and
-   Dice stay within 0.01 on both lobules: S uptake error 0.62 % (lobule, 1 h) and 0.30 % (coarse, 4 h) at the end, at most
-   0.71 % over the outputs; necrotic share within 0.0019 and Dice 0.9972 at every output with
-   necrosis. 60 s fails the uptake (1.73 % at 1 h) and the Dice at 3 h (0.984). The cost against
+   Dice stay within 0.01 on both lobules: S uptake error 0.62 % (lobule, 1 h) and 0.30 % (coarse,
+   4 h) at the end, at most 0.71 % over the outputs; necrotic share within 0.0019 and Dice
+   0.9972 at every output with necrosis. 60 s fails the uptake (1.73 % at 1 h) and the Dice at
+   3 h (0.984). The cost against
    60 s is 1.59 times the wall time on the lobule for 1 h, 1.74 times on the coarse lobule for
    4 h, and 1.40 times on the 7 lobules for 15 min; for the 24 h runs, where the cells dominate,
    an estimate of about 1.7 times (not measured). The transport step of the SPT studies (15 s)
-   could stay 15 s, which `split_step` 30 s allows (at least `time.dt`), but split 30 s with
-   dt 15 s was not measured: all runs here used dt 10 s. Limits of this choice: the product P
+   stays 15 s, which `split_step` 30 s allows (at least `time.dt`); split 30 s with dt 15 s is
+   not measured, all runs here used dt 10 s. Limits of this choice: the product P
    misses 1 % at 30 s (item 2: 4.2 % on the lobule at 1 h, on the coarse mesh 0.69 % at 4 h but
    4.2 % at 1 h); on the 7 lobules the S uptake misses it in the first 15 min (1.7 % at 15 min,
    13 % at 5 min); and the necrosis criteria rest on the coarse mesh over 4 h, whose larger cells
    refill more slowly, so they may not carry over to the production mesh at 24 h (Setup).
-2. **The product P and the blood species at the output times do not meet 1 % at any measured
-   split step.** The P given back lags by up to 8.5 % (30 s) and 1.7 % (10 s) in the first hour,
-   and the states P_ext and P of the cells at an output time differ from the reference by 1.9
+2. **The largest error of the product P over the output times and the blood species at the
+   output times do not meet 1 % at any measured split step.** The P given back lags by up to
+   8.5 % (30 s) and 1.7 % (10 s) in the first hour; at the end it meets 1 % at 10 s (0.82 % on the
+   lobule at 1 h, 0.12 % on the coarse mesh at 4 h), on the coarse mesh from 30 s on (0.69 %).
+   The states P_ext and P of the cells at an output time differ from the reference by 1.9
    (30 s) and 0.39 (10 s) times the reference's largest value, on average over the cells. At an
    output time a cell has just made the half step of the splitting without transport, in which
    its export piles up in its blood instead of being washed out within seconds; the pile is

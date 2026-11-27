@@ -28,11 +28,11 @@
 //! Memory: [`run`] can cap each linear memory of the store at a number of wasm pages (64 KiB):
 //! the memory it creates for slidesim and the kernel has the cap as its maximum, and a wasmtime
 //! [`ResourceLimiter`] holds every memory of the store to it (mathlib's too) and remembers a
-//! refused growth: a growth past the cap is refused (`memory.grow` gives -1,
-//! so a C `malloc` returns NULL and Rust's allocator aborts, a trap), and any failure of the run
-//! after a refused growth is reported as an error naming the cap. The host process lives on:
-//! a trap of slidesim is an error of [`run`], not a crash of the host. Every [`run`] instantiates the
-//! modules afresh, so an instance that trapped is dropped with its store, as it must be (see
+//! refused growth: a growth past the cap is refused (`memory.grow` gives -1, so a C `malloc`
+//! returns NULL and Rust's allocator aborts, a trap), and any failure of the run after a refused
+//! growth is reported as an error naming the cap. The host process lives on: a trap of slidesim
+//! is an error of [`run`], not a crash of the host. Every [`run`] instantiates the modules
+//! afresh, so an instance that trapped is dropped with its store, as it must be (see
 //! `crates/slidesim-wasm`: after a trap its state is that of the middle of a call).
 
 use std::collections::BTreeMap;

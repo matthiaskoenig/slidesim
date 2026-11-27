@@ -74,12 +74,13 @@ back the oscillations SUPG removes.
   points), not the Galerkin product. Smoothers: 2 iterations of Chebyshev preconditioned by
   Jacobi, on \([0.1, 1.1]\, \lambda_{max}\) for symmetric operators and \([0.5, 1.2]\,
   \lambda_{max}\) with advection, whose Jacobi preconditioned spectrum is complex. Coarse level:
-  one application of algebraic multigrid (`PCGAMG`), coarsened until a level has at most 5000
-  equations, which it solves directly (PETSc's default stops at 50: the larger direct solve
-  halves the Krylov iterations on the generated lobule,
-  [performance](../results/2026-11-m4-performance.md)). Every level, the finest included, works on
-  the operator assembled from libCEED, several times cheaper to apply than the matrix-free one
-  for P1 triangles ([performance](../results/2026-11-m3-performance.md)).
+  on one process a direct solve (LU); on several, one application of algebraic multigrid
+  (`PCGAMG`), coarsened until a level has at most 5000 equations, which it solves directly
+  (PETSc's default stops at 50: on the 281 mg/kg slide on 8 processes the larger direct solve
+  cut the GMRES iterations per solve from 19.6 to 15.1 and the transport phase by 20 %,
+  [performance](../results/2026-11-m4-performance.md)). Every level, the finest included, works
+  on the operator assembled from libCEED, several times cheaper to apply than the matrix-free
+  one for P1 triangles ([performance](../results/2026-11-m3-performance.md)).
 - **Reuse**: the operators and the multigrid are built once per field; a step changes only the
   shift of the Jacobian, which is reassembled as the steady terms plus the shift times the mass
   terms, one pass over the entries.

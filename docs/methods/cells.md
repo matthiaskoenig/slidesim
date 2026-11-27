@@ -107,15 +107,16 @@ lobule over 4 h the necrosis front lags (necrotic share 0.015 and 0.005 below th
 of the cells grows almost in proportion to the number of split steps, each of which starts the
 cells with a transient of their blood. The largest split step which keeps the substrate (S)
 uptake within 1 % and the necrotic share and Dice within 0.01 is 30 s, at about 1.7 times the
-cost of 60 s (the 24 h cost an estimate); the lobule and slide field example studies use 30 s since the commit "feat(examples): split step
-30 s in the SPT examples". A supply-aware coupling is a separate design task after milestone 4. It is a choice for the substrate and the necrosis, not for every quantity: at 30 s the
-product P given back is off by up to 4.2 %, the S uptake of the 7 lobules in their first 15 min
-by up to 13 %, and the necrosis was measured on a coarser mesh over 4 h, whose larger cells
-refill more slowly, not on the production mesh over 24 h. At an output time a cell has just made a
-half step without transport, so a species the cells give to a quickly washed out blood (the
-product P of the SPT model) piles up in the blood: the states P_ext and P at the output times
-measure the splitting at every practical split step. A coupling in which the cell step sees the
-supply and washout of its blood would remove both errors.
+cost of 60 s (the 24 h cost an estimate); the lobule and slide field example studies use 30 s
+since 2ee0cb5. It is a choice for the substrate and the necrosis, not for every quantity: at
+30 s the product P given back is off by up to 4.2 %, the S uptake of the 7 lobules in their
+first 15 min by up to 13 %, and the necrosis was measured on a coarser mesh over 4 h, whose
+larger cells refill more slowly, not on the production mesh over 24 h. At an output time a cell
+has just made a half step without transport, so a species the cells give to a quickly washed
+out blood (the product P of the SPT model) piles up in the blood: the states P_ext and P at the
+output times measure the splitting at every practical split step. A coupling in which the cell
+step sees the supply and washout of its blood would remove both errors; it is a separate design
+task after milestone 4.
 
 ## Exchange with the blood
 

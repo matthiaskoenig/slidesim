@@ -45,8 +45,9 @@ from, with their SHA-256: `$SLIDEVIZ_DATA/...` relative to the slide folder (bel
 Made with slideviz commit `98b30a7` (branch `feat/tagged-polygons`: `zonation_layers.py`,
 `mesh_inputs.py`, `mesh/polygons.py`, `write_scene.py`) and slidesim's
 `scripts/e2e/m4_meshing.sh` as of the commit which last changed this folder (branch
-`feat/m4-lobules`, after `b0c84fa`), from the slides, the lumen masks `predictions/<animal>_lumen.npz`, the
-necrosis calls `predictions/mouse_apap_<animal>_he_necrosis.npz` and the CYP2E1 readouts
+`feat/m4-lobules`, after `b0c84fa`), from the slides, the lumen masks
+`predictions/<animal>_lumen.npz`, the necrosis calls
+`predictions/mouse_apap_<animal>_he_necrosis.npz` and the CYP2E1 readouts
 `predictions/mouse_apap_<animal>_cyp2e1_readout.npz`, by:
 
 ```bash

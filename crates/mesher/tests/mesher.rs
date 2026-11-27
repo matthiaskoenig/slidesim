@@ -669,10 +669,11 @@ fn narrow_neck_is_resolved() {
 #[test]
 fn pixel_steps_are_resolved() {
     // A wall of pixel steps under 5 um triangles, as the polygons of a slide mask have them: a
-    // 100 by 60 um area whose bottom side rises from x = 20 to 80 um in steps of one pixel
-    // (1.25 um up) after runs of 5, 2.5 and 1.25 um, and falls back the same way. The step
-    // vertices are frozen, so without a cap by the segment lengths the triangles on the 1.25 um
-    // edges reach 5 um inward.
+    // 100 by 60 um area whose bottom side rises in 9 steps of one pixel (1.25 um up, after runs
+    // of 1.25 to 5 um) from x = 20 to 42.5 um, runs level to x = 60 um, falls in 8 steps of the
+    // runs mirrored to x = 75 um and slopes from there to (100, 0). The step vertices are
+    // frozen, so without a cap by the segment lengths the triangles on the 1.25 um edges reach
+    // 5 um inward.
     let mut wall = vec![[0.0, 0.0], [20.0, 0.0]];
     let (mut x, mut y) = (20.0, 0.0);
     for run in [5.0, 2.5, 1.25, 1.25, 1.25, 2.5, 5.0, 1.25, 2.5] {

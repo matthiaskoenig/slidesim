@@ -7,10 +7,13 @@
 //! which score below [`GOOD`] (by their smallest angle, SICN and edge ratios against the size
 //! field, measured as [`Quality`](crate::Quality) measures them and scaled by the bounds: an angle
 //! of 20 degrees, a SICN of 0.4, edge ratios within [0.4, 2.0] score 1) and tries, in this order,
-//! to move a free vertex towards the centroid of its neighbours, to collapse a free vertex below
-//! the bounds onto a neighbour, and to flip the free edges of its triangles. An operation is
-//! applied if the worst of the elements it creates scores better than the worst of the elements
-//! it replaces, so the worst element of the mesh never gets worse.
+//! to move a free vertex towards the centroid of its neighbours, to collapse a free vertex whose
+//! elements still score below [`GOOD`] onto a neighbour, and to flip the free edges of its
+//! triangles. An operation is applied if the worst of the elements it creates scores better than
+//! the worst of the elements it replaces, so the worst element of the mesh never gets worse.
+//! Nothing guarantees that every element ends above the bounds (a vertex may have no improving
+//! operation, and [`BUDGET`] bounds the work): the quality bounds of `generate` rest on this
+//! step reaching them, which the quality sweeps of the tests check.
 //!
 //! The vertices of the boundary, of the tagged edges and of the interfaces between area tags
 //! (frozen) never move nor go, and their edges are never flipped, so every area keeps its

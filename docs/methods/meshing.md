@@ -47,7 +47,10 @@ as gmsh's Threshold field, \(h_\max\) everywhere without walls. Several such fie
 their minimum. Narrow parts of the domain cap it: at a point of the boundary whose nearest
 segment across (not joined to it along the boundary within twice the distance) is at the
 distance \(w\), the size is at most \(0.4\,w\) (but not below \(h_\min / 4\)), growing by 0.3 per
-um away from that point, so that the elements fit between the frozen boundaries of a neck. Short
+um away from that point, so that the elements fit between the frozen boundaries of a neck. A
+chain across a neck (an interface between two areas) joins its two sides within its own
+length, so next to such a chain the neck is no gap; the cap holds where the way along the
+boundary is longer. Short
 boundary segments cap it too: at both ends of a segment of length \(l\) the size is at most
 \(1.5\,l\) (but not below \(h_\min / 4\)), growing by 0.3 per um away from them. Every input vertex
 is kept, so a segment much shorter than the size (a pixel step of a mask, 1.77 um under 5 um
@@ -76,10 +79,14 @@ triangle on it has SICN 0.89) instead of reaching 5 um inward.
    cells carry the region of step 3 as their reference, so a tagged chain between two parts of
    one area survives too.
 5. **Improvement.** Mmg aims at edge lengths, not angles, and next to frozen walls leaves a few
-   elements below the bounds. Around the elements below a margin above the bounds, free vertices
-   move towards the centroid of their neighbours, collapse onto a neighbour, or have their edges
-   flipped, each change applied only if the worst element it makes is better than the worst it
-   replaces.
+   elements below the bounds. Around the elements which score below a margin above the bounds
+   (`GOOD`: an angle of 23 degrees, a SICN of 0.46, edge ratios within [0.46, 1.74]), free
+   vertices move towards the centroid of their neighbours, collapse onto a neighbour, or have
+   their edges flipped, each change applied only if the worst element it makes is better than
+   the worst it replaces, until the elements around a vertex reach that margin or a budget of
+   operations is spent. The quality bounds below rest on this step: nothing guarantees that it
+   lifts every element Mmg leaves below them, so the quality sweeps of the tests check it (rings
+   0 and 1 in every test run, rings 2 to 4 in the release step `quality_sweep_heavy` of CI).
 6. **Quality.** The smallest angle, the SICN of every triangle (\(4\sqrt{3} A / (l_1^2 + l_2^2 +
    l_3^2)\), 1 for an equilateral triangle, 0 for a degenerate one) and the ratio of every edge
    length to the size at its midpoint. It is measured and reported, not enforced. The tests see

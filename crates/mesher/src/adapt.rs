@@ -36,8 +36,8 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
 ///
 /// Errors: [`MesherError::UntaggedBoundary`] for a boundary edge without a tag,
 /// [`MesherError::EdgeOffBoundary`] for a tagged edge inside a region (Mmg would drop it),
-/// [`MesherError::InvalidMesh`] for an invalid mesh (see [`TaggedMesh::validate`]) or an edge of more
-/// than two triangles, [`MesherError::Petsc`] if Mmg fails.
+/// [`MesherError::InvalidMesh`] for an invalid mesh (see [`TaggedMesh::validate`]) or an edge of
+/// more than two triangles, [`MesherError::Petsc`] if Mmg fails.
 pub fn adapt(petsc: &Petsc, mesh: &TaggedMesh, size: &Size) -> Result<TaggedMesh, MesherError> {
     let bad = |m: String| MesherError::InvalidMesh(m);
     mesh.validate()?;

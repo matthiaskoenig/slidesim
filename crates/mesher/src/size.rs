@@ -30,14 +30,16 @@ const FLOOR: f64 = 0.25;
 /// step of a mask: 1.77 um under 5 um elements) would be an edge of metric length well below 1
 /// with elements of the full size beside it. With the cap the elements next to it are at most
 /// 1.5 times its length (an isosceles triangle on it has SICN 0.89; the edge ratio of the
-/// segment is at least `1 / (1.5 + GRADING / 2) = 0.6`), growing by [`GRADING`]. Segments of nearly the field's length (a polygonized circle
-/// of `ceil(2 pi r / h)` segments) need no cap and get none. Not below [`FLOOR`] `min`: shorter
-/// segments are reported, not bounded.
+/// segment is at least `1 / (1.5 + GRADING / 2) = 0.6`), growing by [`GRADING`]. Segments of
+/// nearly the field's length (a polygonized circle of `ceil(2 pi r / h)` segments) need no cap
+/// and get none. Not below [`FLOOR`] `min`: shorter segments are reported, not bounded.
 const SEGMENT: f64 = 1.5;
 
 /// A boundary point and the nearest point of another segment are no gap if the boundary joins
-/// them within `PATH` times their distance. Two sides of a gap are joined only the long way
-/// round (around the end of a neck, or not at all); a corner of the boundary joins them directly.
+/// them within `PATH` times their distance. Two sides of a gap are joined the long way round
+/// (around the end of a neck, or not at all), unless a chain crosses the gap: an interface across
+/// a neck joins its two sides within its own length, so next to it the neck is no gap. A corner
+/// of the boundary joins them directly.
 /// At a corner of angle `t` between two polylines, a point and its foot on the other side are
 /// joined by `cot(t / 2)` times their distance (1 for a right angle, the polygonized arc of a
 /// hole meeting a straight border), so corners of 53 degrees or wider make no gap; for a
@@ -353,12 +355,13 @@ impl Size {
                     // collinear ones (shared borders), nor any at the distance 0 (rings and
                     // chains do not cross, so that is a junction too).
                     let [c, e] = [q.geom().from, q.geom().to];
-                    let inside = |p: [f64; 2], s: [f64; 2], t: [f64; 2]| {
-                        orient(s, t, p) == 0.0
-                            && p[0] >= s[0].min(t[0])
-                            && p[0] <= s[0].max(t[0])
-                            && p[1] >= s[1].min(t[1])
-                            && p[1] <= s[1].max(t[1])
+                    // Whether `p` lies on the segment from `s` to `u`.
+                    let inside = |p: [f64; 2], s: [f64; 2], u: [f64; 2]| {
+                        orient(s, u, p) == 0.0
+                            && p[0] >= s[0].min(u[0])
+                            && p[0] <= s[0].max(u[0])
+                            && p[1] >= s[1].min(u[1])
+                            && p[1] <= s[1].max(u[1])
                     };
                     let touching = q.data == i
                         || [c, e].iter().any(|p| *p == a || *p == b)
