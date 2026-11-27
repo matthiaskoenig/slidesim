@@ -32,8 +32,10 @@ the parity tests). The cells are now the larger part of a lobule run.
   - `slide`: the 281 mg/kg slide of milestone 3 (41,252 cells, 165,008 triangles), 8 processes
     in the runs below (before the 4-process cap of the later runs).
 - Each simulation runs through `run_sim` of `scripts/lib/proc.sh`: a wall-clock limit, the CPU
-  confinement, and no process left behind when the script ends (checked by killing the script
-  with TERM and with KILL: no `slidesim` or `mpiexec` process 1.2 s later).
+  confinement, and no process left behind when the script ends (checked with TERM and KILL to
+  the script and to a wrapper `bash -c "coupled.sh; ..."`, and Ctrl-C to the script as a job of
+  a shell and to a wrapper as one: no `slidesim`, `mpiexec` or script process 3.1 s later, and
+  neither the run nor the wrapper went on).
 
 ## Baseline
 

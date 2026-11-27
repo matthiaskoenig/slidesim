@@ -6,9 +6,11 @@
 #
 #   source "$(dirname "${BASH_SOURCE[0]}")/../lib/proc.sh"
 #
-# 1. The script runs in a process group (and session) of its own: unless it leads one, it
-#    re-executes itself under `setsid`; in the same process if it does not lead the group it is
-#    in, else in a child which gets TERM when the process the caller started ends.
+# 1. The script runs in a process group (and session) of its own: unless it leads a session, it
+#    re-executes itself in a child under `setsid`, and the process the caller started stays as
+#    a relay which waits for it and returns its status. The relay gets TERM when the caller ends
+#    (a wrapper killed, even with SIGKILL), keeps the caller's group (Ctrl-C of a terminal
+#    reaches it), and the script gets TERM when the relay ends, however it ends.
 # 2. On EXIT, INT, TERM and HUP it sends TERM to every other process of its group and to every
 #    descendant (timeout and mpiexec make groups of their own), waits up to PROC_GRACE seconds
 #    (default 5) for them to end, then sends KILL to those left.
@@ -22,15 +24,15 @@
 #    which waits for it, so that the traps of 2 run at once on a signal.
 
 if [[ $(ps -o sid= -p $$ | tr -d ' ') != "$$" ]]; then
-    if [[ $(ps -o pgid= -p $$ | tr -d ' ') != "$$" ]]; then
-        # Not a group leader, so setsid(2) succeeds in this process: exec keeps the PID.
-        exec setsid "$0" "$@"
-    fi
-    # The leader of a group the caller made, perhaps with the rest of a pipeline (`script | tail`,
-    # under job control), which the cleanup is not to kill: the script goes on in a child in a
-    # session of its own, which gets TERM when this process ends (a signal to the PID the caller
-    # knows, or Ctrl-C of a terminal, reaches the script through it).
-    exec setsid -w setpriv --pdeathsig TERM "$0" "$@"
+    # The relay of 1: this process, the PID the caller knows, in the caller's group (perhaps with
+    # the rest of a pipeline, `script | tail`, which the cleanup is not to kill). Its pdeathsig
+    # ends it with the caller (pdeathsig survives exec); the signals of the caller and of a
+    # terminal (INT, TERM, HUP) end it by their default action; the script, its child in a
+    # session of its own, gets TERM from its own pdeathsig when the relay ends. The script must
+    # not stay in this process (`setsid` without a fork): a new session leaves the terminal's
+    # foreground group, which Ctrl-C reaches, and a wrapper which waits for the script (`bash -c
+    # "script; next"`) would wait out a Ctrl-C.
+    exec setpriv --pdeathsig TERM setsid --fork --wait setpriv --pdeathsig TERM "$0" "$@"
 fi
 
 PROC_PGID=$$
@@ -53,6 +55,9 @@ proc_victims() {
 
 proc_cleanup() {
     local status=$?
+    # Without the script's errexit: a kill of a process which ended meanwhile (the list holds the
+    # commands which listed it) fails, and must neither end the cleanup nor set the status.
+    set +e
     trap - EXIT INT TERM HUP
     trap '' TERM
     local victims pid alive waited=0
