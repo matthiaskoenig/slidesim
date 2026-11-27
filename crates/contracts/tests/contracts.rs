@@ -88,8 +88,75 @@ fn negative_diffusion() {
 fn bad_outputs() {
     assert_eq!(
         study_err("study-bad-outputs.json"),
-        "time.outputs must be sorted and within [0, end]"
+        "time.outputs must be strictly increasing, got 1 after 5"
     );
+}
+
+/// `time.outputs` is at least one time, strictly increasing from >= 0 to `time.end` (which keeps
+/// the times of `result/1` strictly increasing and the run ending at the last output): `load`
+/// refuses every other list, naming `time.outputs`, and the schema what it can express.
+#[test]
+fn outputs_increase_to_the_end() {
+    let text = std::fs::read_to_string(data("study-minimal.json")).unwrap();
+    let minimal: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
+    let with = |outputs: serde_json::Value| {
+        let mut doc = minimal.clone();
+        doc["time"]["outputs"] = outputs;
+        doc
+    };
+    let load = |doc: &serde_json::Value| Study::from_value(doc.clone(), &data("study.json"));
+    for (outputs, message, schema_refuses) in [
+        (
+            serde_json::json!([]),
+            "time.outputs must not be empty: the output times, the last at time.end",
+            true,
+        ),
+        (
+            serde_json::json!([0.0, 5.0, 5.0, 10.0]),
+            "time.outputs must be strictly increasing, got 5 after 5",
+            true,
+        ),
+        (
+            serde_json::json!([0.0, 7.0, 5.0, 10.0]),
+            "time.outputs must be strictly increasing, got 5 after 7",
+            false,
+        ),
+        (
+            serde_json::json!([0.0, 5.0]),
+            "time.outputs must end at time.end 10, got 5",
+            false,
+        ),
+        (
+            serde_json::json!([0.0, 5.0, 12.0]),
+            "time.outputs must end at time.end 10, got 12",
+            false,
+        ),
+        (
+            serde_json::json!([-1.0, 10.0]),
+            "time.outputs must be >= 0, got -1",
+            true,
+        ),
+    ] {
+        let doc = with(outputs.clone());
+        assert_eq!(load(&doc).unwrap_err().to_string(), message, "{outputs}");
+        assert_eq!(
+            !schema.is_valid(&doc),
+            schema_refuses,
+            "schema on {outputs}"
+        );
+    }
+    // Required: a study without output times has nothing to show.
+    let mut doc = minimal.clone();
+    doc["time"].as_object_mut().unwrap().remove("outputs");
+    assert!(!schema.is_valid(&doc));
+    assert!(load(&doc).unwrap_err().to_string().contains("outputs"));
+    // One output time at the end, and a first time after 0, are fine.
+    for outputs in [serde_json::json!([10.0]), serde_json::json!([2.5, 10.0])] {
+        let doc = with(outputs.clone());
+        assert!(load(&doc).is_ok(), "{outputs}");
+        assert!(schema.is_valid(&doc), "{outputs}");
+    }
 }
 
 #[test]
@@ -816,6 +883,35 @@ fn polygons_refuse_bad_kinds() {
     );
     let e = polygons_err("polygons-bad-value.geojson");
     assert!(e.contains("value"), "{e}");
+}
+
+/// A vein radius may be left out (its default) but not `null`: `Scene::load` refuses it as the
+/// schema does.
+#[test]
+fn null_hole_radius_is_refused() {
+    let text = std::fs::read_to_string(data("scene-lobules.json")).unwrap();
+    let lobules: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let schema = jsonschema::validator_for(&contracts::schema_scene()).unwrap();
+    for hole in ["centre", "corner"] {
+        let mut doc = lobules.clone();
+        doc["mesh"][hole]["radius_um"] = serde_json::Value::Null;
+        assert!(!schema.is_valid(&doc), "{hole}");
+        let e = Scene::from_value(doc.clone(), &data("scene.json")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("radius_um must be a number, got null"),
+            "{hole}: {e}"
+        );
+        doc["mesh"][hole]
+            .as_object_mut()
+            .unwrap()
+            .remove("radius_um");
+        assert!(schema.is_valid(&doc), "{hole}");
+        assert!(
+            Scene::from_value(doc, &data("scene.json")).is_ok(),
+            "{hole}"
+        );
+    }
 }
 
 #[test]

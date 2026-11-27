@@ -558,8 +558,10 @@ pub struct TimeSpec {
     /// Use adaptive time stepping.
     #[serde(default)]
     pub adaptive: bool,
-    /// Output times in s, sorted and within [0, end].
-    #[serde(default)]
+    /// Output times in s: at least one, strictly increasing, the first >= 0 and the last equal
+    /// to `end`. Output index 0 is the state at the first output time (the initial state when it
+    /// is 0).
+    #[schemars(length(min = 1), extend("uniqueItems" = true), inner(range(min = 0)))]
     pub outputs: Vec<f64>,
 }
 
@@ -821,7 +823,10 @@ impl Perfusion {
 }
 
 impl TimeSpec {
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Checks the times, as [`Study::load`] does: `end` and `dt` > 0, and `outputs` at least one
+    /// time, strictly increasing from >= 0 to `end`. Public for a study changed in code after it
+    /// was loaded.
+    pub fn validate(&self) -> Result<(), ContractError> {
         finite("time.end", self.end)?;
         finite("time.dt", self.dt)?;
         if self.end <= 0.0 {
@@ -830,12 +835,28 @@ impl TimeSpec {
         if self.dt <= 0.0 {
             return Err(invalid(format!("time.dt must be > 0, got {}", self.dt)));
         }
-        let ok = self.outputs.iter().all(|t| (0.0..=self.end).contains(t))
-            && self.outputs.windows(2).all(|w| w[0] <= w[1]);
-        if !ok {
+        let (Some(&first), Some(&last)) = (self.outputs.first(), self.outputs.last()) else {
             return Err(invalid(
-                "time.outputs must be sorted and within [0, end]".into(),
+                "time.outputs must not be empty: the output times, the last at time.end".into(),
             ));
+        };
+        for &t in &self.outputs {
+            finite("time.outputs", t)?;
+        }
+        if first < 0.0 {
+            return Err(invalid(format!("time.outputs must be >= 0, got {first}")));
+        }
+        if let Some(w) = self.outputs.windows(2).find(|w| w[0] >= w[1]) {
+            return Err(invalid(format!(
+                "time.outputs must be strictly increasing, got {} after {}",
+                w[1], w[0]
+            )));
+        }
+        if last != self.end {
+            return Err(invalid(format!(
+                "time.outputs must end at time.end {}, got {last}",
+                self.end
+            )));
         }
         Ok(())
     }

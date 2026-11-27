@@ -744,18 +744,21 @@
           "type": "number"
         },
         "outputs": {
-          "default": [],
-          "description": "Output times in s, sorted and within [0, end].",
+          "description": "Output times in s: at least one, strictly increasing, the first >= 0 and the last equal\nto `end`. Output index 0 is the state at the first output time (the initial state when it\nis 0).",
           "items": {
             "format": "double",
+            "minimum": 0,
             "type": "number"
           },
-          "type": "array"
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
         "end",
-        "dt"
+        "dt",
+        "outputs"
       ],
       "type": "object"
     },

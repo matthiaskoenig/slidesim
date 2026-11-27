@@ -163,12 +163,24 @@ fn default_lobule_radius() -> f64 {
     300.0
 }
 
-/// `HoleSpec` as read: the radius may be missing, the caller supplies its default.
+/// `HoleSpec` as read: the radius may be missing, the caller supplies its default; `null` is
+/// refused, as the schema refuses it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HoleIn {
+    #[serde(default, deserialize_with = "number")]
     radius_um: Option<f64>,
     tag: String,
+}
+
+/// A number which is present: `null` is an error.
+fn number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    match Option::<f64>::deserialize(d)? {
+        Some(x) => Ok(Some(x)),
+        None => Err(serde::de::Error::custom(
+            "radius_um must be a number, got null",
+        )),
+    }
 }
 
 fn hole_with_default<'de, D: serde::Deserializer<'de>>(
@@ -365,13 +377,15 @@ impl LobuleSpec {
         let gap = (1.0 - 2.0 * self.jitter) * r / 2.0;
         if self.centre.radius_um + self.corner.radius_um >= gap {
             return Err(invalid(format!(
-                "centre.radius_um + corner.radius_um ({}) must be < (1 - 2 jitter) lobule_radius_um / 2 ({gap}): the veins would touch",
+                "centre.radius_um + corner.radius_um ({}) must be < (1 - 2 jitter) \
+                 lobule_radius_um / 2 ({gap}): the veins would touch",
                 self.centre.radius_um + self.corner.radius_um
             )));
         }
         if 2.0 * self.corner.radius_um >= gap {
             return Err(invalid(format!(
-                "2 corner.radius_um ({}) must be < (1 - 2 jitter) lobule_radius_um / 2 ({gap}): the veins would touch",
+                "2 corner.radius_um ({}) must be < (1 - 2 jitter) lobule_radius_um / 2 \
+                 ({gap}): the veins would touch",
                 2.0 * self.corner.radius_um
             )));
         }
