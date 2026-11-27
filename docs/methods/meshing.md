@@ -26,8 +26,9 @@ mesh: 5902 triangles, 3093 vertices, min angle 25.46 deg, SICN min 0.641 mean 0.
 
 `slidesim mesh` writes the mesh of a scene without a run ([usage](../usage.md#meshes)). An input
 the mesher cannot mesh is an error on every process which names the polygons file and the place
-in um, for example
-`cannot mesh the polygons tissue.geojson: rings or edges cross at (50, 50) um`.
+in um, for example (the path shortened; the message has the absolute path of the file)
+`cannot mesh the polygons /data/field/tissue.geojson: rings or edges cross at (50, 50) um
+(borders shared by areas must match exactly)`.
 
 ## The size field
 

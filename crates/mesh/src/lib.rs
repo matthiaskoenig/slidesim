@@ -83,6 +83,21 @@ pub enum MeshError {
     Petsc(#[from] petsc::Error),
 }
 
+impl MeshError {
+    /// Whether every process of [`Mesh::load`] has this error, with the same message, at the
+    /// same point: [`MeshError::NotFound`] and [`MeshError::Mesher`] (process 0 finds them and
+    /// tells the others) and [`MeshError::Dimension`] (every process reads the dimension of the
+    /// same mesh). After such an error no process waits for another, so a caller may end each
+    /// process alone. A PETSc error, or one of reading (the collective read may fail on one
+    /// process only), may be on some processes only.
+    pub fn is_collective(&self) -> bool {
+        matches!(
+            self,
+            MeshError::NotFound { .. } | MeshError::Dimension { .. } | MeshError::Mesher { .. }
+        )
+    }
+}
+
 /// A distributed mesh and its uniform refinements.
 #[derive(Debug)]
 pub struct Mesh {

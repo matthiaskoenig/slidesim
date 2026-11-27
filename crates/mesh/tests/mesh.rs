@@ -487,8 +487,9 @@ fn coarse_cell_contains_fine_centroids() {
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 17] = [
+const PARALLEL_TESTS: [&str; 18] = [
     "mpi_world_has_the_expected_size",
+    "polygons_scene_loads",
     "from_tagged_matches_load_of_the_same_mesh",
     "lobule_scene_loads",
     "mesher_error_names_the_polygons_file",
@@ -588,6 +589,61 @@ fn lobule_scene_loads() {
     }
 }
 
+/// The area of the owned cells of `dm` which the label `name` marks with `value`, over all
+/// processes.
+fn tag_area(dm: &Dm, name: &str, value: Point) -> f64 {
+    let cells = dm.height_stratum(0).unwrap();
+    let numbers = dm.cell_numbering().unwrap();
+    let local: f64 = dm
+        .stratum_points(name, value)
+        .unwrap()
+        .into_iter()
+        .filter(|p| cells.contains(p) && numbers[(p - cells.start) as usize] >= 0)
+        .map(|c| dm.cell_volume(c).unwrap())
+        .sum();
+    dm.comm().sum_real(local).unwrap()
+}
+
+/// A polygons scene the mesher meshes (two areas with an interface between them, a chain
+/// dividing one area, a hole with a wall): every tag of the file on every level, the areas
+/// exactly those of the polygons, and the chain inside an area kept.
+#[test]
+fn polygons_scene_loads() {
+    let p = Petsc::init(&[]).unwrap();
+    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/contracts");
+    let scene = Scene::load(contracts.join("scene-polygons-two-areas.json")).unwrap();
+    let mesh = Mesh::load(&p, &scene, 1).unwrap();
+    assert_eq!(
+        mesh.tags(),
+        [
+            tag("border", 1),
+            tag("divider", 1),
+            tag("hole_wall", 1),
+            tag("interface", 1),
+            tag("lower", 2),
+            tag("upper", 2)
+        ]
+    );
+    for level in mesh.levels() {
+        let total = area(level);
+        assert!((total - 9600.0).abs() <= 1e-9 * 9600.0, "{total}");
+        let upper = tag_area(level, "upper", 1);
+        let lower = tag_area(level, "lower", 2);
+        assert!((upper - 5000.0).abs() <= 1e-9 * 5000.0, "{upper}");
+        assert!((lower - 4600.0).abs() <= 1e-9 * 4600.0, "{lower}");
+    }
+    let finest = mesh.finest();
+    let edges = finest.depth_stratum(1).unwrap();
+    let divider = finest.stratum_points("divider", 1).unwrap();
+    // Some process has edges of the chain (each process only its own part of the mesh).
+    let local = divider.iter().filter(|e| edges.contains(e)).count();
+    assert!(finest.comm().sum_int(local as Point).unwrap() > 0);
+    if let Some((tagged, quality)) = mesh.generated() {
+        assert_eq!(tagged.tags.len(), 6);
+        assert!(quality.min_angle_deg >= 20.0, "{quality:?}");
+    }
+}
+
 /// A polygons scene the mesher cannot mesh (a ring crossing itself): an error on every process
 /// which names the polygons file and the crossing.
 #[test]
@@ -603,4 +659,5 @@ fn mesher_error_names_the_polygons_file() {
     assert!(message.contains(&file.display().to_string()), "{message}");
     assert!(message.contains("cross at (50, 50) um"), "{message}");
     assert_eq!(err.to_string(), *message);
+    assert!(err.is_collective());
 }

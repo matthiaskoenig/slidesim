@@ -35,7 +35,9 @@ when other tests take their CPUs, and ends a test which hangs after ten minutes.
 against the `native-check` build (`-O2` with PETSc's debugging checks).
 
 The tests are the acceptance of each milestone: manufactured solutions with their convergence
-rates, conservation of the mass balances, agreement across 1, 2 and 3 processes within 1e-10,
+rates, conservation of the mass balances, agreement across 1, 2 and 3 processes within 1e-10
+at tight test settings (fixed transport steps; on the generated lobule also the linear solves and
+the cells to 1e-12, see [Running a study](usage.md)),
 the cell paths against each other and against sbmlsim-core, and end-to-end runs of the CLI on the
 [example studies](examples.md). The compiled cell models of the tests go to a cache directory of
 the test binary in the temporary directory, not to the cache of the user.

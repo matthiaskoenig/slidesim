@@ -80,7 +80,7 @@ use ceed::Ceed;
 use cells::CellModel;
 use contracts::{LobuleSpec, MeshSource, Scene, Study, check_cells, check_maps};
 use maps::{Map, Maps};
-use mesh::{Mesh, MeshError};
+use mesh::Mesh;
 use mesher::Lobules;
 use pde::{Flow, Inputs, MassBalance, PdeError, Problem};
 use petsc::{Comm, Petsc, Vector, Viewer};
@@ -278,11 +278,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         })
         .transpose()?;
     let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).map_err(|e| {
-        // Collective: process 0 found these and told the others.
-        let everywhere = matches!(
-            e,
-            MeshError::NotFound { .. } | MeshError::Dimension { .. } | MeshError::Mesher { .. }
-        );
+        let everywhere = e.is_collective();
         let e = anyhow::Error::new(e);
         if everywhere {
             e.context(OnEveryProcess("cannot load the mesh"))

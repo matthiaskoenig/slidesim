@@ -15,8 +15,13 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 ```
 
 The same command runs on one process or on many under `mpiexec`: the mesh is partitioned over
-the processes (PT-Scotch), and every result agrees across process counts within 1e-10 relative
-(with fixed time steps). `slidesim run --help` describes the outputs.
+the processes (PT-Scotch). With fixed time steps, the linear solves to 1e-12 (`-ksp_rtol 1e-12`)
+and the cells to rtol 1e-12 and atol 1e-16, every result agrees across 1, 2 and 3 processes
+within 1e-10 relative, as the tests check. At the default settings (linear solves to 1e-10, the
+cell tolerances of the study) runs agree within what the tolerances allow: on the generated
+lobule the fields of 1 and 2 processes differ by 5e-11, the cells by up to 1.4e-10, and a cell
+whose step control decides otherwise on inputs which differ in the last digits by its
+integration error (4e-10 at a cell rtol of 1e-8). `slidesim run --help` describes the outputs.
 
 ## What a run does
 

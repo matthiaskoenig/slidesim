@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "version": "polygons/1",
+  "meta": {"source": "test: two areas, an interface, a chain dividing one area, a hole"},
+  "features": [
+    {"type": "Feature", "properties": {"kind": "area", "tag": "upper"},
+     "geometry": {"type": "Polygon", "coordinates": [[[0,50],[100,50],[100,100],[0,100],[0,50]]]}},
+    {"type": "Feature", "properties": {"kind": "area", "tag": "lower", "value": 2},
+     "geometry": {"type": "Polygon", "coordinates": [[[0,0],[100,0],[100,50],[0,50],[0,0]],
+                                                      [[40,15],[60,15],[60,35],[40,35],[40,15]]]}},
+    {"type": "Feature", "properties": {"kind": "edge", "tag": "border"},
+     "geometry": {"type": "LineString", "coordinates": [[0,0],[100,0],[100,100],[0,100],[0,0]]}},
+    {"type": "Feature", "properties": {"kind": "edge", "tag": "interface"},
+     "geometry": {"type": "LineString", "coordinates": [[0,50],[100,50]]}},
+    {"type": "Feature", "properties": {"kind": "edge", "tag": "divider"},
+     "geometry": {"type": "LineString", "coordinates": [[50,50],[50,100]]}},
+    {"type": "Feature", "properties": {"kind": "edge", "tag": "hole_wall"},
+     "geometry": {"type": "LineString", "coordinates": [[40,15],[60,15],[60,35],[40,35],[40,15]]}}
+  ]
+}

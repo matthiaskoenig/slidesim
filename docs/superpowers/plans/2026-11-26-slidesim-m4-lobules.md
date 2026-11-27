@@ -580,7 +580,10 @@ and its parent `docs/superpowers/specs/2026-11-24-slidesim-design.md`.
   extrapolation as the initial guess, the coarse solve (direct or redundant LU on the coarse
   level, against today's), and for production `linear_rtol` 1e-6 and 1e-8 (the largest relative
   field difference and the largest cell state difference at 24 h against 1e-10, reported). The
-  example studies take the chosen production value; the parity tests keep the default.
+  example studies take the chosen production value; the parity tests pin the tight settings
+  (linear rtol 1e-12, cells 1e-12/1e-16). `lobule_spt_runs` runs the example study itself: its
+  `variant` pins `linear_rtol`, or its balance check scales with the storage magnitude, once the
+  example studies get a production `linear_rtol`.
 - [ ] **Step 5: Run** `cargo nextest run --workspace`. Expected: PASS (parity within 1e-10, the
   balances and the Strang order tests unchanged).
 - [ ] **Step 6: Commit** `perf(pde): faster transport solves, solver.linear_rtol`

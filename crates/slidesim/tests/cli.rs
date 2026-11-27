@@ -851,21 +851,22 @@ fn with_solver(study: &Path, solver: &str, dir: &Path) -> PathBuf {
 /// The linear cell model on `cells_toy` on 2 and 3 processes, with fixed transport steps, on
 /// both paths of the cells: the fields, the states of the cells and the integrals of
 /// `summary.json` agree with one process within 1e-10, and the cells take the same steps (their
-/// step control is their own) but for a few, whose inputs differ in the last digits.
+/// step control is their own).
 #[test]
 fn cells_parallel_matches_one() {
     let dir = scratch("cells_parallel_matches_one");
     for solver in ["engine", "batched"] {
         let study = with_solver(&cells_study(), solver, &dir);
-        if !cells_parallel_matches_one_on(&study, &dir.join(solver)) {
+        if !cells_parallel_matches_one_on(&study, &dir.join(solver), 0.0) {
             return;
         }
     }
 }
 
 /// [`cells_parallel_matches_one`] of `study`, with the outputs in `dir`; `false` without
-/// `mpiexec`.
-fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
+/// `mpiexec`. The steps and the rejected steps of the cells may differ from those of one process
+/// by `steps_tolerance` times the steps (0: the same counts).
+fn cells_parallel_matches_one_on(study: &Path, dir: &Path, steps_tolerance: f64) -> bool {
     let serial = dir.join("serial");
     assert_success(&slidesim(&args(study, &serial, &[])));
     let last = 3;
@@ -892,9 +893,6 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
             &balances(&parallel, "substrate"),
         );
         assert_eq!(one["cells"]["count"], many["cells"]["count"]);
-        // The step control of a cell sees its means, which differ in the last digits on other
-        // numbers of processes (other partitions, the linear solves to their tolerance): among
-        // millions of steps, a few are taken otherwise.
         let steps = one["cells"]["steps"].as_u64().unwrap() as f64;
         for key in ["steps", "rejected"] {
             let (a, b) = (
@@ -902,7 +900,7 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
                 many["cells"][key].as_u64().unwrap(),
             );
             assert!(
-                a.abs_diff(b) as f64 <= 1e-4 * steps,
+                a.abs_diff(b) as f64 <= steps_tolerance * steps,
                 "{key}: {a} against {b} of {steps} steps"
             );
         }
@@ -1059,6 +1057,44 @@ fn mesh_command_writes_mesh_and_quality() {
     assert_eq!(tissue.len(), mesh.triangles.len());
     assert!(tissue.iter().all(|&v| v == 1.0), "{:?}", &tissue[..10]);
     assert!(run.stdout.contains("min angle"), "{}", run.stdout);
+
+    // A polygons scene: the tags of the polygons file, the area tags in the VTU.
+    let scene = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/contracts/scene-polygons-two-areas.json");
+    let out = out.with_file_name("polygons");
+    assert_success(&slidesim(&mesh_args(&scene, &out)));
+    let mesh: mesher::TaggedMesh =
+        serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+    let names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "border",
+            "divider",
+            "hole_wall",
+            "interface",
+            "lower",
+            "upper"
+        ]
+    );
+    let quality: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap()).unwrap();
+    assert!(
+        quality["min_angle_deg"].as_f64().unwrap() >= 20.0,
+        "{quality}"
+    );
+    let (lower, upper) = (
+        vtu_array(&out.join("mesh.vtu"), "lower"),
+        vtu_array(&out.join("mesh.vtu"), "upper"),
+    );
+    assert_eq!(lower.len(), mesh.triangles.len());
+    // Every triangle in exactly one area: value 2 in `lower`, 1 in `upper`, NaN in the other.
+    for (l, u) in lower.iter().zip(&upper) {
+        assert!(
+            (*l == 2.0 && u.is_nan()) || (l.is_nan() && *u == 1.0),
+            "{l} {u}"
+        );
+    }
 }
 
 /// `slidesim mesh` meshes on one process: on two it is a usage error, and no process waits.
@@ -1109,7 +1145,8 @@ fn lobule_spt_runs() {
 /// fields of other partitions differ by 5e-11, which the cells carry to 1.4e-10 in `A` and
 /// `uptake_rate`. And a cell whose step control decides otherwise (inputs which differ in the
 /// last digits; a few of millions of steps) differs by its integration error: 4e-10 in `A` at
-/// the study's rtol 1e-8, 9e-11 at 1e-11.
+/// the study's rtol 1e-8, 9e-11 at 1e-11. So the counts of the steps and of the rejected steps
+/// may differ by 1e-4 of the steps (measured: up to 76 of 4.4 million).
 #[test]
 fn cells_parallel_matches_one_on_generated_lobule() {
     let dir = scratch("cells_parallel_matches_one_on_generated_lobule");
@@ -1120,7 +1157,8 @@ fn cells_parallel_matches_one_on_generated_lobule() {
         doc["cells"]["rtol"] = Value::from(1e-12);
         doc["cells"]["atol"] = Value::from(1e-16);
     });
-    cells_parallel_matches_one_on(&study, &dir);
+    // `false` without mpiexec: skipped, as the run says.
+    let _ = cells_parallel_matches_one_on(&study, &dir, 1e-4);
 }
 
 /// A polygons scene which the mesher rejects (a ring crossing itself) on two processes: process
