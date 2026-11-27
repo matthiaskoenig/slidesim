@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use contracts::{Coefficient, Condition, MeshSource, Polygons, Scene, Study, Table, check_maps};
+use contracts::{
+    Coefficient, Condition, MeshSource, Polygons, ResultMeta, Scene, Study, Table, check_maps,
+};
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -160,6 +162,7 @@ fn schemas_are_current() {
         ("scene-1.schema.json", contracts::schema_scene()),
         ("polygons-1.schema.json", contracts::schema_polygons()),
         ("study-1.schema.json", contracts::schema_study()),
+        ("result-1.schema.json", contracts::schema_result()),
     ] {
         let text = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
         let on_disk: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
@@ -823,5 +826,46 @@ fn schema_carries_the_hole_radius_defaults() {
         assert_eq!(radius["default"], serde_json::json!(default), "{hole}");
         assert_eq!(radius["exclusiveMinimum"], serde_json::json!(0), "{hole}");
         assert_eq!(node["required"], serde_json::json!(["tag"]), "{hole}");
+    }
+}
+
+fn result_meta(name: &str) -> Result<ResultMeta, String> {
+    let text = std::fs::read_to_string(data(name)).unwrap();
+    let meta: ResultMeta = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    meta.check().map_err(|e| e.to_string())?;
+    Ok(meta)
+}
+
+#[test]
+fn result_meta_round_trip() {
+    for name in ["result-meta-minimal.json", "result-meta-raster.json"] {
+        let meta = result_meta(name).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(&meta).unwrap(), original, "{name}");
+    }
+    let raster = result_meta("result-meta-raster.json")
+        .unwrap()
+        .raster
+        .unwrap();
+    assert_eq!(raster.levels, 3);
+    assert_eq!(raster.shapes[1], [130, 150]);
+}
+
+#[test]
+fn result_meta_rejects() {
+    for (name, word) in [
+        ("unknown-field", "extra"),
+        ("version", "result/2"),
+        ("written", "written"),
+        ("complete", "complete"),
+        ("times", "times"),
+        ("duplicate-field", "glucose"),
+        ("levels", "levels"),
+        ("shapes", "shapes"),
+        ("um-per-px", "um_per_px"),
+    ] {
+        let e = result_meta(&format!("result-meta-bad-{name}.json")).unwrap_err();
+        assert!(e.contains(word), "{name}: {e}");
     }
 }

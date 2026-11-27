@@ -1,0 +1,26 @@
+{
+  "version": "result/1",
+  "study": "study-minimal.json",
+  "scene": "scene-minimal.json",
+  "refinements": 1,
+  "times": [
+    0.0,
+    60.0,
+    120.0
+  ],
+  "written": 4,
+  "complete": true,
+  "fields": [
+    {
+      "id": "glucose",
+      "units": "mM"
+    }
+  ],
+  "cell_values": [],
+  "tags": [
+    {
+      "name": "tissue",
+      "dim": 2
+    }
+  ]
+}

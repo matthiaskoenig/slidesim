@@ -8,6 +8,7 @@ fn main() {
         ("scene-1.schema.json", contracts::schema_scene()),
         ("polygons-1.schema.json", contracts::schema_polygons()),
         ("study-1.schema.json", contracts::schema_study()),
+        ("result-1.schema.json", contracts::schema_result()),
     ] {
         let text = serde_json::to_string_pretty(&schema).expect("serialize") + "\n";
         std::fs::write(dir.join(name), text).expect("write schema");

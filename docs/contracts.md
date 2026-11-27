@@ -239,3 +239,55 @@ before the first step otherwise), and outflow tags without a condition are free 
 
 The linked fields and the maps named by `parameters` must exist (checked with the study); the
 `outputs` are checked against the compiled model at the start of the run.
+
+## result/1
+
+What a viewer reads from a finished run: the Zarr v3 store `result.zarr` (zstd compression). Its
+root attributes are the `ResultMeta` JSON (schema `schemas/result-1.schema.json`, checked by
+`ResultMeta::check`). Units: length um, time s, concentration mM.
+
+| Array | dtype | shape | chunks | Meaning |
+| --- | --- | --- | --- | --- |
+| `time` | f64 | `[T]` | all | output times in s |
+| `mesh/vertices` | f64 | `[V, 2]` | all | vertex coordinates in um |
+| `mesh/triangles` | u32 | `[N, 3]` | all | vertex indices, counterclockwise |
+| `mesh/element` | u64 | `[N]` | all | coarse element id of each finest triangle |
+| `mesh/tags/<name>` | u32 | `[k]` or `[k, 2]` | all | area tag: triangle indices; edge tag: vertex index pairs |
+| `fields/<id>` | f64 | `[T, V]` | `[1, V]` | P1 nodal values on the finest mesh |
+| `cells/element` | u64 | `[C]` | all | coarse element ids that hold cells |
+| `cells/<value>` | f64 | `[T, C]` | `[1, C]` | per-element cell value |
+| `raster/<field>/<level>` | f32 | `[T, rows, cols]` | `[1, 256, 256]` | optional; NaN outside the mesh; level k+1 is the mean of the valid pixels of 2 x 2 of level k |
+
+Element ids are partition independent: `Mesh::element_ids` numbers the coarse cells of the
+undistributed mesh, the id of a finest triangle is `(coarse << (2 * level)) | child bits`. The
+canonical mesh holds the finest triangles sorted by that fine id, the vertices numbered by first
+appearance in that order, and `mesh/element` the coarse id of each triangle. A run on any number of
+processes writes the same arrays.
+
+Attributes (`ResultMeta`):
+
+| Key | Meaning |
+| --- | --- |
+| `version` | `result/1` |
+| `study`, `scene` | the files the run was made from |
+| `refinements` | uniform refinements beyond the coarse mesh |
+| `times` | output times in s, strictly increasing (the `time` array) |
+| `written` | time indices written so far; an index `t < written` is complete and readable alone |
+| `complete` | the run finished; implies `written == times.len()` |
+| `fields` | `{id, units}` of every `fields/<id>`, ids unique, units `mM` |
+| `cell_values` | the names of the `cells/<value>` arrays |
+| `tags` | `{name, dim}` of every `mesh/tags/<name>`: `dim` 2 area, 1 edge |
+| `raster` | optional `{um_per_px, origin_um, levels, shapes}`: pixel size of level 0 (> 0), the um of the corner of pixel (0, 0), the number of levels (>= 1) and `[rows, cols]` per level, level 0 first |
+
+### Live API
+
+The browser build exposes the same arrays for a running simulation; the declarations are in
+`wasm/js/slidesim.d.ts` (type check: `npx --yes -p typescript@5.6.3 tsc --noEmit -p
+wasm/js/tsconfig.json`). `createSimulation(options)` resolves to a `Simulation` whose `mesh`
+holds `mesh/vertices`, `mesh/triangles`, `mesh/element` and `mesh/tags/*`, `times` is the `time`
+array and `meta` the `ResultMeta`. `step()` advances to the next output time and returns its index
+(`null` when done); `field(id)` is `fields/<id>` at the current time index, `cellIds` is
+`cells/element` and `cellValues(name)` is `cells/<name>` at the current time index. The arrays
+are copies the caller owns. `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
+are supplied by the caller (for example `central_vein` or `periportal`), slidesim fixes none.
+`CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error`.

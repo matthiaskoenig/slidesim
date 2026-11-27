@@ -1,0 +1,60 @@
+{
+  "version": "result/1",
+  "study": "study-perfusion.json",
+  "scene": "scene-lobules.json",
+  "refinements": 2,
+  "times": [
+    0.0,
+    60.0,
+    120.0,
+    180.0
+  ],
+  "written": 2,
+  "complete": true,
+  "fields": [
+    {
+      "id": "glucose",
+      "units": "mM"
+    },
+    {
+      "id": "oxygen",
+      "units": "mM"
+    }
+  ],
+  "cell_values": [
+    "protein",
+    "damage"
+  ],
+  "tags": [
+    {
+      "name": "tissue",
+      "dim": 2
+    },
+    {
+      "name": "central_wall",
+      "dim": 1
+    }
+  ],
+  "raster": {
+    "um_per_px": 2.0,
+    "origin_um": [
+      -300.0,
+      -260.0
+    ],
+    "levels": 3,
+    "shapes": [
+      [
+        260,
+        300
+      ],
+      [
+        130,
+        150
+      ],
+      [
+        65,
+        75
+      ]
+    ]
+  }
+}
