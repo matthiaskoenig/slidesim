@@ -10,8 +10,8 @@
 #   wrap-INT               SIGINT to the process group of the wrapper (Ctrl-C of a terminal)
 #   direct-TERM, direct-KILL  the signal to the dummy script itself
 # and the exit status of the script: 0 for a normal run, 1 for a failing command, nonzero (124)
-# for a time-limit hit. Processes are found by their unique marker; a foreign process is never
-# signalled.
+# for a time-limit hit; 0 and 1 again for the script started as `bash <script>` without its exec
+# bit. Processes are found by their unique marker; a foreign process is never signalled.
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -40,6 +40,10 @@ shift
 run_sim "\$limit" "\$@"
 DUMMY
 chmod +x "$dummy"
+# The same script without the exec bit, which a caller starts as `bash <script>`.
+plain=$DIR/plain.sh
+cp "$dummy" "$plain"
+chmod -x "$plain"
 
 fail() { echo "FAIL $*"; failures=$((failures + 1)); }
 
@@ -88,11 +92,13 @@ kill_case() {
     return 0
 }
 
-# status_case <name> <expected: zero|one|nonzero> <limit> <cmd...>
+# status_case <name> <expected: zero|one|nonzero> <limit> <cmd...>; the dummy runs as
+# $STARTER (default: executed itself).
 status_case() {
     local name=$1 want=$2 limit=$3 status
     shift 3
-    "$dummy" "$limit" "$@" >"$DIR/$name.log" 2>&1
+    # shellcheck disable=SC2086 # STARTER is a command line
+    ${STARTER:-"$dummy"} "$limit" "$@" >"$DIR/$name.log" 2>&1
     status=$?
     case $want in
     zero) ((status == 0)) ;;
@@ -105,6 +111,9 @@ for c in wrap-TERM wrap-KILL wrap-INT direct-TERM direct-KILL; do kill_case "$c"
 status_case normal zero 1m sleep 0.2
 status_case failing one 1m false
 status_case time-limit nonzero 2s sleep "600.$SUFFIX"
+# Started as `bash <script>` without the exec bit: the re-execution under setsid runs it by bash.
+STARTER="bash $plain" status_case bash-normal zero 1m sleep 0.2
+STARTER="bash $plain" status_case bash-failing one 1m false
 ((${#SUFFIX} > 0 && $(marked "sleep 600\\.$SUFFIX" | wc -l) == 0)) || fail "time-limit: sleep left"
 
 if ((failures > 0)); then

@@ -83,6 +83,13 @@ jobs:
         run: |
           . deps/install/native-check/env.sh
           cargo nextest run --workspace --no-tests=pass
+      - name: Heavy mesher sweep
+        # quality_sweep_heavy (rings 2 to 4, about 30 meshes) is ignored in the debug test run:
+        # the quality bounds of the mesher rest on its local improvement, which this checks over
+        # the larger lobule fields, in a release build.
+        run: |
+          . deps/install/native-check/env.sh
+          cargo test --release --locked -p mesher --test lobules -- --ignored --exact quality_sweep_heavy
       - name: Doctests
         # nextest does not run doctests; among them the compile_fail tests of the bindings.
         run: |

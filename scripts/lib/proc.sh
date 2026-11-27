@@ -31,8 +31,9 @@ if [[ $(ps -o sid= -p $$ | tr -d ' ') != "$$" ]]; then
     # session of its own, gets TERM from its own pdeathsig when the relay ends. The script must
     # not stay in this process (`setsid` without a fork): a new session leaves the terminal's
     # foreground group, which Ctrl-C reaches, and a wrapper which waits for the script (`bash -c
-    # "script; next"`) would wait out a Ctrl-C.
-    exec setpriv --pdeathsig TERM setsid --fork --wait setpriv --pdeathsig TERM "$0" "$@"
+    # "script; next"`) would wait out a Ctrl-C. The script runs by this bash, so it needs no exec
+    # bit (`bash script.sh`).
+    exec setpriv --pdeathsig TERM setsid --fork --wait setpriv --pdeathsig TERM "$BASH" "$0" "$@"
 fi
 
 PROC_PGID=$$

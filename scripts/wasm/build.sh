@@ -39,8 +39,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NATIVE_DEPS="${NATIVE_DEPS:-native-check}"
 KERNEL_MODELS=("$ROOT/testdata/models/spt_liver_cell.xml")
 export WASI_SDK_PATH="${WASI_SDK_PATH:-$HOME/opt/wasi-sdk}"
-[[ -x "$WASI_SDK_PATH/bin/clang" ]] || { echo "WASI_SDK_PATH ($WASI_SDK_PATH) has no bin/clang" >&2; exit 2; }
-[[ -f "$ROOT/deps/install/wasi/env.sh" ]] || { echo "no deps/install/wasi: run scripts/deps/build-wasi.sh" >&2; exit 2; }
+[[ -x "$WASI_SDK_PATH/bin/clang" ]] ||
+  { echo "WASI_SDK_PATH ($WASI_SDK_PATH) has no bin/clang" >&2; exit 2; }
+[[ -f "$ROOT/deps/install/wasi/env.sh" ]] ||
+  { echo "no deps/install/wasi: run scripts/deps/build-wasi.sh" >&2; exit 2; }
 
 CORE="$ROOT/deps/src/sbmlsim-core"
 JS="$ROOT/deps/install/sbmlsim-js"
@@ -49,13 +51,21 @@ mkdir -p "$ROOT/deps/src" "$OUT"
 
 # compiler.wasm and mathlib.wasm as sbmlsim-core's crates/host/build.rs builds them, from a
 # clean checkout of the pinned revision (a shallow fetch of exactly that commit), unless
-# deps/install/sbmlsim-js holds those of the revision.
+# deps/install/sbmlsim-js holds those of the revision. A checkout at another revision is replaced;
+# one at the revision with local changes (or untracked files) is refused, not reset: the changes
+# may be someone's work, and the artifacts must be those of the revision.
 if [[ "$(cat "$JS/REV" 2>/dev/null || true)" != "$SBMLSIM_CORE_KERNEL_REV" ]]; then
   if [[ "$(git -C "$CORE" rev-parse HEAD 2>/dev/null || true)" != "$SBMLSIM_CORE_KERNEL_REV" ]]; then
     rm -rf "$CORE"
     git init --quiet "$CORE"
     git -C "$CORE" fetch --quiet --depth 1 "$SBMLSIM_CORE_REPO" "$SBMLSIM_CORE_KERNEL_REV"
     git -C "$CORE" checkout --quiet --detach FETCH_HEAD
+  elif [[ -n "$(git -C "$CORE" status --porcelain)" ]]; then
+    echo "deps/src/sbmlsim-core is at $SBMLSIM_CORE_KERNEL_REV but has local changes:" >&2
+    git -C "$CORE" status --short >&2
+    echo "refusing to build sbmlsim-core's artifacts from it; remove deps/src/sbmlsim-core (it is" \
+      "fetched again) or clean it" >&2
+    exit 1
   fi
   rm -rf "$JS"
   (
@@ -88,7 +98,7 @@ if [[ "$BROWSER" == 0 ]]; then
     # shellcheck source=/dev/null
     . "$ROOT/deps/install/$NATIVE_DEPS/env.sh"
     cd "$ROOT"
-    cargo build --quiet --release -p slidesim
+    cargo build --quiet --locked --release -p slidesim
   )
 
   # The wasmtime host as a program, in the target directory (and profile) of its tests.
