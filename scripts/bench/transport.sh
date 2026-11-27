@@ -8,22 +8,30 @@
 # Without it, make it first (slides and slideviz required, see the script):
 #   SLIDEVIZ_DATA=<slides> STEPS=scene scripts/e2e/m2_real_slide.sh
 #
+# Every slidesim run goes through `run_sim` of scripts/lib/proc.sh: confined to the CPUs PROC_CPUS
+# (0-9) at nice 10, with a wall-clock limit, and taken down with the script however it ends.
+#
 # Settings (environment variables, defaults in brackets):
 #   E2E            output folder of scripts/e2e/m2_real_slide.sh [target/e2e/m2_real_slide]
 #   OUT            output folder of the runs [E2E/bench/transport]
-#   NPS            process counts [1 4 8]
+#   NPS            process counts, at most 4 each [1 4]
 #   REFINEMENTS    mesh refinements [1]
 #   ADAPTIVE       1 for adaptive steps (time.adaptive), 0 for the fixed steps of the study [0]
+#   LIMIT          wall-clock limit of each run, a `timeout` duration [1h]
+#   PROC_CPUS      the CPUs of the runs and the build, for taskset [0-9]
 #   MPIEXEC_FLAGS  extra mpiexec flags, e.g. --oversubscribe []
 #   PETSC_ENV      env.sh of the PETSc/libCEED install [deps/install/native-opt/env.sh]
 #   SLIDESIM       the slidesim binary, e.g. of an earlier commit [target/release/slidesim, built
 #                  by the script]
+# shellcheck source=scripts/lib/proc.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/proc.sh"
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 E2E=$(realpath -m "${E2E:-$ROOT/target/e2e/m2_real_slide}")
 OUT=$(realpath -m "${OUT:-$E2E/bench/transport}")
-NPS=${NPS:-1 4 8}
+NPS=${NPS:-1 4}
+LIMIT=${LIMIT:-1h}
 REFINEMENTS=${REFINEMENTS:-1}
 ADAPTIVE=${ADAPTIVE:-0}
 MPIEXEC_FLAGS=${MPIEXEC_FLAGS:-}
@@ -39,7 +47,7 @@ fi
 # shellcheck source=/dev/null
 source "$PETSC_ENV"
 if [[ -z $SLIDESIM ]]; then
-    (cd "$ROOT" && cargo build --quiet --release -p slidesim)
+    (cd "$ROOT" && taskset -c "$PROC_CPUS" nice -n 10 cargo build --quiet --release -j 10 -p slidesim)
     SLIDESIM=$ROOT/target/release/slidesim
 fi
 
@@ -56,9 +64,9 @@ for np in $NPS; do
     dir=$OUT/$(basename "$study" .study.json)_np$np
     mkdir -p "$dir"
     # shellcheck disable=SC2086 # MPIEXEC_FLAGS is a list of flags
-    mpiexec -n "$np" $MPIEXEC_FLAGS "$SLIDESIM" run "$study" --out "$dir" \
+    run_sim "$LIMIT" mpiexec -n "$np" --bind-to none $MPIEXEC_FLAGS "$SLIDESIM" run "$study" --out "$dir" \
         -- -log_view ":$dir/log_view.txt" >"$dir/run.log" 2>&1 ||
-        { tail -20 "$dir/run.log" >&2; exit 1; }
+        { echo "run np$np failed (status $?, 124: over $LIMIT)" >&2; tail -20 "$dir/run.log" >&2; exit 1; }
     steps=$(awk '$1 == "TSStep" { n += $2 } END { print n + 0 }' "$dir/log_view.txt")
     jq -r --arg np "$np" --argjson steps "$steps" '.phases as $p
         | [$np, $steps, $p.transport, $p.transport / $steps, $p.setup, $p.pressure, $p.output]

@@ -15,14 +15,21 @@
 #    It needs slideviz's gmsh mesher, retired after the comparison (a5d287b): a slideviz checkout
 #    at 98b30a7 (SLIDEVIZ_REPO) with the gmsh environment of its mesh/pixi.toml.
 #
+# Every slidesim run goes through `run_sim` of scripts/lib/proc.sh: confined to the CPUs PROC_CPUS
+# (0-9) at nice 10, with a wall-clock limit, and taken down with the script however it ends.
+#
 # Needs uv, jq and pixi. Nothing is written into SLIDEVIZ_DATA. Settings (environment variables,
 # defaults in brackets):
 #   SLIDEVIZ_DATA   slides with their sidecars and predictions/ (required)
 #   SLIDEVIZ_REPO   the slideviz checkout [~/git/slideviz]
 #   OUT             output folder [target/e2e/m4_meshing]
 #   STEPS           steps to run, of: fields compare [fields compare]
+#   LIMIT           wall-clock limit of each slidesim run, a `timeout` duration [30m]
+#   PROC_CPUS       the CPUs of the runs and the build, for taskset [0-9]
 #   PIXI            pixi for the mesh environment of slideviz [~/.pixi/bin/pixi]
 #   PETSC_ENV       env.sh of the PETSc/libCEED install [deps/install/native-opt/env.sh]
+# shellcheck source=scripts/lib/proc.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/proc.sh"
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -30,6 +37,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SLIDEVIZ_REPO=${SLIDEVIZ_REPO:-$HOME/git/slideviz}
 OUT=$(realpath -m "${OUT:-$ROOT/target/e2e/m4_meshing}")
 STEPS=${STEPS:-fields compare}
+LIMIT=${LIMIT:-30m}
 PIXI=${PIXI:-$HOME/.pixi/bin/pixi}
 PETSC_ENV=${PETSC_ENV:-$ROOT/deps/install/native-opt/env.sh}
 P=$SLIDEVIZ_DATA/predictions
@@ -104,7 +112,7 @@ fields() {
             echo "an absolute path is left in $dst" >&2
             exit 1
         fi
-        "$SLIDESIM" mesh "$dst/scene.json" --out "$OUT/fields/$animal/mesh"
+        run_sim "$LIMIT" "$SLIDESIM" mesh "$dst/scene.json" --out "$OUT/fields/$animal/mesh"
     done
 }
 
@@ -124,8 +132,8 @@ compare() {
         record=$(ls "$dir"/gmsh/*.json)
         slideviz scripts/write_scene.py --mesh "$record" --lobules "$(lobules "$animal")" \
             --out "$dir/gmsh_scene" >/dev/null
-        "$SLIDESIM" mesh "$dir/gmsh_scene/scene.json" --out "$dir/gmsh_mesh"
-        "$SLIDESIM" mesh "$dir/plain/scene/scene.json" --out "$dir/rust_mesh"
+        run_sim "$LIMIT" "$SLIDESIM" mesh "$dir/gmsh_scene/scene.json" --out "$dir/gmsh_mesh"
+        run_sim "$LIMIT" "$SLIDESIM" mesh "$dir/plain/scene/scene.json" --out "$dir/rust_mesh"
         msh=$(ls "$dir"/gmsh/*.msh)
         minsicn=$(slideviz_mesh "$ROOT/scripts/e2e/m4_meshing/gmsh_sicn.py" "$msh")
         uv run --quiet --project "$SLIDEVIZ_REPO" python "$ROOT/scripts/e2e/m4_meshing/compare.py" \
@@ -138,7 +146,7 @@ compare() {
 mkdir -p "$OUT"
 # shellcheck source=/dev/null
 source "$PETSC_ENV"
-(cd "$ROOT" && cargo build --quiet --release -p slidesim)
+(cd "$ROOT" && taskset -c "$PROC_CPUS" nice -n 10 cargo build --quiet --release -j 10 -p slidesim)
 for step in $STEPS; do
     "$step"
 done

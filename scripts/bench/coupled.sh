@@ -61,7 +61,7 @@ SLIDESIM=${SLIDESIM:-}
 # shellcheck source=/dev/null
 source "$PETSC_ENV"
 if [[ -z $SLIDESIM ]]; then
-    (cd "$ROOT" && taskset -c "$PROC_CPUS" nice -n 10 cargo build --quiet --release -p slidesim)
+    (cd "$ROOT" && taskset -c "$PROC_CPUS" nice -n 10 cargo build --quiet --release -j 10 -p slidesim)
     SLIDESIM=$ROOT/target/release/slidesim
 fi
 mkdir -p "$OUT"

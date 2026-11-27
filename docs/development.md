@@ -98,6 +98,15 @@ These need the slides, which are not in the repository, and run on the optimized
   `run_sim` of `scripts/lib/proc.sh`: a wall-clock limit, CPUs 0-9 at nice 10, and no process
   left behind when the script ends, however it ends.
 
+All of these scripts source `scripts/lib/proc.sh` and start every `slidesim` and `mpiexec` run
+through its `run_sim <limit> <cmd...>`: a wall-clock limit (`LIMIT`), the CPUs `PROC_CPUS` (default
+`0-9`, so at most 10 CPUs) at nice 10, and at most 4 MPI processes by default. The script runs in
+a session of its own and takes down every process it started when it ends, however it ends: normally,
+by an error, by TERM, INT or HUP, or by KILL of the script or of the shell which started it.
+`scripts/tests/proc_kill.sh` checks this with a dummy script (no slidesim needed, a few seconds):
+it stops the script in each of these ways, checks that no process of it remains within 15 s, and
+checks the exit status of a normal run, a failing command and a time-limit hit. CI runs it.
+
 ## Contributing
 
 Work happens on branches and reaches `main` through pull requests, which CI must pass. The commit

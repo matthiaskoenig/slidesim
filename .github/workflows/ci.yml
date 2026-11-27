@@ -69,6 +69,9 @@ jobs:
         run: scripts/deps/build-native.sh ${{ env.DEPS_MODE }}
       - name: Format
         run: cargo fmt --all --check
+      - name: Process hygiene of the scripts
+        # No process a script starts outlives it (scripts/lib/proc.sh); needs setpriv and setsid.
+        run: bash scripts/tests/proc_kill.sh
       - name: Clippy
         run: |
           . deps/install/native-check/env.sh
