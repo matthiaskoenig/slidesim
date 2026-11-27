@@ -1,0 +1,16 @@
+[package]
+name = "mesher"
+description = "Tagged polygons to a graded, adapted triangle mesh (spade, Mmg through PETSc)"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+contracts = { path = "../contracts" }
+petsc = { path = "../petsc" }
+robust.workspace = true
+rstar.workspace = true
+serde = { version = "1", features = ["derive"] }
+spade.workspace = true
+thiserror = "2"

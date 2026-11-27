@@ -21,6 +21,14 @@ The LGPL lets a user relink slidesim with another or a modified Mmg; since slide
 source (`scripts/deps/build-native.sh`, `scripts/deps/build-wasi.sh`), its build is the way to do
 so. slidesim itself stays MIT.
 
+The mesher builds on three Rust crates (`Cargo.lock` pins their versions):
+
+| Dependency | License |
+| --- | --- |
+| spade (constrained Delaunay triangulation) | MIT OR Apache-2.0 |
+| rstar (R-tree) | MIT OR Apache-2.0 |
+| robust (exact geometric predicates) | MIT OR Apache-2.0 |
+
 bison and flex are build tools of PT-Scotch only and are not linked. MPI, and the compression
 libraries Scotch uses, come from the system.
 
