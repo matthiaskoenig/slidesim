@@ -11,9 +11,14 @@
 //! Everything but the adaptation is plain Rust with exact predicates, and no step (of the mesher or
 //! of the parts of `spade` and `rstar` it calls) iterates a hash map or set, so the same input
 //! gives the same mesh, bit for bit, on one target. Tag names are data: the mesher knows none.
+//!
+//! [`Lobules`] builds the domain of parametric ideal lobules (a hexagonal lattice of veins, the
+//! Voronoi cells around them, circular holes at their centres and corners) from a
+//! [`contracts::LobuleSpec`], and the relative position of a point between the two kinds of holes.
 
 mod adapt;
 mod domain;
+mod lobules;
 mod quality;
 mod size;
 mod tagged;
@@ -21,6 +26,7 @@ mod triangulate;
 
 pub use adapt::adapt;
 pub use domain::{Domain, MeshTag};
+pub use lobules::Lobules;
 pub use quality::Quality;
 pub use size::Size;
 pub use tagged::TaggedMesh;
@@ -50,9 +56,14 @@ pub enum MesherError {
     /// midpoint of the segment between two input vertices.
     #[error("the edge {tag:?} at ({}, {}) um is not on a boundary of the areas", at[0], at[1])]
     EdgeOffBoundary { tag: String, at: [f64; 2] },
-    /// Two holes overlap (the walls of tags `a` and `b`).
+    /// Two holes overlap or touch (the walls of tags `a` and `b`), or a hole reaches the outer
+    /// border (`b` its tag).
     #[error("the holes of {a:?} and {b:?} overlap")]
     HolesOverlap { a: String, b: String },
+    /// A [`LobuleSpec`](contracts::LobuleSpec) which gives no lobules: a radius which is not
+    /// finite and positive, a jitter out of range, tags which are not distinct, ...
+    #[error("lobules: {0}")]
+    InvalidLobules(String),
     /// A ring or chain crosses itself or another one at `at`.
     #[error(
         "rings or edges cross at ({}, {}) um (borders shared by areas must match exactly)",
