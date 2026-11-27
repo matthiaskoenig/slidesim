@@ -1,6 +1,15 @@
 // Declarations of the live browser API of slidesim (implemented by `slidesim.mjs`).
 // The arrays are those of the `result/1` store at the current time index, see docs/contracts.md.
 // Units: length um, time s, concentration mM.
+//
+// Errors and traps: an error of slidesim (a refused input, a failed step, an unknown array) is
+// thrown, or rejected by `createSimulation`, as an `Error` with slidesim's message; the
+// simulation stays usable. A trap of `slidesim.wasm` (a panic, an allocation past the memory
+// cap, a failure of a host function) leaves the module in the middle of a call: its instance is
+// discarded with the simulation in it, the call which trapped throws (or rejects) an `Error`
+// naming the trap (and the memory, when an allocation failed), and every later call of that
+// `Simulation` throws an `Error` saying that it is unusable. Each simulation has its own
+// instance, so other simulations and the next `createSimulation` are not affected.
 
 /** Parameters of a lobule scene; the defaults are those of the Rust `LobuleSpec`. */
 export interface LobuleParams {
@@ -106,6 +115,11 @@ export interface Simulation {
   summary(): object;
   /** The quality report of a generated mesh, `null` for a loaded mesh. */
   meshQuality(): object | null;
+  /**
+   * What the simulation reported (the array `log`), one line each: the quality line of a
+   * generated mesh, which `slidesim run` prints; empty for a loaded mesh.
+   */
+  log(): string;
   /** Release the wasm memory; the simulation is unusable afterwards. */
   free(): void;
 }
@@ -122,9 +136,20 @@ export interface CreateOptions {
   study: object;
   /** A prebuilt mesh, when the scene's source is not generated in the browser. */
   mesh?: object;
-  /** Caps the wasm memory, in 64 KiB wasm pages; exceeding it is an `Error`. */
+  /**
+   * Caps the wasm memory of the simulation, in 64 KiB wasm pages (an integer within 1 and 65536,
+   * 4 GiB); exceeding it is an `Error` naming the cap (a trap or an error of slidesim). It needs
+   * `slidesim` as bytes: the memory of a compiled module cannot be capped. Mmg, the remesher of
+   * the mesher, caps itself at 2 GiB in wasm (a constant of the Mmg patch of the wasi build), so
+   * a cap below that is the one which holds; without a cap the browser's limit holds.
+   */
   memory?: { maximumPages: number };
 }
 
-/** Errors of slidesim are thrown or rejected as `Error` with slidesim's message. */
+/**
+ * Compiles the kernel of the cell model (with `compiler`; not for a study without `cells`),
+ * instantiates `slidesim.wasm`, the kernel and `mathlib` and creates the simulation: the checks,
+ * the mesh, the maps, the flow and the setup, at output index 0. Errors of slidesim and traps
+ * reject with an `Error` (see the top of this file).
+ */
 export function createSimulation(options: CreateOptions): Promise<Simulation>;

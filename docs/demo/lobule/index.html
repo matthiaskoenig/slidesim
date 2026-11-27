@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lobule demo - slidesim</title>
+  <meta name="description" content="slidesim in the browser: perfusion, transport and the SPT cell model on a parametric liver lobule, meshed and simulated in WebAssembly.">
+  <script>
+    // The colour scheme chosen with the palette toggle of the documentation (stored as
+    // "<site path>.__palette"), else the system's.
+    try {
+      for (let k = 0; k < localStorage.length; k++) {
+        const key = localStorage.key(k);
+        if (!key.endsWith(".__palette")) continue;
+        const color = JSON.parse(localStorage.getItem(key))?.color;
+        if (!color || color.media === "(prefers-color-scheme)") continue;
+        document.documentElement.dataset.theme = color.scheme === "slate" ? "dark" : "light";
+      }
+    } catch {}
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #ffffff;
+      --surface: #f5f6fa;
+      --border: #d9dce6;
+      --text: #1d2130;
+      --muted: #5b6075;
+      --primary: #3f51b5;
+      --primary-text: #ffffff;
+      --primary-hover: #303f9f;
+      --focus: #3f51b5;
+      --wall: rgba(29, 33, 48, 0.55);
+      --error-bg: #fdecea;
+      --error-text: #8a1c12;
+      --radius: 6px;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #1e2129;
+      --surface: #262a35;
+      --border: #3a3f4d;
+      --text: #e3e5ee;
+      --muted: #a2a7ba;
+      --primary: #7986cb;
+      --primary-text: #12141a;
+      --primary-hover: #9fa8da;
+      --focus: #9fa8da;
+      --wall: rgba(227, 229, 238, 0.6);
+      --error-bg: #3d1f1d;
+      --error-text: #f6b8b2;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        color-scheme: dark;
+        --bg: #1e2129;
+        --surface: #262a35;
+        --border: #3a3f4d;
+        --text: #e3e5ee;
+        --muted: #a2a7ba;
+        --primary: #7986cb;
+        --primary-text: #12141a;
+        --primary-hover: #9fa8da;
+        --focus: #9fa8da;
+        --wall: rgba(227, 229, 238, 0.6);
+        --error-bg: #3d1f1d;
+        --error-text: #f6b8b2;
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--text); }
+    body { font-size: 15px; line-height: 1.45; }
+    a { color: var(--primary); }
+    header { border-bottom: 1px solid var(--border); }
+    header > div {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px;
+      flex-wrap: wrap; max-width: 1180px; margin: 0 auto; padding: 14px 24px;
+    }
+    header h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
+    header p { margin: 0; color: var(--muted); }
+    main {
+      display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px;
+      max-width: 1180px; margin: 0 auto; padding: 20px 24px 32px;
+    }
+    form { display: flex; flex-direction: column; gap: 14px; }
+    fieldset {
+      margin: 0; padding: 10px 12px 12px; border: 1px solid var(--border);
+      border-radius: var(--radius); background: var(--surface);
+    }
+    legend { padding: 0 4px; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+    label { display: flex; flex-direction: column; gap: 3px; font-size: 0.85rem; color: var(--muted); }
+    input, select, button { font: inherit; }
+    input[type="number"], select {
+      width: 100%; min-height: 34px; padding: 4px 8px; color: var(--text); background: var(--bg);
+      border: 1px solid var(--border); border-radius: 4px;
+    }
+    input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--focus); outline-offset: 2px;
+    }
+    input:invalid { border-color: #d32f2f; }
+    .buttons { display: flex; gap: 10px; }
+    button {
+      flex: 1; min-height: 38px; padding: 6px 14px; border-radius: 4px; cursor: pointer;
+      border: 1px solid var(--primary); background: var(--primary); color: var(--primary-text);
+      font-weight: 600;
+    }
+    button:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+    button.secondary { background: transparent; color: var(--primary); }
+    button.secondary:hover:not(:disabled) { background: var(--surface); color: var(--primary); }
+    button:disabled { cursor: default; opacity: 0.45; }
+    .hint { margin: 0; font-size: 0.8rem; color: var(--muted); }
+    .view { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .toolbar { display: flex; align-items: end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .toolbar label { min-width: 200px; }
+    #time { font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stage {
+      position: relative; display: flex; justify-content: center; align-items: center;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+      padding: 12px; min-height: 240px;
+    }
+    canvas { display: block; width: 100%; max-height: 52vh; }
+    .placeholder {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      padding: 24px; text-align: center; color: var(--muted);
+    }
+    .legend { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+    .ramp {
+      height: 12px; border-radius: 3px; border: 1px solid var(--border);
+      background: linear-gradient(to right, #440154, #472c7a, #3b518b, #2c718e, #21908d, #27ad81, #5cc863, #aadc32, #fde725);
+    }
+    #units { grid-column: 1 / -1; color: var(--muted); text-align: center; }
+    progress { width: 100%; height: 6px; accent-color: var(--primary); }
+    #status { margin: 0; color: var(--muted); min-height: 1.45em; }
+    #error {
+      margin: 0; padding: 10px 12px; border-radius: var(--radius); background: var(--error-bg);
+      color: var(--error-text); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem;
+    }
+    h2 { margin: 4px 0 8px; font-size: 1rem; }
+    dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+    dl div { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+    dt { font-size: 0.8rem; color: var(--muted); }
+    dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      header > div { padding: 12px 16px; }
+      main { grid-template-columns: minmax(0, 1fr); padding: 16px 16px 28px; gap: 18px; }
+      .toolbar label { min-width: 0; flex: 1; }
+      dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      canvas { max-height: none; }
+    }
+  </style>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpolygon points='16,2 28,9 28,23 16,30 4,23 4,9' fill='%233f51b5'/%3E%3Ccircle cx='16' cy='16' r='4' fill='white'/%3E%3C/svg%3E">
+  <script type="module" src="demo.mjs"></script>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Lobule demo</h1>
+      <p>slidesim in your browser - <a href="../">about this demo</a></p>
+    </div>
+  </header>
+  <main>
+    <form id="parameters" novalidate>
+      <fieldset>
+        <legend>Lobule</legend>
+        <div class="grid">
+          <label>Radius (µm)<input id="lobuleRadiusUm" type="number" min="100" max="600" step="10" value="300" required></label>
+          <label>Rings<input id="rings" type="number" min="0" max="4" step="1" value="0" required></label>
+          <label>Jitter<input id="jitter" type="number" min="0" max="0.25" step="0.01" value="0" required></label>
+          <label>Seed<input id="seed" type="number" min="0" step="1" value="0" required></label>
+          <label>Central vein (µm)<input id="centreRadiusUm" type="number" min="1" step="1" value="30" required></label>
+          <label>Portal veins (µm)<input id="cornerRadiusUm" type="number" min="1" step="1" value="25" required></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Mesh</legend>
+        <div class="grid">
+          <label>Wall size (µm)<input id="wallSizeUm" type="number" min="2" step="1" value="8" required></label>
+          <label>Interior size (µm)<input id="interiorSizeUm" type="number" min="2" step="1" value="30" required></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Simulation</legend>
+        <div class="grid">
+          <label>Duration (min)<input id="minutes" type="number" min="1" max="1440" step="1" value="30" required></label>
+        </div>
+        <p class="hint">Perfusion, transport of S and P and the SPT cell model in every element. Each ring of neighbouring lobules multiplies the mesh about seven times.</p>
+      </fieldset>
+      <div class="buttons">
+        <button id="start" type="submit">Start</button>
+        <button id="stop" type="button" class="secondary" disabled>Stop</button>
+      </div>
+    </form>
+    <section class="view" aria-label="Simulation">
+      <div class="toolbar">
+        <label>Show<select id="show" disabled><option>Start a run first</option></select></label>
+        <output id="time" for="show" aria-live="off">t = 0 s</output>
+      </div>
+      <div class="stage">
+        <canvas id="field" role="img" aria-label="No simulation yet"></canvas>
+        <p id="placeholder" class="placeholder">Set the lobule and press Start: the mesh and the simulation run in your browser.</p>
+      </div>
+      <div id="legend" class="legend" aria-label="Colour scale" hidden>
+        <span id="low">-</span><span class="ramp"></span><span id="high">-</span>
+        <span id="units"></span>
+      </div>
+      <progress id="progress" max="1" value="0" aria-label="Progress of the run" hidden></progress>
+      <p id="status" role="status">Ready.</p>
+      <p id="error" role="alert" hidden></p>
+      <section id="summary" aria-labelledby="totals-heading" hidden>
+        <h2 id="totals-heading">Totals</h2>
+        <dl id="totals"></dl>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

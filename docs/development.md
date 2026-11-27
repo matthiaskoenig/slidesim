@@ -19,11 +19,12 @@ dependencies are in [Installation](installation.md).
 | `crates/slidesim` | the command line: `slidesim run` over `crates/simulation`, `slidesim mesh` |
 | `crates/slidesim-wasm` | the browser build: slidesim in `wasm32-wasip1`, a reactor with a C ABI over its memory (not a member of the native workspace) |
 | `wasm/host` | a wasmtime host of the browser build and its agreement tests with the native build (a workspace of its own) |
-| `wasm/js` | the TypeScript declarations of the live API of the browser build |
+| `wasm/js` | the live API of the browser build: the JavaScript glue `slidesim.mjs`, its TypeScript declarations and its Node and browser tests |
+| `docs/demo/lobule` | the page of the [lobule demo](demo.md) |
 | `crates/test-support` | helpers of the tests, among them runs under `mpiexec` |
 | `testdata/` | meshes, maps, models, contracts and example studies of the tests |
 | `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
-| `scripts/wasm/` | the build of the browser build and of what its tests need (`build.sh`) |
+| `scripts/wasm/` | the build of the browser build and of what its tests need (`build.sh`), and the bundle of the lobule demo (`bundle.sh`) |
 | `scripts/e2e/`, `scripts/bench/` | the end-to-end runs on real slides, and the benchmarks |
 | `spike/petsc-wasm/`, `spike/mmg/` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`) |
 | `docs/` | these pages; `docs/superpowers/` holds the design documents and plans of the milestones, which are not part of the site |
@@ -115,6 +116,30 @@ mesher's bounds and twice the same, the refusals of the engine path and of a fil
 cap of the memory (an error naming it, the host lives on). `mesher_wall_times` (ignored) prints
 the time of the mesher in wasm.
 
+The JavaScript glue `wasm/js/slidesim.mjs` implements the live API
+([Contracts](contracts.md#live-api)) over the exports of `slidesim.wasm`: WASI preview 1 over
+nothing (no files, stdout and stderr kept for the messages of a trap), the kernel compiled from
+the SBML with sbmlsim-core's `compileKernel` and bound late to slidesim's imports, one instance
+per simulation. Its tests:
+
+```bash
+scripts/wasm/build.sh                     # also wasm/js/sbmlsim-core/ and the host's dump
+npm ci --prefix wasm/js
+npx --prefix wasm/js playwright install chromium
+npm test --prefix wasm/js
+npx --yes -p typescript@5.6.3 tsc --noEmit -p wasm/js/tsconfig.json
+```
+
+`test/node.test.mjs` runs the SPT study of 30 min on the generated lobule in Node (every mass
+balance closes within 1e-8 of its largest term), the same study on the native mesher's `mesh.json`
+against the wasmtime host (`target/wasm/host/debug/dump`, `wasm/host/src/bin/dump.rs`): every
+array of every output time bitwise equal; the refusals of the engine path and of a file scene,
+a memory cap (an `Error` naming it, then the next simulation runs), a trap (the simulation
+unusable after it, another untouched) and an error which is not a trap. `test/browser.test.mjs`
+serves the demo's bundle (`scripts/wasm/bundle.sh`) and runs 10 min in headless Chromium
+(Playwright): the drawing is not uniform, no console errors, and the page's L2 norm of S equals
+that of the same run in Node bitwise.
+
 Lint of the browser build's paths (the crates without `native`, for the wasm target):
 
 ```bash
@@ -132,9 +157,11 @@ the tests and the doctests, on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 wi
 the `native-check` dependencies, which it caches (the key covers `deps/versions.env` but for the
 revision of sbmlsim-core, the build scripts and the patches). The job `wasm` then runs the
 browser build on Ubuntu 24.04: the wasi dependencies and sbmlsim-core's artifacts cached,
-`scripts/wasm/build.sh`, the format and Clippy of the browser build's crates and the tests of
-`wasm/host`. `.github/workflows/docs.yml` builds these pages
-(below).
+`scripts/wasm/build.sh`, the format and Clippy of the browser build's crates, the tests of
+`wasm/host`, the type check of `slidesim.d.ts` and the Node and browser tests of `wasm/js`.
+`.github/workflows/docs.yml` builds these pages (below), and in a job of its own the browser build
+(`build.sh --browser`, the wasi dependencies from the cache of the job `wasm`), whose bundle goes
+to `demo/lobule/` of the site.
 
 ## Benchmarks and end-to-end runs
 

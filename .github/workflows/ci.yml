@@ -93,7 +93,7 @@ jobs:
     # The browser build (scripts/wasm/build.sh): slidesim.wasm against the wasi builds of PETSc,
     # libCEED and Mmg, the batched kernel of sbmlsim-core, and the wasmtime host whose tests
     # compare it with the native build (on the native dependencies of the check job, which runs
-    # first and caches them).
+    # first and caches them), and the JavaScript glue of wasm/js in Node and Chromium.
     name: wasm
     needs: check
     runs-on: ubuntu-24.04
@@ -171,3 +171,14 @@ jobs:
         env:
           HWLOC_COMPONENTS: -gl
         run: CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.toml --locked
+      - name: JavaScript glue
+        # slidesim.mjs and its declarations: the type check of slidesim.d.ts, the Node tests (the
+        # lobule study, bitwise against the wasmtime host) and the lobule demo in headless
+        # Chromium (Playwright).
+        env:
+          HWLOC_COMPONENTS: -gl
+        run: |
+          npx --yes -p typescript@5.6.3 tsc --noEmit -p wasm/js/tsconfig.json
+          npm ci --prefix wasm/js
+          (cd wasm/js && npx playwright install --with-deps chromium)
+          npm test --prefix wasm/js

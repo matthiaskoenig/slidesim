@@ -347,9 +347,13 @@ initial state: `time == times[0]`, `field()` and `cellValues()` return the value
 `meta.written == 1`. Each `step()` advances to the next output index and returns it (the first
 `step()` returns 1) and `null` when there is none left; then `meta.complete` is true. `written`
 is the number of output times reached so far, as in `result/1` where an index `t < written` is
-complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh. `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
+complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh,
+and `log()` the array `log` (the quality line of a generated mesh). `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
 are supplied by the caller (the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`, and the map `zonation`); slidesim fixes no names.
-`CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error`.
+`CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error` naming the
+cap (it needs `slidesim` as bytes; Mmg's own cap of 2 GiB in wasm, below, holds above it). Each
+simulation has its own instance of `slidesim.wasm`, so a trap ends only the simulation it
+happened in.
 
 Under the live API lies the C ABI of `slidesim.wasm` (`crates/slidesim-wasm`, a WASI reactor,
 `_initialize` first), over its exported memory, pointers and lengths `u32` byte offsets and

@@ -1,0 +1,23 @@
+{
+  "name": "slidesim",
+  "version": "0.1.0",
+  "description": "The live browser API of slidesim: slidesim.wasm with the batched kernel of sbmlsim-core, in browsers, workers and Node",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./slidesim.d.ts",
+      "default": "./slidesim.mjs"
+    }
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/node.test.mjs test/browser.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "playwright": "1.65.1"
+  }
+}

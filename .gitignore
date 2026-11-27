@@ -6,3 +6,5 @@ deps/src/
 site/
 .claude/
 __pycache__/
+wasm/js/node_modules/
+wasm/js/sbmlsim-core/

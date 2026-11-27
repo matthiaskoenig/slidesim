@@ -215,6 +215,44 @@ mesh: 5902 triangles, 3093 vertices, min angle 25.46 deg, SICN min 0.641 mean 0.
 | `mesh.vtu` | for ParaView: one cell array per area tag, named after it, with the value of the tag in its triangles and NaN elsewhere |
 | `quality.json` | `triangles`, `vertices`, `min_angle_deg`, `min_sicn`, `mean_sicn`, and for a generated mesh `edge_ratio`: the smallest and largest ratio of an edge length to the size field (null for a gmsh mesh) |
 
+## In the browser
+
+The browser build runs a study in a page, a worker or Node: `wasm/js/slidesim.mjs`, the live API
+declared in `wasm/js/slidesim.d.ts` ([Contracts](contracts.md#live-api)), over `slidesim.wasm`
+and sbmlsim-core's `compiler.wasm` and `mathlib.wasm` (`scripts/wasm/build.sh`; its
+`compile.mjs` and `kernel.mjs` beside the glue in `sbmlsim-core/`). The scene's mesh is generated
+(`lobules`) or given as the `mesh.json` of `slidesim mesh`; the cells run on the batched path. The
+[lobule demo](demo.md) is a page built on it.
+
+```js
+import { createSimulation, lobuleScene } from "./slidesim.mjs";
+
+const scene = lobuleScene({ rings: 0 }, {
+  centre: "central_wall", corner: "portal_wall", outer: "field_cut",
+  area: "tissue", zonation: "zonation",
+});
+const sim = await createSimulation({
+  slidesim: await (await fetch("slidesim.wasm")).arrayBuffer(),
+  compiler: await (await fetch("compiler.wasm")).arrayBuffer(),
+  mathlib: await (await fetch("mathlib.wasm")).arrayBuffer(),
+  sbml: await (await fetch("spt_liver_cell.xml")).text(),
+  scene,
+  study, // a study/1 document, its tags those of the scene
+});
+console.log(sim.log()); // mesh: ... triangles, min angle ...
+do {
+  const S = sim.field("S"); // [V] at sim.time, on sim.mesh.vertices
+} while (sim.step() !== null);
+console.log(sim.summary().fields.S.total_mass);
+sim.free();
+```
+
+`createSimulation` resolves at output index 0 (time 0); each `step()` advances to the next output
+time and returns its index, `null` at the end. Errors of slidesim are thrown as an `Error` with
+its message; a trap of the module (a panic, memory past the cap of `memory.maximumPages`) is an
+`Error` too, after which that simulation is unusable. A step blocks its thread, so a page runs the
+simulation in a worker, as the demo does.
+
 ## PETSc options
 
 PETSc options follow `--` and go to PETSc's options database. The solvers of a field take the

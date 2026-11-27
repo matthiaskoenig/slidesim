@@ -9,15 +9,29 @@
 #   deps/src/sbmlsim-core, with its js/compile.mjs and js/kernel.mjs, and in
 #   kernels/<model>/ the batched kernel (kernel.wasm, kernel.json; kernel/1) of each cell model
 #   of KERNEL_MODELS, compiled with that compiler.wasm in Node as a page compiles it;
+# - wasm/js/sbmlsim-core/: compile.mjs and kernel.mjs beside the JavaScript glue
+#   wasm/js/slidesim.mjs, which imports them from there (ignored by git);
 # - the native slidesim (target/release/slidesim, with deps/install/$NATIVE_DEPS, default
 #   native-check), which the agreement tests of wasm/host run beside the wasm build;
-# - target/wasm/artifacts.env: the paths of all of these, which wasm/host's tests read.
+# - target/wasm/host/debug/dump: the wasmtime host as a program (wasm/host/src/bin/dump.rs), whose
+#   arrays the Node tests of wasm/js compare with theirs;
+# - target/wasm/artifacts.env: the paths of all of these, which the tests of wasm/host and
+#   wasm/js read.
 #
-# Usage: scripts/wasm/build.sh
+# Usage: scripts/wasm/build.sh [--browser]
+#   --browser: only what a page needs (slidesim.wasm, sbmlsim-core's modules and JavaScript),
+#   without the kernels, the native slidesim and the host (no native dependencies needed).
 # Needs: wasi-sdk (WASI_SDK_PATH, default ~/opt/wasi-sdk), Node (the kernels), git and network
 # for the first checkout of sbmlsim-core. The Cargo target directories lie under target/.
 # CARGO_BUILD_JOBS bounds the parallel jobs of cargo.
 set -euo pipefail
+
+BROWSER=0
+case "${1:-}" in
+  "") ;;
+  --browser) BROWSER=1 ;;
+  *) echo "usage: scripts/wasm/build.sh [--browser]" >&2; exit 2 ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=SCRIPTDIR/../../deps/versions.env
@@ -57,20 +71,30 @@ if [[ "$(cat "$JS/REV" 2>/dev/null || true)" != "$SBMLSIM_CORE_KERNEL_REV" ]]; t
   echo "$SBMLSIM_CORE_KERNEL_REV" > "$JS/REV"
 fi
 
-# The kernels of the cell models.
-for model in "${KERNEL_MODELS[@]}"; do
-  name="$(basename "$model" .xml)"
-  node "$ROOT/scripts/wasm/compile_kernel.mjs" "$JS/compile.mjs" "$JS/compiler.wasm" "$model" \
-    "$JS/kernels/$name"
-done
+# sbmlsim-core's JavaScript beside the glue.
+mkdir -p "$ROOT/wasm/js/sbmlsim-core"
+cp "$JS/compile.mjs" "$JS/kernel.mjs" "$JS/REV" "$ROOT/wasm/js/sbmlsim-core/"
 
-# The native slidesim.
-(
-  # shellcheck source=/dev/null
-  . "$ROOT/deps/install/$NATIVE_DEPS/env.sh"
-  cd "$ROOT"
-  cargo build --quiet --release -p slidesim
-)
+if [[ "$BROWSER" == 0 ]]; then
+  # The kernels of the cell models.
+  for model in "${KERNEL_MODELS[@]}"; do
+    name="$(basename "$model" .xml)"
+    node "$ROOT/scripts/wasm/compile_kernel.mjs" "$JS/compile.mjs" "$JS/compiler.wasm" "$model" \
+      "$JS/kernels/$name"
+  done
+
+  # The native slidesim.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/deps/install/$NATIVE_DEPS/env.sh"
+    cd "$ROOT"
+    cargo build --quiet --release -p slidesim
+  )
+
+  # The wasmtime host as a program, in the target directory (and profile) of its tests.
+  CARGO_TARGET_DIR="$OUT/host" cargo build --quiet --locked \
+    --manifest-path "$ROOT/wasm/host/Cargo.toml" --bin dump
+fi
 
 # slidesim.wasm: a reactor, linked by wasi-sdk's wasm-ld against its wasi-libc (the one PETSc,
 # libCEED and Mmg were compiled against, with the emulation libraries), not against Rust's
@@ -93,11 +117,15 @@ done
 )
 cp "$OUT/wasm32-wasip1/release/slidesim_wasm.wasm" "$OUT/slidesim.wasm"
 
-cat > "$OUT/artifacts.env" <<EOF
-# Written by scripts/wasm/build.sh: the artifacts the tests of wasm/host use.
+if [[ "$BROWSER" == 0 ]]; then
+  cat > "$OUT/artifacts.env" <<EOF
+# Written by scripts/wasm/build.sh: the artifacts the tests of wasm/host and wasm/js use.
 SLIDESIM_WASM=$OUT/slidesim.wasm
 SLIDESIM_NATIVE=$ROOT/target/release/slidesim
+SLIDESIM_HOST=$OUT/host/debug/dump
+SBMLSIM_COMPILER=$JS/compiler.wasm
 SBMLSIM_MATHLIB=$JS/mathlib.wasm
 SBMLSIM_KERNELS=$JS/kernels
 EOF
+fi
 echo "slidesim.wasm: $(stat -c %s "$OUT/slidesim.wasm") bytes; artifacts in $OUT/artifacts.env"

@@ -31,6 +31,7 @@ nav = [
     { "Running a study" = "usage.md" },
     { "Contracts" = "contracts.md" },
     { "Example studies" = "examples.md" },
+    { "Lobule demo" = "demo.md" },
   ] },
   { "Methods" = [
     { "Overview" = "methods/index.md" },
