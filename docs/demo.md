@@ -29,7 +29,9 @@ computer, in a worker beside the page.
 Start meshes and runs; Stop ends the run at once. **Show** selects a field (P1 values at the
 vertices, interpolated) or a value of the cells (one per element: the states of the model, its
 parameters such as `position` from the zonation, and `protein`). The colour scale spans the values
-of the current output time. **Totals** are those of the run's `summary.json`
+of the current output time; a value which is the same everywhere (a field at the start, a constant
+parameter) is drawn in the middle colour of the scale, and the legend reads "constant" and the
+value. **Totals** are those of the run's `summary.json`
 ([Running a study](usage.md#summaryjson)): the amount of each field in the lobule and what it
 received from the cells since the start (negative: taken up), the number of cells and the inflow
 through the portal veins.

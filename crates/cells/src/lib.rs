@@ -465,15 +465,17 @@ mod tests {
         let model = CellsError::Model {
             message: "no compiler".into(),
         };
-        assert!(
-            matches!(decode(&encode(&model)), CellsError::Model { message } if message == "no compiler")
-        );
+        let CellsError::Model { message } = decode(&encode(&model)) else {
+            panic!("not a model error");
+        };
+        assert_eq!(message, "no compiler");
         let unsupported = CellsError::Unsupported {
             feature: "a model with events".into(),
         };
-        assert!(
-            matches!(decode(&encode(&unsupported)), CellsError::Unsupported { feature } if feature == "a model with events")
-        );
+        let CellsError::Unsupported { feature } = decode(&encode(&unsupported)) else {
+            panic!("not an unsupported feature");
+        };
+        assert_eq!(feature, "a model with events");
         let other = CellsError::Invalid("lengths".into());
         assert_eq!(decode(&encode(&other)).to_string(), "cells: lengths");
     }

@@ -722,6 +722,80 @@ fn balance_evens_the_work() {
     }
 }
 
+/// On 3 processes with one cell each, the cell of process 0 at 100 times the frequency of the
+/// others: after the first advance the balance sends that cell away (its weight is more than
+/// twice those of the others together), so process 0 advances no cell, and its statistics count
+/// no step (not those of the advance before, when it advanced its cell). The steps of each
+/// advance, summed over the processes, are those without the balance.
+#[test]
+fn process_without_points_counts_nothing() {
+    if test_support::ranks() == 1 {
+        test_support::parallel(3, &["process_without_points_counts_nothing"]);
+        return;
+    }
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let sbml = oscillator_model();
+    let mut runs = Vec::new();
+    for balance in [false, true] {
+        let spec = CellsSpec {
+            areas: None,
+            solver: CellSolverKind::Batched,
+            balance,
+            ..linear_spec(vec![parameter("w", Coefficient::Constant(1.0))])
+        };
+        let mut setup = CellSetup::new(
+            &fine,
+            &mesh,
+            &spec,
+            &Maps::default(),
+            &Coefficient::Constant(0.2),
+        )
+        .unwrap();
+        assert!(!setup.cells.is_empty(), "a process without cells");
+        setup.cells.truncate(1);
+        setup.parameters.truncate(1);
+        setup.elements.truncate(1);
+        setup.centroids.truncate(1);
+        if comm.rank() == 0 {
+            let w = setup.parameters[0]
+                .iter_mut()
+                .find(|(id, _)| id == "w")
+                .unwrap();
+            w.1 = 100.0;
+        }
+        let mut cells = BatchedCells::new(&setup, &spec, &sbml, &ceed).unwrap();
+        let mut blood = vec![1.0; cells.n_cells()];
+        let steps: Vec<u64> = [(0.0, 6.0), (6.0, 12.0), (12.0, 18.0)]
+            .into_iter()
+            .map(|(t0, t1)| cells.advance(t0, t1, &mut blood).unwrap().steps)
+            .collect();
+        runs.push(steps);
+    }
+    let (off, on) = (&runs[0], &runs[1]);
+    println!(
+        "process {}: steps {on:?} with the balance, {off:?} without",
+        comm.rank()
+    );
+    let sum = |x: u64| comm.sum_int(x.try_into().unwrap()).unwrap();
+    for (a, b) in off.iter().zip(on) {
+        assert_eq!(sum(*a), sum(*b), "{off:?} against {on:?}");
+    }
+    assert!(off[0] > 0);
+    if comm.rank() == 0 {
+        assert_eq!(on[0], off[0], "nothing moves in the first advance");
+        assert_eq!(
+            on[1..],
+            [0, 0],
+            "process 0 advances no cell after the first"
+        );
+    }
+}
+
 #[test]
 fn mpi_world_has_the_expected_size() {
     let p = Petsc::init(&[]).unwrap();

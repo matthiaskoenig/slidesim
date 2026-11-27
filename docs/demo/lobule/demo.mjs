@@ -405,19 +405,33 @@ function draw() {
     if (v < range.low) range.low = v;
     if (v > range.high) range.high = v;
   }
-  const low = range.low;
-  const high = range.high > range.low ? range.high : range.low + 1;
-  $("low").textContent = format(range.low);
-  $("high").textContent = format(range.high);
+  // A constant value (the start of a field, a parameter) has no scale: one colour, the middle
+  // of the scale, and its value.
+  const constant = !(range.high > range.low);
+  const { low, high } = range;
+  const unit = kind === "field" ? " mM" : "";
+  const legend = $("legend");
+  legend.classList.toggle("constant", constant);
+  if (constant) {
+    $("low").textContent = `constant ${format(low)}`;
+    $("high").textContent = "";
+  } else {
+    $("low").textContent = format(low);
+    $("high").textContent = format(high);
+  }
   $("units").textContent = kind === "field" ? `${name} in mM` : `${name} per element`;
-  $("legend").setAttribute(
+  legend.setAttribute(
     "aria-label",
-    `Colour scale of ${name}: viridis from ${format(range.low)} (dark violet) to ` +
-      `${format(range.high)} (yellow)${kind === "field" ? " mM" : ""}`,
+    constant
+      ? `Colour scale of ${name}: constant ${format(low)}${unit}, one colour (teal)`
+      : `Colour scale of ${name}: viridis from ${format(low)} (dark violet) to ` +
+          `${format(high)} (yellow)${unit}`,
   );
   canvas.setAttribute(
     "aria-label",
-    `${name} on the lobule at t = ${current.frame.time} s, from ${format(range.low)} to ${format(range.high)}`,
+    constant
+      ? `${name} on the lobule at t = ${current.frame.time} s, constant ${format(low)}`
+      : `${name} on the lobule at t = ${current.frame.time} s, from ${format(low)} to ${format(high)}`,
   );
 
   const { vertices, triangles, triangleCell, walls, box } = current.mesh;
@@ -441,10 +455,12 @@ function draw() {
   }
   const image = new ImageData(width, height);
   const pixels = new Uint32Array(image.data.buffer);
-  const level = (v) => {
-    const k = Math.round(((v - low) / (high - low)) * 255);
-    return LUT[k < 0 ? 0 : k > 255 ? 255 : k];
-  };
+  const level = constant
+    ? () => LUT[128]
+    : (v) => {
+        const k = Math.round(((v - low) / (high - low)) * 255);
+        return LUT[k < 0 ? 0 : k > 255 ? 255 : k];
+      };
   const eps = -1e-9;
   for (let t = 0; t < triangles.length / 3; t++) {
     const a = triangles[3 * t];

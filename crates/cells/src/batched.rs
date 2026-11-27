@@ -217,8 +217,11 @@ impl Batch {
     fn run(&mut self, context: &RosenbrockContext, points: &mut Points) -> Result<()> {
         let n = points.control.len() / CONTROL;
         debug_assert!(n <= self.capacity);
-        // The points beyond `n`: done at the end of the advance, copied.
-        let unused = [context.t1, 0.0, 1.0, 0.0];
+        // The points beyond `n`: done at the end of the advance (no step to try, not failed),
+        // copied.
+        let mut unused = [0.0; CONTROL];
+        unused[CONTROL_T] = context.t1;
+        unused[CONTROL_DONE] = 1.0;
         /// Writes `values`, then `rest` over and over.
         fn fill<'a>(values: &'a [f64], rest: &'a [f64]) -> impl FnOnce(&mut [f64]) + 'a {
             move |a: &mut [f64]| {
@@ -471,6 +474,9 @@ impl BatchedCells {
         let start = Instant::now();
         // An error here is reported after the results went back, so that no process waits.
         let ran = if m == 0 {
+            // No results: not even those of an advance before, when this process had points.
+            self.points.next.clear();
+            self.points.counts.clear();
             Ok(())
         } else {
             self.run_points(&context, m)

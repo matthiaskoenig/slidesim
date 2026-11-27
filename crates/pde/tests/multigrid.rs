@@ -25,7 +25,7 @@ use pde::{
     Discretization, Inputs, Multigrid, PdeError, PointData, Problem, SharedOperator, SourceField,
     Terms, Transport, configure_multigrid,
 };
-use petsc::{Ksp, Matrix, Petsc, Vector};
+use petsc::{Dm, Ksp, Matrix, Petsc, Vector};
 
 /// Diffusion dominates on these meshes (`k h^2 / d` at most 5e-3 for `h` at most 10 um), the
 /// regime slidesim runs in, where Jacobi alone needs more iterations on every refinement (137,
@@ -56,6 +56,21 @@ fn tissue_small(p: &Petsc, refinements: u32) -> Mesh {
     Mesh::load(p, &scene, refinements).unwrap()
 }
 
+/// `tissue_small` refined twice before it is distributed, so that its coarse level is that of
+/// twice refined `tissue_small`, then refined `refinements` times.
+fn refined_tissue(p: &Petsc, refinements: u32) -> Mesh {
+    let path = fixture("tissue_small.msh");
+    let mut coarse = p
+        .with_option("-dm_plex_gmsh_use_regions", Some("true"), || {
+            Dm::plex_from_file(&p.comm(), &path, "mesh", true)
+        })
+        .unwrap();
+    for _ in 0..2 {
+        coarse = coarse.refine().unwrap();
+    }
+    Mesh::from_dm(p, coarse, refinements).unwrap()
+}
+
 fn fixture(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata/meshes")
@@ -83,9 +98,13 @@ struct Steady {
 
 impl Steady {
     fn new(p: &Petsc, refinements: u32, shift: f64) -> Steady {
-        let mesh = tissue_small(p, refinements);
+        Steady::on(&tissue_small(p, refinements), shift)
+    }
+
+    /// The problem on `mesh`, the shift `shift`.
+    fn on(mesh: &Mesh, shift: f64) -> Steady {
         let ceed = ceed();
-        let discs = Discretization::hierarchy(&mesh, &ceed, 1, &BOUNDARY).unwrap();
+        let discs = Discretization::hierarchy(mesh, &ceed, 1, &BOUNDARY).unwrap();
         let levels = operators(&discs, shift);
         let fine = discs.last().unwrap().clone();
         let mut a = fine.shell_matrix(levels.last().unwrap().clone()).unwrap();
@@ -101,7 +120,7 @@ impl Steady {
         ksp.set_operators(&a, &a).unwrap();
         ksp.set_type("cg").unwrap();
         ksp.set_tolerances(Some(1e-10), None, Some(1000)).unwrap();
-        let multigrid = configure_multigrid(&mut ksp, &mesh, &levels, true).unwrap();
+        let multigrid = configure_multigrid(&mut ksp, mesh, &levels, true).unwrap();
         Steady {
             ksp,
             multigrid,
@@ -230,23 +249,25 @@ fn one_level_is_the_coarse_solve() {
 }
 
 /// The coarse solve is LU on one process; on several, algebraic multigrid, which coarsens until
-/// a level has at most 5000 equations: on the coarse level of `tissue_small` (429 equations, below
-/// 5000, above PETSc's default of 50) it has two levels, the coarser solved directly.
+/// a level has at most `COARSE_EQUATIONS` (5000) equations. The coarse level here is
+/// `tissue_small` refined twice before it is distributed (7,515 equations, above 5000), and
+/// one aggregation step leaves it above 50 (PETSc's default limit, which would coarsen further)
+/// and below 5000: two levels, the coarser solved directly.
 #[test]
 fn coarse_solve_by_process_count() {
     let p = Petsc::init(&[]).unwrap();
-    let mut steady = Steady::new(&p, 1, 0.0);
+    let mut steady = Steady::on(&refined_tissue(&p, 1), 0.0);
     steady.solve();
     let coarse = steady.ksp.pc().unwrap().mg_smoother(0).unwrap();
     let coarse_pc = coarse.pc().unwrap();
     if p.comm().size() == 1 {
         assert_eq!(coarse_pc.type_name().unwrap(), "lu");
     } else {
-        // The equations of the coarse level: those of the mesh unrefined.
-        let equations = Steady::new(&p, 0, 0.0).b.size().unwrap();
-        assert!((50..5000).contains(&equations), "{equations}");
+        // The equations of the coarse level: those of the mesh without its refinement.
+        let equations = Steady::on(&refined_tissue(&p, 0), 0.0).b.size().unwrap();
+        assert!(equations > 5000, "{equations}");
         assert_eq!(coarse_pc.type_name().unwrap(), "gamg");
-        assert_eq!(coarse_pc.mg_levels().unwrap(), 2);
+        assert_eq!(coarse_pc.mg_levels().unwrap(), 2, "{equations} equations");
     }
 }
 

@@ -8,8 +8,9 @@
 //! the host compiles from the SBML of the study (`compiler.compileKernel` of sbmlsim-core's
 //! JavaScript, `sbmlsim-core compile --kernel`). Its functions take byte offsets into the
 //! memory of their caller: the browser build of slidesim imports them as
-//! `slidesim_kernel.init`, `slidesim_kernel.advance` and `slidesim_kernel.assign`, and the host instantiates the kernel
-//! with slidesim's memory and binds them (`wasm/host`, Task 17's JavaScript).
+//! `slidesim_kernel.init`, `slidesim_kernel.advance` and `slidesim_kernel.assign`, and the host
+//! instantiates the kernel with slidesim's memory and binds them (`wasm/host`, Task 17's
+//! JavaScript).
 
 use sbmlsim_abi::ModelDescription;
 use serde::Deserialize;

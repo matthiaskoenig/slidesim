@@ -127,6 +127,10 @@
       height: 12px; border-radius: 3px; border: 1px solid var(--border);
       background: linear-gradient(to right, #440154, #472c7a, #3b518b, #2c718e, #21908d, #27ad81, #5cc863, #aadc32, #fde725);
     }
+    /* A constant value: one swatch of the middle of the scale, then the value. */
+    .legend.constant { grid-template-columns: auto auto; justify-content: center; }
+    .legend.constant .ramp { order: -1; width: 2.5rem; background: #21908d; }
+    .legend.constant #high { display: none; }
     #units { grid-column: 1 / -1; color: var(--muted); text-align: center; }
     progress { width: 100%; height: 6px; accent-color: var(--primary); }
     #status { margin: 0; color: var(--muted); min-height: 1.45em; }
