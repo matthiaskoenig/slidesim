@@ -618,7 +618,7 @@ fn store_holds_the_raster_pyramid() {
     let store = out.join(RESULT_STORE);
     let data = read_result(&store).unwrap();
     let meta = data.meta.raster.clone().expect("raster attributes");
-    meta.um_per_px.partial_cmp(&3.0).unwrap();
+    assert_eq!(meta.um_per_px, 3.0);
     assert_eq!((meta.levels, meta.shapes.len()), (3, 3));
     let [rows, cols] = meta.shapes[0];
     assert!(

@@ -1437,6 +1437,101 @@ fn run_writes_the_raster_when_asked() {
     assert!(!plain.join(simulation::RESULT_STORE).join("raster").exists());
 }
 
+/// The files of the directory `dir` with their contents, by name.
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(d).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path.strip_prefix(dir).unwrap().display().to_string();
+                files.insert(name, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// A raster beyond the cap is refused by name of the option before anything is written or
+/// removed: the outputs of an earlier run in `--out` stay as they were, and no flow is written.
+#[test]
+fn refused_raster_leaves_the_output_untouched() {
+    let dir = scratch("refused_raster_leaves_the_output_untouched");
+    let out = dir.join("out");
+    let spt = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/cells_toy/spt.study.json");
+    let first = variant(&spt, &dir, "first", |doc| {
+        doc["time"]["end"] = Value::from(60.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 60.0]);
+    });
+    assert_success(&slidesim(&args(&first, &out, &[])));
+    std::fs::remove_file(out.join("pressure.vtu")).ok();
+    let before = tree(&out);
+    assert!(before.contains_key("S_1.vtu") && before.keys().any(|k| k.starts_with("result.zarr")));
+    let huge = variant(&lobule_study(), &dir, "huge", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 1e-5, "levels": 1}});
+    });
+    let run = slidesim(&args(&huge, &out, &[]));
+    assert!(!run.status.unwrap().success(), "{}", run.stdout);
+    assert!(
+        run.stderr.contains("result.raster.um_per_px"),
+        "{}",
+        run.stderr
+    );
+    assert!(tree(&out) == before, "the output directory changed");
+    assert!(!out.join("pressure.vtu").exists());
+    // On two processes every process refuses, and nothing changes either.
+    if let Some(run) = slidesim_parallel(2, &args(&huge, &out, &[])) {
+        assert!(!run.status.unwrap().success(), "{}", run.stdout);
+        assert!(
+            run.stderr.contains("result.raster.um_per_px"),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            tree(&out) == before,
+            "the output directory changed on 2 processes"
+        );
+    }
+}
+
+/// A run removes the earlier `result.zarr` with the earlier VTU files, so a run which fails
+/// after that and before it makes its own store (here the tag `__x` of the mesh, which cannot
+/// name an array) leaves no earlier store, marked complete, beside the new files.
+#[test]
+fn earlier_store_goes_with_the_earlier_outputs() {
+    let dir = scratch("earlier_store_goes_with_the_earlier_outputs");
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    let store = out.join(simulation::RESULT_STORE);
+    assert!(store.is_dir());
+    let lobule = lobule_study();
+    let testdata = lobule.parent().unwrap().join("../..");
+    let msh = std::fs::read_to_string(testdata.join("meshes/lobule_toy.msh")).unwrap();
+    assert!(msh.contains("\"section_edge\""));
+    let mesh = dir.join("bad_tag.msh");
+    std::fs::write(&mesh, msh.replace("\"section_edge\"", "\"__x\"")).unwrap();
+    let mut scene: Value = serde_json::from_str(
+        &std::fs::read_to_string(lobule.with_file_name("scene.json")).unwrap(),
+    )
+    .unwrap();
+    scene["mesh"]["path"] = Value::from(mesh.display().to_string());
+    scene["maps"][0]["path"] =
+        Value::from(lobule.with_file_name("zonation.zarr").display().to_string());
+    let scene_path = dir.join("scene.json");
+    std::fs::write(&scene_path, scene.to_string()).unwrap();
+    let failing = variant(&lobule, &dir, "failing", |doc| {
+        doc["scene"] = Value::from(scene_path.display().to_string());
+    });
+    let run = slidesim(&args(&failing, &out, &[]));
+    assert!(!run.status.unwrap().success());
+    assert!(run.stderr.contains("__x"), "{}", run.stderr);
+    assert!(!store.exists(), "the earlier store is still there");
+}
+
 /// `result.zarr` of an earlier run in the output directory is replaced whole: `lobule_toy` (the
 /// field `sucrose`) and then the SPT cells on `cells_toy` (the fields `S` and `P`) into one
 /// `--out` leave the store of the second run alone, without `fields/sucrose`. The root

@@ -31,6 +31,8 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
     let inputs = Inputs::load(study_path)?;
     let mut simulation = Simulation::new(petsc, inputs, started)?;
     let comm = petsc.comm();
+    // Refuse what the result store cannot hold before anything is written or removed.
+    simulation.check_result_options()?;
     // Process 0 writes every file, after it removed the outputs of an earlier run.
     if comm.rank() == 0 {
         std::fs::create_dir_all(out)
@@ -58,7 +60,7 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
 }
 
 /// Removes the files `<field id>_<index>.vtu` of the fields of `study` and `cells_<index>.vtu`
-/// from the directory `out`:
+/// and the store `result.zarr` from the directory `out`:
 /// outputs of an earlier run, which a viewer would take for a part of the series of this run (for
 /// example the files of more output times). Other files stay.
 fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
@@ -71,13 +73,18 @@ fn remove_earlier_outputs(study: &Study, out: &Path) -> Result<()> {
             continue;
         };
         if name == "pressure.vtu"
+            || name == simulation::RESULT_STORE
             || name == "velocity.vtu"
             || is_output(name, "cells")
             || study.fields.iter().any(|field| is_output(name, &field.id))
         {
             let path = entry.path();
-            std::fs::remove_file(&path)
-                .with_context(|| format!("cannot remove {}", path.display()))?;
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+            .with_context(|| format!("cannot remove {}", path.display()))?;
         }
     }
     Ok(())

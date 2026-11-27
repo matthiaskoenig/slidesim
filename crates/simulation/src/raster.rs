@@ -81,14 +81,7 @@ impl Raster {
             }
         }
         let origin_um = origin_um.unwrap_or(low);
-        let count = |d: usize| ((high[d] - origin_um[d]) / um_per_px).ceil().max(1.0);
-        let (cols, rows) = (count(0), count(1));
-        ensure!(
-            rows * cols <= MAX_PIXELS as f64,
-            "result.raster.um_per_px: the raster of level 0 would have {rows} x {cols} pixels, \
-             more than {MAX_PIXELS} (2^28); use a larger um_per_px"
-        );
-        let (rows, cols) = (rows as u64, cols as u64);
+        let [rows, cols] = Self::level0_shape([low, high], um_per_px, origin_um)?;
         let mut shapes = vec![[rows, cols]];
         for _ in 1..levels {
             let [r, c] = shapes[shapes.len() - 1];
@@ -104,6 +97,25 @@ impl Raster {
         };
         raster.locate();
         Ok(raster)
+    }
+
+    /// The `[rows, cols]` of level 0 over the bounding box `bounds` (`[[xmin, ymin], [xmax,
+    /// ymax]]`) of a mesh, or the refusal of a raster of more than [`MAX_PIXELS`] pixels (the
+    /// message names `result.raster.um_per_px`). `origin_um` is the corner of pixel (0, 0). A
+    /// cheap check which needs no mesh: a run makes it before it writes anything.
+    pub fn level0_shape(
+        bounds: [[f64; 2]; 2],
+        um_per_px: f64,
+        origin_um: [f64; 2],
+    ) -> Result<[u64; 2]> {
+        let count = |d: usize| ((bounds[1][d] - origin_um[d]) / um_per_px).ceil().max(1.0);
+        let (cols, rows) = (count(0), count(1));
+        ensure!(
+            rows * cols <= MAX_PIXELS as f64,
+            "result.raster.um_per_px: the raster of level 0 would have {rows} x {cols} pixels, \
+             more than {MAX_PIXELS} (2^28); use a larger um_per_px"
+        );
+        Ok([rows as u64, cols as u64])
     }
 
     /// The raster attributes of `result/1`.

@@ -451,6 +451,32 @@ impl<'p> Simulation<'p> {
         Ok(())
     }
 
+    /// Checks the study's `result.raster`, if any, against the mesh: a raster of more than
+    /// [`raster::MAX_PIXELS`] pixels in level 0 is refused (the message names
+    /// `result.raster.um_per_px`). Cheap, so a run makes it before it writes anything
+    /// ([`ResultWriter::create`] makes it again). Collective; the error is the same on every
+    /// process.
+    pub fn check_result_options(&self) -> Result<()> {
+        let Some(options) = self.study().result.as_ref().and_then(|r| r.raster.as_ref()) else {
+            return Ok(());
+        };
+        let comm = self.mesh().finest().comm();
+        let local = self.mesh().local_bounds();
+        // The maximum of the negated minima and of the maxima; -inf from a process without cells.
+        let reduce = |x: f64| comm.max_real(x);
+        let mut bounds = [[0.0; 2]; 2];
+        for d in 0..2 {
+            let lo = local.map_or(f64::NEG_INFINITY, |b| -b[0][d]);
+            let hi = local.map_or(f64::NEG_INFINITY, |b| b[1][d]);
+            bounds[0][d] = -reduce(lo)?;
+            bounds[1][d] = reduce(hi)?;
+        }
+        let origin = options.origin_um.unwrap_or(bounds[0]);
+        raster::Raster::level0_shape(bounds, options.um_per_px, origin)
+            .map(|_| ())
+            .map_err(|e| e.context(OnEveryProcess("cannot write result.zarr")))
+    }
+
     /// Writes the flow as `<out>/pressure.vtu` and `<out>/velocity.vtu`; nothing without
     /// perfusion. Collective.
     pub fn write_flow(&self, out: &Path) -> Result<()> {
