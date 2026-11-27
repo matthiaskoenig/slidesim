@@ -139,11 +139,11 @@ pub struct LobuleSpec {
     pub seed: u64,
     /// The central vein; no default for the tag.
     #[serde(deserialize_with = "de_centre")]
-    #[schemars(with = "HoleSpec")]
+    #[schemars(schema_with = "centre_schema")]
     pub centre: HoleSpec,
     /// The portal veins at the corners; no default for the tag.
     #[serde(deserialize_with = "de_corner")]
-    #[schemars(with = "HoleSpec")]
+    #[schemars(schema_with = "corner_schema")]
     pub corner: HoleSpec,
     /// Tag of the outer boundary of the domain; no default.
     pub outer_tag: String,
@@ -186,13 +186,40 @@ fn de_corner<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HoleSpec, D::Erro
     hole_with_default(d, 25.0)
 }
 
+fn hole_schema(radius_um: f64, what: &str) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "description": format!("{what}; a circular vein cut out of the tissue."),
+        "properties": {
+            "radius_um": {
+                "description": "Radius in um, must be > 0.",
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": radius_um
+            },
+            "tag": {"description": "Edge tag of the vein wall.", "type": "string"}
+        },
+        "required": ["tag"],
+        "additionalProperties": false
+    })
+}
+
+fn centre_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    hole_schema(30.0, "The central vein")
+}
+
+fn corner_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    hole_schema(25.0, "A portal vein at a corner")
+}
+
 /// A circular vein cut out of the tissue.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+///
+/// Read leniently by `LobuleSpec` (the radius defaults to 30 for the centre and 25 for the
+/// corners); written with both keys. Its schema is `hole_schema`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HoleSpec {
-    /// Radius in um, must be > 0 (default 30 for the centre, 25 for the corners).
-    #[serde(default)]
-    #[schemars(extend("exclusiveMinimum" = 0))]
+    /// Radius in um, must be > 0.
     pub radius_um: f64,
     /// Edge tag of the vein wall.
     pub tag: String,

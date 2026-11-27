@@ -807,3 +807,21 @@ fn polygons_refuse_bad_kinds() {
     let e = polygons_err("polygons-bad-value.geojson");
     assert!(e.contains("value"), "{e}");
 }
+
+#[test]
+fn schema_carries_the_hole_radius_defaults() {
+    let schema = contracts::schema_scene();
+    let variants = schema["$defs"]["MeshSource"]["oneOf"].as_array().unwrap();
+    let lobules = variants
+        .iter()
+        .find(|v| v["properties"].get("centre").is_some())
+        .expect("lobules variant")["properties"]
+        .clone();
+    for (hole, default) in [("centre", 30.0), ("corner", 25.0)] {
+        let node = &lobules[hole];
+        let radius = &node["properties"]["radius_um"];
+        assert_eq!(radius["default"], serde_json::json!(default), "{hole}");
+        assert_eq!(radius["exclusiveMinimum"], serde_json::json!(0), "{hole}");
+        assert_eq!(node["required"], serde_json::json!(["tag"]), "{hole}");
+    }
+}

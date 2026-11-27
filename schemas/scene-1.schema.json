@@ -1,26 +1,5 @@
 {
   "$defs": {
-    "HoleSpec": {
-      "additionalProperties": false,
-      "description": "A circular vein cut out of the tissue.",
-      "properties": {
-        "radius_um": {
-          "default": 0.0,
-          "description": "Radius in um, must be > 0 (default 30 for the centre, 25 for the corners).",
-          "exclusiveMinimum": 0,
-          "format": "double",
-          "type": "number"
-        },
-        "tag": {
-          "description": "Edge tag of the vein wall.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "tag"
-      ],
-      "type": "object"
-    },
     "LengthUnit": {
       "enum": [
         "um"
@@ -154,12 +133,44 @@
               "type": "string"
             },
             "centre": {
-              "$ref": "#/$defs/HoleSpec",
-              "description": "The central vein; no default for the tag."
+              "additionalProperties": false,
+              "description": "The central vein; no default for the tag.",
+              "properties": {
+                "radius_um": {
+                  "default": 30.0,
+                  "description": "Radius in um, must be > 0.",
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                "tag": {
+                  "description": "Edge tag of the vein wall.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag"
+              ],
+              "type": "object"
             },
             "corner": {
-              "$ref": "#/$defs/HoleSpec",
-              "description": "The portal veins at the corners; no default for the tag."
+              "additionalProperties": false,
+              "description": "The portal veins at the corners; no default for the tag.",
+              "properties": {
+                "radius_um": {
+                  "default": 25.0,
+                  "description": "Radius in um, must be > 0.",
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                "tag": {
+                  "description": "Edge tag of the vein wall.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag"
+              ],
+              "type": "object"
             },
             "format": {
               "const": "lobules",

@@ -115,9 +115,10 @@ impl Mesh {
     /// A mesh without such a vertex is used as read.
     ///
     /// Errors (on every process): [`MeshError::NotFound`] if process 0 finds no file at
-    /// the gmsh path of the scene, [`MeshError::Read`] if PETSc cannot read it, [`MeshError::Dimension`]
-    /// if its dimension is not `scene.dimension`, and [`MeshError::Petsc`] if distributing or
-    /// refining fails.
+    /// the gmsh path of the scene, [`MeshError::Read`] if PETSc cannot read it,
+    /// [`MeshError::Dimension`] if its dimension is not `scene.dimension`,
+    /// [`MeshError::Source`] for the `polygons` and `lobules` sources (not yet supported), and
+    /// [`MeshError::Petsc`] if distributing or refining fails.
     pub fn load(petsc: &Petsc, scene: &Scene, refinements: u32) -> Result<Mesh, MeshError> {
         let path = match &scene.mesh {
             MeshSource::Gmsh { path } => path,

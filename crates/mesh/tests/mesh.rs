@@ -518,3 +518,20 @@ fn parallel_on_2_processes() {
 fn parallel_on_3_processes() {
     test_support::parallel(3, &PARALLEL_TESTS);
 }
+
+#[test]
+fn generated_sources_are_not_yet_supported() {
+    let p = Petsc::init(&[]).unwrap();
+    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/contracts");
+    for (file, format) in [
+        ("scene-polygons.json", "polygons"),
+        ("scene-lobules.json", "lobules"),
+    ] {
+        let scene = Scene::load(contracts.join(file)).unwrap();
+        let err = Mesh::load(&p, &scene, 0).unwrap_err();
+        assert!(
+            matches!(err, MeshError::Source { format: f } if f == format),
+            "{file}: {err}"
+        );
+    }
+}
