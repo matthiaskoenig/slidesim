@@ -19,9 +19,22 @@ MPI_Op petsc_sys_mpi_sum(void) { return MPI_SUM; }
 MPI_Op petsc_sys_mpi_max(void) { return MPI_MAX; }
 MPI_Op petsc_sys_mpi_replace(void) { return MPI_REPLACE; }
 
-/* MPI_Gather of one int per process and MPI_Gatherv of bytes to `root`. Functions here, not
-   bindings of MPI's own: MPIUNI (PETSc without MPI, as in the wasm build) defines the MPI
-   collectives as macros, which bindgen cannot translate. */
+/* The MPI calls of the Rust code, as functions: MPIUNI (PETSc without MPI, as in the wasm build:
+   one process) defines them as macros, which bindgen cannot translate. */
+int petsc_sys_mpi_comm_rank(MPI_Comm comm, int *rank) { return MPI_Comm_rank(comm, rank); }
+int petsc_sys_mpi_comm_size(MPI_Comm comm, int *size) { return MPI_Comm_size(comm, size); }
+int petsc_sys_mpi_allreduce(const void *send, void *receive, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm)
+{
+  return MPI_Allreduce(send, receive, count, datatype, op, comm);
+}
+int petsc_sys_mpi_bcast(void *buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm)
+{
+  return MPI_Bcast(buffer, count, datatype, root, comm);
+}
+int petsc_sys_mpi_barrier(MPI_Comm comm) { return MPI_Barrier(comm); }
+int petsc_sys_mpi_abort(MPI_Comm comm, int code) { return MPI_Abort(comm, code); }
+
+/* MPI_Gather of one int per process and MPI_Gatherv of bytes to `root`, as the calls above. */
 int petsc_sys_mpi_gather_int(int value, int *values, int root, MPI_Comm comm)
 {
   return MPI_Gather(&value, 1, MPI_INT, values, 1, MPI_INT, root, comm);

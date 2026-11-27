@@ -4,14 +4,21 @@
 //! A map is a 2D float array (rows = y, cols = x). Pixel (row `r`, col `c`) is centred at
 //! `origin_um + [c, r] * um_per_px`. Each process reads only the window of the raster that
 //! covers its own cells, so this crate depends neither on PETSc nor on MPI.
+//!
+//! On WASI (the browser build, wasm32-wasip1) no file is read: [`Map::read`] is an error
+//! ([`MapError::NoFiles`]), and the maps of a run are the computed ones.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+#[cfg(not(target_os = "wasi"))]
 use std::path::Path;
+#[cfg(not(target_os = "wasi"))]
 use std::sync::Arc;
 
 use contracts::MapSpec;
+#[cfg(not(target_os = "wasi"))]
 use zarrs::array::{Array, ArrayBuilder, ArraySubset, data_type};
+#[cfg(not(target_os = "wasi"))]
 use zarrs::filesystem::FilesystemStore;
 
 /// Errors of reading and sampling maps; each names the map and, where there is one, the point.
@@ -30,6 +37,9 @@ pub enum MapError {
     Format { map: String, message: String },
     #[error("map '{map}': zarr: {message}")]
     Zarr { map: String, message: String },
+    /// A map file on WASI, where no file is read (the browser build).
+    #[error("map '{map}': the browser build reads no files, and the map is the file {path}")]
+    NoFiles { map: String, path: String },
 }
 
 /// Pixels needed around a point for a bilinear sample with gradients: one before the cell for
@@ -71,6 +81,7 @@ fn window(
     [range(1, shape[0]), range(0, shape[1])]
 }
 
+#[cfg(not(target_os = "wasi"))]
 fn zarr_err(map: &str, e: impl std::fmt::Display) -> MapError {
     MapError::Zarr {
         map: map.to_string(),
@@ -78,6 +89,7 @@ fn zarr_err(map: &str, e: impl std::fmt::Display) -> MapError {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 fn format_err(map: &str, message: impl Into<String>) -> MapError {
     MapError::Format {
         map: map.to_string(),
@@ -87,7 +99,20 @@ fn format_err(map: &str, message: impl Into<String>) -> MapError {
 
 impl Map {
     /// Read the pixels covering `bounds` (`[[xmin, ymin], [xmax, ymax]]` in um) plus the margin
-    /// needed for samples and gradients, clipped to the array; only the chunks needed.
+    /// needed for samples and gradients, clipped to the array; only the chunks needed. On WASI
+    /// an error, [`MapError::NoFiles`].
+    #[cfg(target_os = "wasi")]
+    pub fn read(spec: &MapSpec, _bounds: [[f64; 2]; 2]) -> Result<Map, MapError> {
+        Err(MapError::NoFiles {
+            map: spec.id.clone(),
+            path: spec.path.display().to_string(),
+        })
+    }
+
+    /// Read the pixels covering `bounds` (`[[xmin, ymin], [xmax, ymax]]` in um) plus the margin
+    /// needed for samples and gradients, clipped to the array; only the chunks needed. On WASI
+    /// an error, [`MapError::NoFiles`].
+    #[cfg(not(target_os = "wasi"))]
     pub fn read(spec: &MapSpec, bounds: [[f64; 2]; 2]) -> Result<Map, MapError> {
         let id = spec.id.as_str();
         if spec.um_per_px.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
@@ -366,6 +391,7 @@ impl Maps {
 /// Write a float64 zstd Zarr v3 map of `rows` x `cols` (row-major `values`) at `path` and
 /// return its spec (id `test`, units `1`). For the tests of other crates.
 #[doc(hidden)]
+#[cfg(not(target_os = "wasi"))]
 pub fn write_test_map(
     path: &Path,
     values: &[f64],

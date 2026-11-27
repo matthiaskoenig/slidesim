@@ -34,6 +34,7 @@ const OUTSIDE: u32 = u32::MAX;
 const TOLERANCE: f64 = 1e-9;
 
 /// The pixels of a raster pyramid of a mesh and the triangle at each pixel centre of level 0.
+#[derive(Debug, Clone)]
 pub struct Raster {
     um_per_px: f64,
     origin_um: [f64; 2],

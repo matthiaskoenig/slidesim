@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use petsc::Petsc;
-use simulation::{Inputs, Simulation};
+use simulation::{Inputs, OnEveryProcess, Simulation};
 
 fn studies(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +56,7 @@ fn next_output_visits_every_output() {
     inputs.study.time.outputs = times.to_vec();
     inputs.study.time.end = 300.0;
     let petsc = Petsc::init(&[]).unwrap();
-    let mut simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+    let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     assert_eq!(simulation.output_times(), times);
     assert_eq!(simulation.time(), 0.0);
     assert_eq!(simulation.field_ids(), ["S", "P"]);
@@ -102,7 +102,7 @@ fn first_output_after_the_start_steps() {
     inputs.study.time.outputs = vec![1.0, 2.0];
     inputs.study.time.end = 2.0;
     let petsc = Petsc::init(&[]).unwrap();
-    let mut simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+    let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     assert_eq!(simulation.time(), 0.0);
     assert!(simulation.cell_values().is_none());
     assert_eq!(simulation.next_output().unwrap(), Some(0));
@@ -125,17 +125,58 @@ fn mesh_override_matches_generated() {
         inputs
     };
     let petsc = Petsc::init(&[]).unwrap();
+    // The summary and the log.
     let run = |inputs: Inputs| {
-        let mut simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+        let mut log = Vec::new();
+        let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |line| {
+            log.push(line.to_string())
+        })
+        .unwrap();
         while simulation.next_output().unwrap().is_some() {}
-        summary_without_timings(&simulation)
+        (summary_without_timings(&simulation), log)
     };
-    let generated = run(load());
+    let (generated, log) = run(load());
+    // The quality of the generated mesh, to the log only.
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0].starts_with("mesh: ") && log[0].contains("min angle"),
+        "{log:?}"
+    );
     let mut inputs = load();
     let (tagged, _) = mesh::mesh_serial(&petsc, &inputs.scene).unwrap();
     // As `slidesim mesh` writes `mesh.json` and a reader reads it.
     let json = serde_json::to_string(&tagged).unwrap();
     inputs.mesh = Some(serde_json::from_str(&json).unwrap());
-    let given = run(inputs);
+    let (given, log) = run(inputs);
     assert_eq!(given, generated);
+    assert!(log.is_empty(), "no generated mesh, nothing to log: {log:?}");
+}
+
+/// Inputs built in memory (as the browser build builds them from JSON) are checked before
+/// anything is made, with errors which every process has: a study with cells but no cell model,
+/// and a study without fields (whose time would be no field's).
+#[test]
+fn invalid_inputs_fail_on_every_process() {
+    let petsc = Petsc::init(&[]).unwrap();
+    let mut inputs = Inputs::load(&studies("cells_toy/spt.study.json")).unwrap();
+    inputs.model_sbml = None;
+    let e = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {})
+        .err()
+        .expect("no cell model");
+    assert!(e.downcast_ref::<OnEveryProcess>().is_some(), "{e:#}");
+    assert!(
+        format!("{e:#}").contains("the inputs have no cell model"),
+        "{e:#}"
+    );
+
+    let mut inputs = Inputs::load(&studies("tissue_oxygen/study.json")).unwrap();
+    inputs.study.fields.clear();
+    let e = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {})
+        .err()
+        .expect("no fields");
+    assert!(e.downcast_ref::<OnEveryProcess>().is_some(), "{e:#}");
+    assert!(
+        format!("{e:#}").contains("the study has no fields"),
+        "{e:#}"
+    );
 }

@@ -14,9 +14,18 @@ mesh = { path = "../mesh" }
 pde = { path = "../pde" }
 petsc = { path = "../petsc" }
 sbmlsim-abi.workspace = true
-sbmlsim-c.workspace = true
-sbmlsim-engine.workspace = true
+sbmlsim-c = { workspace = true, optional = true }
+sbmlsim-engine = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
+[features]
+default = ["native"]
+# The engine and the batched paths, on the cell model compiled to native code (sbmlsim-core's C
+# target and engine). Without it (the browser build) the cells run on sbmlsim-core's batched
+# kernel, a WebAssembly module the host links (`KernelCells`).
+native = ["dep:sbmlsim-c", "dep:sbmlsim-engine"]
+
 [dev-dependencies]
+serde_json = "1"
 test-support = { path = "../test-support" }

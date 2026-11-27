@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-cells = { path = "../cells" }
+cells = { path = "../cells", default-features = false }
 ceed = { path = "../ceed" }
 contracts = { path = "../contracts" }
 maps = { path = "../maps" }
@@ -18,7 +18,18 @@ pde = { path = "../pde" }
 petsc = { path = "../petsc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The store result.zarr: Zarr's filesystem store needs positioned file I/O, which WASI does not
+# have; the browser build (wasm32-wasip1) serves the arrays from memory.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
 zarrs = { version = "0.23.14", default-features = false, features = ["filesystem", "zstd"] }
+
+[features]
+default = ["native"]
+# The cell models compiled to native code (cells/native): the engine and the batched paths, and
+# `Inputs::model_sbml`. Without it (the browser build) the cells run on the batched kernel of
+# sbmlsim-core, `Inputs::kernel`.
+native = ["cells/native"]
 
 [dev-dependencies]
 jsonschema = { version = "0.30", default-features = false }

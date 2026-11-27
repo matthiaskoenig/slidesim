@@ -283,7 +283,7 @@ fn abort_world(code: i32) -> ! {
     let _ = unsafe { sys::PetscFFlush(null_mut()) };
     // SAFETY: MPI is initialized (the caller's contract). MPI_Abort does not return; if an MPI
     // implementation does, this process exits all the same.
-    unsafe { sys::MPI_Abort(sys::petsc_sys_comm_world(), code) };
+    unsafe { sys::petsc_sys_mpi_abort(sys::petsc_sys_comm_world(), code) };
     std::process::exit(code)
 }
 
@@ -292,6 +292,11 @@ fn abort_world(code: i32) -> ! {
 /// with the last object on it), an [`OwnedComm`]. To keep a communicator beyond its source, own
 /// a reference to it with [`Comm::duplicate`]. Not `Send` or `Sync` (on every MPI: MPICH's
 /// handle is an integer).
+///
+/// Every MPI call goes through a function of petsc-sys's shim: PETSc without MPI (MPIUNI, the
+/// wasm32-wasip1 build) defines the MPI functions as macros. There every communicator is the one
+/// process: rank 0 of size 1, a reduction or a gather the value itself, a broadcast or a barrier
+/// nothing.
 ///
 /// ```compile_fail
 /// let petsc = petsc::Petsc::init(&[]).unwrap();
@@ -328,7 +333,7 @@ impl<'a> Comm<'a> {
         assert!(alive(), "MPI communicator used after PetscFinalize");
         let mut rank: c_int = 0;
         // Cannot fail on a valid communicator (and MPI aborts on errors by default).
-        unsafe { sys::MPI_Comm_rank(self.0, &mut rank) };
+        unsafe { sys::petsc_sys_mpi_comm_rank(self.0, &mut rank) };
         rank as usize
     }
 
@@ -336,7 +341,7 @@ impl<'a> Comm<'a> {
     pub fn size(&self) -> usize {
         assert!(alive(), "MPI communicator used after PetscFinalize");
         let mut size: c_int = 0;
-        unsafe { sys::MPI_Comm_size(self.0, &mut size) };
+        unsafe { sys::petsc_sys_mpi_comm_size(self.0, &mut size) };
         size as usize
     }
 
@@ -595,7 +600,7 @@ impl<'a> Comm<'a> {
         error::ensure_alive("MPI_Bcast")?;
         // SAFETY: `buffer` holds `count` values of `datatype` (the caller's contract); MPI aborts
         // on errors by default, and any other return is reported.
-        let ierr = unsafe { sys::MPI_Bcast(buffer, count, datatype, root, self.0) };
+        let ierr = unsafe { sys::petsc_sys_mpi_bcast(buffer, count, datatype, root, self.0) };
         if ierr != 0 {
             return Err(Error::new(
                 sys::PETSC_ERR_MPI,
@@ -610,7 +615,7 @@ impl<'a> Comm<'a> {
         error::ensure_alive("MPI_Barrier")?;
         // SAFETY: a valid communicator while PETSc is initialized; MPI aborts on errors by
         // default, and any other return is reported.
-        let ierr = unsafe { sys::MPI_Barrier(self.0) };
+        let ierr = unsafe { sys::petsc_sys_mpi_barrier(self.0) };
         if ierr != 0 {
             return Err(Error::new(
                 sys::PETSC_ERR_MPI,
@@ -627,7 +632,7 @@ impl<'a> Comm<'a> {
         // SAFETY: one value of `datatype` in and out; MPI aborts on errors by default, and any
         // other return is reported.
         let ierr = unsafe {
-            sys::MPI_Allreduce(
+            sys::petsc_sys_mpi_allreduce(
                 (&raw const x).cast(),
                 (&raw mut y).cast(),
                 1,

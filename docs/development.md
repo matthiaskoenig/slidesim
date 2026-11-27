@@ -14,12 +14,16 @@ dependencies are in [Installation](installation.md).
 | `crates/mesher` | tagged polygons and ideal lobules to a graded, adapted triangle mesh (spade, Mmg through PETSc) |
 | `crates/maps` | Zarr v3 maps: windowed reads, bilinear samples and gradients |
 | `crates/pde` | P1 discretization, libCEED operators (QFunctions in `crates/pde/qfunctions/`), multigrid, transport, Darcy flow, mass balance, exchange with cells |
-| `crates/cells` | cell models per element: the engine path and the batched path |
+| `crates/cells` | cell models per element: the engine path and the batched path, natively (feature `native`); the batched kernel of sbmlsim-core in the browser build |
 | `crates/simulation` | a study as a simulation in memory: setup, the coupled runs of fields and cells, stepped from output time to output time, the summary and the VTU outputs |
 | `crates/slidesim` | the command line: `slidesim run` over `crates/simulation`, `slidesim mesh` |
+| `crates/slidesim-wasm` | the browser build: slidesim in `wasm32-wasip1`, a reactor with a C ABI over its memory (not a member of the native workspace) |
+| `wasm/host` | a wasmtime host of the browser build and its agreement tests with the native build (a workspace of its own) |
+| `wasm/js` | the TypeScript declarations of the live API of the browser build |
 | `crates/test-support` | helpers of the tests, among them runs under `mpiexec` |
 | `testdata/` | meshes, maps, models, contracts and example studies of the tests |
 | `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
+| `scripts/wasm/` | the build of the browser build and of what its tests need (`build.sh`) |
 | `scripts/e2e/`, `scripts/bench/` | the end-to-end runs on real slides, and the benchmarks |
 | `spike/petsc-wasm/`, `spike/mmg/` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`) |
 | `docs/` | these pages; `docs/superpowers/` holds the design documents and plans of the milestones, which are not part of the site |
@@ -72,12 +76,61 @@ Both builds, native and wasm, copy the sources and apply the patches of `scripts
 its `README.md` gives the reason and the upstream status of each patch, and the configure lines
 of the wasm build.
 
+## The browser build
+
+`crates/slidesim-wasm` is slidesim for `wasm32-wasip1` (its crate documentation lists the
+exports, [Contracts](contracts.md#live-api) the arrays). The cells run on the batched kernel of
+sbmlsim-core (`kernel/1`, see [Cell models](methods/cells.md#kernel-path)), which the host
+compiles from the SBML of the study and links to slidesim; the engine path needs native code and
+is refused. The build reads no files: the inputs are JSON, a scene whose mesh or maps are files
+needs its mesh in the inputs. The crates choose by the feature `native` of `cells` and
+`simulation` (on by default; off in the browser build) and by `target_os = "wasi"` for Zarr's
+files (`maps`, `result.zarr`). MPI is PETSc's MPIUNI there, one process: every MPI call of the
+Rust code goes through a function of `crates/petsc-sys/shim.c`, since MPIUNI defines them as
+macros.
+
+```bash
+scripts/wasm/build.sh                     # target/wasm/slidesim.wasm and what the tests need
+CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.toml
+```
+
+`build.sh` builds sbmlsim-core's `compiler.wasm` and `mathlib.wasm` at
+`SBMLSIM_CORE_KERNEL_REV` of `deps/versions.env` from a clean checkout of that revision
+(`deps/src/sbmlsim-core`) into `deps/install/sbmlsim-js`, compiles the kernel of the SPT model
+with that compiler in Node (`scripts/wasm/compile_kernel.mjs`, as a page compiles it), builds the
+native `slidesim` (`deps/install/native-check`, or `NATIVE_DEPS`) and `slidesim.wasm`, linked by
+wasi-sdk's `wasm-ld` against its wasi-libc, and writes their paths to `target/wasm/artifacts.env`.
+
+The tests of `wasm/host` run `slidesim.wasm` in wasmtime as a page runs it: the kernel
+instantiated with slidesim's memory and mathlib, slidesim's imports `slidesim_kernel.init` and
+`slidesim_kernel.advance` bound to it. `lobule_matches_native` runs the SPT study of an hour on
+the lobule (`testdata/studies/lobules/spt_1h.study.json`) natively and in wasm on the native
+mesh: the mesh arrays agree bitwise, the fields within 1e-5 of their maximum and the cell values
+within `1e-4 |y| + 1e-8` (measured: about 1e-14 relative; the math functions of mathlib and of the
+C library differ in the last bits). The others check the lobule meshed in wasm against the
+mesher's bounds and twice the same, the refusals of the engine path and of a file scene, and a
+cap of the memory (an error naming it, the host lives on). `mesher_wall_times` (ignored) prints
+the time of the mesher in wasm.
+
+Lint of the browser build's paths (the crates without `native`, for the wasm target):
+
+```bash
+. deps/install/wasi/env.sh
+CARGO_TARGET_DIR=target/wasm cargo clippy --target wasm32-wasip1 -p simulation -p cells -p maps \
+  --no-default-features --lib -- -D warnings
+CARGO_TARGET_DIR=target/wasm cargo clippy --target wasm32-wasip1 \
+  --manifest-path crates/slidesim-wasm/Cargo.toml --release -- -D warnings
+```
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request: the format, Clippy,
 the tests and the doctests, on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 with MPICH, against
-the `native-check` dependencies, which it caches (the key covers `deps/versions.env`, the build
-scripts and the patches). `.github/workflows/docs.yml` builds these pages
+the `native-check` dependencies, which it caches (the key covers `deps/versions.env` but for the
+revision of sbmlsim-core, the build scripts and the patches). The job `wasm` then runs the
+browser build on Ubuntu 24.04: the wasi dependencies and sbmlsim-core's artifacts cached,
+`scripts/wasm/build.sh`, the format and Clippy of the browser build's crates and the tests of
+`wasm/host`. `.github/workflows/docs.yml` builds these pages
 (below).
 
 ## Benchmarks and end-to-end runs

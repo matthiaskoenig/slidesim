@@ -20,16 +20,9 @@ use sbmlsim_engine::Stepper;
 use crate::balance::Balance;
 use crate::model::{Link, Outputs, QModel, Work};
 use crate::{
-    CellModel, CellSetup, CellSolver, CellStats, CellsError, OutputValue, Poison, Result, agree,
+    CellModel, CellSetup, CellSolver, CellStats, CellsError, H_MIN, MAX_ATTEMPTS, OutputValue,
+    Poison, Result, agree, failed_message, unfinished_message,
 };
-
-/// The smallest step of a cell, in the time unit of its model: a cell which needs a smaller one
-/// fails.
-const H_MIN: f64 = 1e-10;
-
-/// The most step attempts of a cell in one advance: a cell which has not reached the end of
-/// the advance after as many fails.
-const MAX_ATTEMPTS: u32 = 1_000_000;
 
 /// The QFunction of a library, of the signature of `CeedQFunctionUser`.
 type Function = unsafe extern "C" fn(
@@ -535,26 +528,10 @@ impl BatchedCells {
                     c[CONTROL_DONE] == 0.0 && c[CONTROL_FAILED] == 0.0
                 })
                 .expect("a cell which is not finished");
-            return Err(element(
-                i,
-                format!(
-                    "the cell model did not reach t = {t1} s from t = {t0} s in {MAX_ATTEMPTS} \
-                     step attempts (it is at t = {} s)",
-                    reached(i)
-                ),
-            ));
+            return Err(element(i, unfinished_message(t0, t1, reached(i))));
         }
         if let Some(i) = (0..n).find(|&i| self.control[i * CONTROL + CONTROL_FAILED] != 0.0) {
-            return Err(element(
-                i,
-                format!(
-                    "the cell model failed from t = {t0} s to t = {t1} s at t = {} s: its \
-                     rejected steps (an error above the tolerances, values which are not finite \
-                     or a singular Jacobian) made its step smaller than {H_MIN} (in the time \
-                     unit of the model), or too small to advance the time",
-                    reached(i)
-                ),
-            ));
+            return Err(element(i, failed_message(t0, t1, reached(i))));
         }
         std::mem::swap(&mut self.states, &mut self.next);
         for i in 0..n {

@@ -63,7 +63,7 @@ fn simulation_matches_cli() {
 
     let petsc = Petsc::init(&[]).unwrap();
     let inputs = Inputs::load(&study).unwrap();
-    let mut simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+    let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     while simulation.next_output().unwrap().is_some() {}
     let library = serde_json::to_string_pretty(simulation.summary()).unwrap() + "\n";
     assert_eq!(without_timings(&library), without_timings(&cli));

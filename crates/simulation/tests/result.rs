@@ -113,7 +113,7 @@ fn run(
     out: &Path,
     outputs: usize,
 ) -> (Option<CanonicalMesh>, Vec<Option<Gathered>>) {
-    let mut simulation = Simulation::new(petsc, inputs, Instant::now()).unwrap();
+    let mut simulation = Simulation::new(petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     let mut writer = ResultWriter::create(out, &simulation, &spt()).unwrap();
     let canonical = simulation.mesh().canonical().unwrap();
     let mut values = Vec::new();
@@ -210,7 +210,8 @@ fn result_metadata_is_schema_valid() {
         assert_eq!(root["zarr_format"], 3);
         root["attributes"].clone()
     };
-    let mut simulation = Simulation::new(&petsc, inputs(false), Instant::now()).unwrap();
+    let mut simulation =
+        Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
     let mut writer = ResultWriter::create(&out, &simulation, &spt()).unwrap();
     let mut written = 0;
     loop {
@@ -237,7 +238,8 @@ fn one_output_time_reads_alone() {
     let petsc = Petsc::init(&[]).unwrap();
     let out = scratch("one_output_time_reads_alone", None);
     let store = out.join(RESULT_STORE);
-    let mut simulation = Simulation::new(&petsc, inputs(false), Instant::now()).unwrap();
+    let mut simulation =
+        Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
     let mut writer = ResultWriter::create(&out, &simulation, &spt()).unwrap();
     let open = |path: &str| {
         let storage = Arc::new(FilesystemStore::new(&store).unwrap());
@@ -308,7 +310,8 @@ fn writer_follows_the_simulation() {
     c_cache();
     let petsc = Petsc::init(&[]).unwrap();
     let out = scratch("writer_follows_the_simulation", None);
-    let mut simulation = Simulation::new(&petsc, inputs(false), Instant::now()).unwrap();
+    let mut simulation =
+        Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
     let mut writer = ResultWriter::create(&out, &simulation, &spt()).unwrap();
     assert_eq!(simulation.next_output().unwrap(), Some(0));
     let e = writer.write(&simulation, 1).unwrap_err();
@@ -328,12 +331,13 @@ fn writing_does_not_change_the_run() {
     c_cache();
     let petsc = Petsc::init(&[]).unwrap();
     let out = scratch("writing_does_not_change_the_run", None);
-    let mut plain = Simulation::new(&petsc, inputs(false), Instant::now()).unwrap();
+    let mut plain = Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
     while plain.next_output().unwrap().is_some() {}
     let without: Vec<Vec<f64>> = (0..2).map(|f| plain.field_values(f).unwrap()).collect();
     let mut summary = serde_json::to_value(plain.summary()).unwrap();
     drop(plain);
-    let mut simulation = Simulation::new(&petsc, inputs(false), Instant::now()).unwrap();
+    let mut simulation =
+        Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
     let mut writer = ResultWriter::create(&out, &simulation, &spt()).unwrap();
     while let Some(index) = simulation.next_output().unwrap() {
         writer.write(&simulation, index).unwrap();
@@ -670,7 +674,7 @@ fn huge_raster_is_refused() {
     let out = scratch("huge_raster_is_refused", None);
     let mut inputs = inputs(false);
     inputs.study.result = raster_options(1e-3, 1);
-    let simulation = Simulation::new(&petsc, inputs, Instant::now()).unwrap();
+    let simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     let e = ResultWriter::create(&out, &simulation, &spt())
         .err()
         .expect("refused");

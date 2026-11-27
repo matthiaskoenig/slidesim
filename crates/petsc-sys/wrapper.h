@@ -16,6 +16,15 @@ MPI_Op petsc_sys_mpi_max(void);
 /* MPI_REPLACE, for PetscSFBcast. */
 MPI_Op petsc_sys_mpi_replace(void);
 
+/* MPI_Comm_rank, MPI_Comm_size, MPI_Allreduce, MPI_Bcast, MPI_Barrier and MPI_Abort as functions
+   (MPIUNI, PETSc's MPI of one process in the wasm build, defines them as macros). */
+int petsc_sys_mpi_comm_rank(MPI_Comm comm, int *rank);
+int petsc_sys_mpi_comm_size(MPI_Comm comm, int *size);
+int petsc_sys_mpi_allreduce(const void *send, void *receive, int count, MPI_Datatype datatype, MPI_Op op, MPI_Comm comm);
+int petsc_sys_mpi_bcast(void *buffer, int count, MPI_Datatype datatype, int root, MPI_Comm comm);
+int petsc_sys_mpi_barrier(MPI_Comm comm);
+int petsc_sys_mpi_abort(MPI_Comm comm, int code);
+
 /* MPI_Gather of one int per process, MPI_Gatherv of bytes (MPIUNI defines both as macros). */
 int petsc_sys_mpi_gather_int(int value, int *values, int root, MPI_Comm comm);
 int petsc_sys_mpi_gatherv_bytes(const void *data, int count, void *gathered, const int *counts, const int *offsets, int root, MPI_Comm comm);

@@ -32,37 +32,49 @@
 //! store has the same results as one without.
 
 use std::path::Path;
+#[cfg(not(target_os = "wasi"))]
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use contracts::{RESULT_VERSION, ResultField, ResultMeta, ResultTag};
-use mesh::{CanonicalMesh, CanonicalTag, MeshError};
+#[cfg(not(target_os = "wasi"))]
+use mesh::CanonicalTag;
+use mesh::{CanonicalMesh, MeshError};
 use petsc::Comm;
+#[cfg(not(target_os = "wasi"))]
 use serde_json::Value;
+#[cfg(not(target_os = "wasi"))]
 use zarrs::array::codec::ZstdCodec;
+#[cfg(not(target_os = "wasi"))]
 use zarrs::array::{Array, ArrayBuilder, ArraySubset, CodecOptions, DataType, data_type};
+#[cfg(not(target_os = "wasi"))]
 use zarrs::filesystem::FilesystemStore;
+#[cfg(not(target_os = "wasi"))]
 use zarrs::group::{Group, GroupBuilder};
 
 use crate::raster::Raster;
 use crate::{OnEveryProcess, Simulation};
 
 /// The name of the store in the output directory.
+#[cfg(not(target_os = "wasi"))]
 pub const RESULT_STORE: &str = "result.zarr";
 
 /// The units of every field.
 const FIELD_UNITS: &str = "mM";
 
 /// The zstd level of every array: fast, about as small as higher levels for these values.
+#[cfg(not(target_os = "wasi"))]
 const ZSTD_LEVEL: i32 = 3;
 
 /// The side of the chunks of the raster arrays, in pixels.
+#[cfg(not(target_os = "wasi"))]
 const RASTER_CHUNK: u64 = 256;
 
 /// The context of every error of the writer.
 const CANNOT_WRITE: OnEveryProcess = OnEveryProcess("cannot write result.zarr");
 
 /// Writes the store of a run, output time by output time (see the module).
+#[cfg(not(target_os = "wasi"))]
 pub struct ResultWriter {
     /// The store, on process 0.
     store: Option<Store>,
@@ -73,6 +85,7 @@ pub struct ResultWriter {
 }
 
 /// The open store on process 0.
+#[cfg(not(target_os = "wasi"))]
 struct Store {
     /// The directory of the store.
     dir: std::path::PathBuf,
@@ -89,6 +102,7 @@ struct Store {
 }
 
 /// Everything in a store ([`read_result`]).
+#[cfg(not(target_os = "wasi"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResultData {
     /// The root attributes.
@@ -110,17 +124,27 @@ pub struct ResultData {
     pub rasters: Vec<(String, Vec<Vec<f32>>)>,
 }
 
-impl ResultWriter {
-    /// Makes the store `<out>/result.zarr` of `simulation`, run from the study file `study`
-    /// (only its file name is kept): an earlier store there is removed whole, then the mesh, the
-    /// output times and the arrays of the fields and the cells are written, no output time yet
-    /// (`written` 0). Makes the canonical mesh, which the gathers of the vertex values need
-    /// first. `out` is created if missing. Collective.
+/// What `result/1` holds of a simulation apart from the values of its output times, on process 0:
+/// the root attributes before the first output time (`written` 0), the canonical finest mesh,
+/// the element ids of the cells (`cells/element`) and the raster of `result.raster` (if any).
+/// [`ResultWriter`] writes it into the store; the browser build serves it from memory.
+#[derive(Debug, Clone)]
+pub struct ResultLayout {
+    pub meta: ResultMeta,
+    pub canonical: CanonicalMesh,
+    pub cell_elements: Vec<u64>,
+    pub raster: Option<Raster>,
+}
+
+impl ResultLayout {
+    /// The layout of `simulation`, run from the study file `study` (only its file name is kept,
+    /// see the module): `Some` on process 0, `None` on the others. Makes the canonical mesh,
+    /// which the gathers of the vertex values need first. Collective.
     ///
     /// Errors (on every process): a tag or a cell value whose name cannot name an array (empty,
-    /// with a `/`, `.` or `..`, starting with `__`, or a cell value `element`), the gathers, the
-    /// store cannot be written.
-    pub fn create(out: &Path, simulation: &Simulation, study: &Path) -> Result<ResultWriter> {
+    /// with a `/`, `.` or `..`, starting with `__`, or a cell value `element`), the gathers, a
+    /// raster which cannot be made.
+    pub fn new(simulation: &Simulation, study: &Path) -> Result<Option<ResultLayout>> {
         let comm = simulation.mesh().finest().comm();
         let names = simulation.cell_value_names();
         check_names(simulation.mesh().tags(), &names).map_err(|e| e.context(CANNOT_WRITE))?;
@@ -141,7 +165,7 @@ impl ResultWriter {
         };
         let study_data = simulation.study();
         let times = study_data.time.outputs.clone();
-        let store = match (canonical, cell_elements) {
+        let layout = match (canonical, cell_elements) {
             (Some(canonical), Some(cell_elements)) => {
                 let raster = study_data
                     .result
@@ -150,15 +174,15 @@ impl ResultWriter {
                     .map(|r| Raster::new(&canonical, r.um_per_px, r.origin_um, r.levels))
                     .transpose()
                     .context("cannot make the raster");
-                Some(raster.and_then(|raster| {
+                Some(raster.map(|raster| {
                     let meta = ResultMeta {
                         version: RESULT_VERSION.to_string(),
                         study: file_name(study),
                         scene: file_name(&study_data.scene),
                         refinements: study_data.mesh.refinements,
-                        times: times.clone(),
-                        written: 0,
                         complete: times.is_empty(),
+                        times,
+                        written: 0,
                         fields: simulation
                             .field_ids()
                             .into_iter()
@@ -179,17 +203,43 @@ impl ResultWriter {
                             .collect(),
                         raster: raster.as_ref().map(Raster::meta),
                     };
-                    Store::create(
-                        &out.join(RESULT_STORE),
+                    ResultLayout {
                         meta,
-                        &canonical,
+                        canonical,
                         cell_elements,
                         raster,
-                    )
+                    }
                 }))
             }
             _ => None,
         };
+        on_every_process(&comm, layout.transpose())
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl ResultWriter {
+    /// Makes the store `<out>/result.zarr` of `simulation`, run from the study file `study`
+    /// (only its file name is kept): an earlier store there is removed whole, then the mesh, the
+    /// output times and the arrays of the fields and the cells are written, no output time yet
+    /// (`written` 0). Makes the canonical mesh, which the gathers of the vertex values need
+    /// first. `out` is created if missing. Collective.
+    ///
+    /// Errors (on every process): a tag or a cell value whose name cannot name an array (empty,
+    /// with a `/`, `.` or `..`, starting with `__`, or a cell value `element`), the gathers, the
+    /// store cannot be written.
+    pub fn create(out: &Path, simulation: &Simulation, study: &Path) -> Result<ResultWriter> {
+        let comm = simulation.mesh().finest().comm();
+        let times = simulation.study().time.outputs.clone();
+        let store = ResultLayout::new(simulation, study)?.map(|layout| {
+            Store::create(
+                &out.join(RESULT_STORE),
+                layout.meta,
+                &layout.canonical,
+                layout.cell_elements,
+                layout.raster,
+            )
+        });
         let store = on_every_process(&comm, store.transpose())?;
         Ok(ResultWriter {
             store,
@@ -253,10 +303,12 @@ impl ResultWriter {
 }
 
 /// An error of the writer of the message `message`, which every process has.
+#[cfg(not(target_os = "wasi"))]
 fn cannot_write(message: String) -> anyhow::Error {
     anyhow!(message).context(CANNOT_WRITE)
 }
 
+#[cfg(not(target_os = "wasi"))]
 impl Store {
     /// Makes the store in the directory `dir` (removed first, if there): the root attributes
     /// `meta`, the mesh `canonical`, the output times and the arrays of the fields and of the
@@ -443,6 +495,7 @@ impl Store {
 }
 
 /// `values`, the row `t` of the `[T, n]` array `array` (its chunk `[t, 0]`), on this thread.
+#[cfg(not(target_os = "wasi"))]
 fn store_row(array: &Array<FilesystemStore>, t: u64, values: &[f64]) -> Result<()> {
     if values.is_empty() {
         return Ok(());
@@ -453,6 +506,7 @@ fn store_row(array: &Array<FilesystemStore>, t: u64, values: &[f64]) -> Result<(
 }
 
 /// The codec options of the writer: one thread, beside the processes of the run on their cores.
+#[cfg(not(target_os = "wasi"))]
 fn one_thread() -> CodecOptions {
     CodecOptions::default().with_concurrent_target(1)
 }
@@ -460,6 +514,7 @@ fn one_thread() -> CodecOptions {
 /// The array `path` of `storage` of shape `shape`, chunks `chunks` (each at least 1) and data
 /// type `data_type`, zstd compressed, its metadata written; floats filled with NaN, integers
 /// with 0.
+#[cfg(not(target_os = "wasi"))]
 fn new_array(
     storage: &Arc<FilesystemStore>,
     path: &str,
@@ -548,6 +603,7 @@ fn on_every_process<T>(comm: &Comm, local: Result<Option<T>>) -> Result<Option<T
 /// attributes, checked ([`ResultMeta::check`]), and every array they name. Not collective.
 ///
 /// Errors: the store cannot be read, or does not hold what its attributes name.
+#[cfg(not(target_os = "wasi"))]
 pub fn read_result(path: &Path) -> Result<ResultData> {
     let context = || format!("cannot read {}", path.display());
     let storage = Arc::new(FilesystemStore::new(path).with_context(context)?);
@@ -639,6 +695,7 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
 
 /// The values of the whole array `path` of `storage`, row by row; its last dimension is
 /// `columns` (1 for a one dimensional array).
+#[cfg(not(target_os = "wasi"))]
 fn read_all<T: zarrs::array::ElementOwned>(
     storage: &Arc<FilesystemStore>,
     path: &str,

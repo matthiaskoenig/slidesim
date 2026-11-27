@@ -13,6 +13,12 @@
 //!   QFunction of the model (sbmlsim-core's QFunction target, a Rosenbrock integrator per
 //!   point), the fast path, ready for GPUs. [`Cells`] is the path the spec chooses
 //!   ([`contracts::CellsSpec::solver`]).
+//! - Both need native code: the C target compiles the model with a C compiler at the start of a
+//!   run. They are the feature `native` (on by default). Without it, in the browser build of
+//!   slidesim (wasm32-wasip1, `crates/slidesim-wasm`), the cells run on the batched kernel of
+//!   sbmlsim-core (`kernel/1`, [`KernelLayout`]: the model and RODAS4 in a WebAssembly module
+//!   which the host compiles and links), `KernelCells`, for `"solver": "batched"`; `"engine"`
+//!   is refused ([`CellsError::EngineNeedsNative`]).
 //!
 //! Units: time in s (the model's time unit is `CellsSpec::time_unit_s` s), concentrations in
 //! the model's units (mM for the fields of slidesim), lengths in um. The model keeps its own
@@ -29,9 +35,13 @@
 //! the same as where they were (`balance`). The first cell which fails is the first in the
 //! order of the processes and their cells, wherever it was advanced.
 
+#[cfg(feature = "native")]
 mod balance;
+#[cfg(feature = "native")]
 mod batched;
+#[cfg(feature = "native")]
 mod engine;
+mod kernel;
 mod model;
 mod parameters;
 
@@ -40,8 +50,13 @@ use contracts::{CellSolverKind, CellsSpec};
 use petsc::Comm;
 use petsc::sys::PetscInt;
 
+#[cfg(feature = "native")]
 pub use batched::BatchedCells;
+#[cfg(feature = "native")]
 pub use engine::EngineCells;
+#[cfg(not(feature = "native"))]
+pub use kernel::KernelCells;
+pub use kernel::KernelLayout;
 pub use model::CellModel;
 pub use parameters::CellSetup;
 
@@ -89,15 +104,21 @@ pub trait CellSolver {
 #[derive(Debug)]
 pub enum Cells {
     /// [`CellSolverKind::Engine`].
+    #[cfg(feature = "native")]
     Engine(Box<EngineCells>),
     /// [`CellSolverKind::Batched`].
+    #[cfg(feature = "native")]
     Batched(Box<BatchedCells>),
+    /// [`CellSolverKind::Batched`] without native code: on the batched kernel of sbmlsim-core.
+    #[cfg(not(feature = "native"))]
+    Kernel(Box<KernelCells>),
 }
 
 impl Cells {
     /// The cells of `setup` with the model `model`, compiled and checked for `spec`
     /// ([`CellModel::new`]), on the path of `spec`: [`EngineCells::with_model`] or
     /// [`BatchedCells::with_model`] (on `ceed`). Collective.
+    #[cfg(feature = "native")]
     pub fn new(
         setup: &CellSetup,
         spec: &CellsSpec,
@@ -114,10 +135,35 @@ impl Cells {
         })
     }
 
+    /// The cells of `setup` with the model `model`, the kernel checked for `spec`
+    /// ([`CellModel::from_kernel`]), on the batched kernel (`KernelCells::with_model`); `ceed`
+    /// is not used. Collective.
+    ///
+    /// Errors: [`CellsError::EngineNeedsNative`] for the engine path, and those of
+    /// `KernelCells::with_model`.
+    #[cfg(not(feature = "native"))]
+    pub fn new(
+        setup: &CellSetup,
+        spec: &CellsSpec,
+        model: &CellModel,
+        _ceed: &Ceed,
+    ) -> Result<Cells> {
+        match spec.solver {
+            CellSolverKind::Engine => Err(CellsError::EngineNeedsNative),
+            CellSolverKind::Batched => Ok(Cells::Kernel(Box::new(KernelCells::with_model(
+                setup, spec, model,
+            )?))),
+        }
+    }
+
     fn solver(&self) -> &dyn CellSolver {
         match self {
+            #[cfg(feature = "native")]
             Cells::Engine(cells) => cells.as_ref(),
+            #[cfg(feature = "native")]
             Cells::Batched(cells) => cells.as_ref(),
+            #[cfg(not(feature = "native"))]
+            Cells::Kernel(cells) => cells.as_ref(),
         }
     }
 }
@@ -137,8 +183,12 @@ impl CellSolver for Cells {
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
         match self {
+            #[cfg(feature = "native")]
             Cells::Engine(cells) => cells.advance(t0, t1, blood),
+            #[cfg(feature = "native")]
             Cells::Batched(cells) => cells.advance(t0, t1, blood),
+            #[cfg(not(feature = "native"))]
+            Cells::Kernel(cells) => cells.advance(t0, t1, blood),
         }
     }
 
@@ -153,6 +203,33 @@ impl CellSolver for Cells {
     fn outputs(&self, out: &mut Vec<f64>) {
         self.solver().outputs(out);
     }
+}
+
+/// The smallest step of a cell on the batched paths, in the time unit of its model: a cell which
+/// needs a smaller one fails.
+pub(crate) const H_MIN: f64 = 1e-10;
+
+/// The most step attempts of a cell in one advance on the batched paths: a cell which has not
+/// reached the end of the advance after as many fails.
+pub(crate) const MAX_ATTEMPTS: u32 = 1_000_000;
+
+/// The message of a cell of a batched path which did not reach `t1` (s) from `t0` in
+/// [`MAX_ATTEMPTS`] step attempts, at `reached` (s).
+pub(crate) fn unfinished_message(t0: f64, t1: f64, reached: f64) -> String {
+    format!(
+        "the cell model did not reach t = {t1} s from t = {t0} s in {MAX_ATTEMPTS} step attempts \
+         (it is at t = {reached} s)"
+    )
+}
+
+/// The message of a cell of a batched path which failed from `t0` to `t1` (s) at `reached`.
+pub(crate) fn failed_message(t0: f64, t1: f64, reached: f64) -> String {
+    format!(
+        "the cell model failed from t = {t0} s to t = {t1} s at t = {reached} s: its rejected \
+         steps (an error above the tolerances, values which are not finite or a singular \
+         Jacobian) made its step smaller than {H_MIN} (in the time unit of the model), or too \
+         small to advance the time"
+    )
 }
 
 /// A value of the cells which [`CellSolver::outputs`] writes.
@@ -202,6 +279,10 @@ pub enum CellsError {
     /// The model cannot be translated, compiled or loaded. The same on every process.
     #[error("cell model: {message}")]
     Model { message: String },
+    /// The engine path in a build without native code (the browser build, which runs the
+    /// batched path on the kernel of sbmlsim-core).
+    #[error(r#"cells.solver "engine" needs native code; the browser build runs "batched""#)]
+    EngineNeedsNative,
     /// A model the batched path does not integrate: `feature` names what it has. The same on
     /// every process.
     #[error(

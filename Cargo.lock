@@ -270,6 +270,8 @@ dependencies = [
  "sbmlsim-abi",
  "sbmlsim-c",
  "sbmlsim-engine",
+ "serde",
+ "serde_json",
  "test-support",
  "thiserror",
 ]

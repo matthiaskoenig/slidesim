@@ -56,6 +56,24 @@ when rejected steps (an error estimate above the tolerances, values which are no
 singular iteration matrix) make its next step smaller than 1e-10 time units of the model or too
 small to advance the time, or after \(10^6\) step attempts in one advance.
 
+### Kernel path
+
+The browser build runs the batched path without native code: on the batched kernel of
+sbmlsim-core (`kernel/1`), the model with the same RODAS4 integrator and step control in one
+WebAssembly module, which the host compiles from the SBML of the study (`compileKernel` of
+sbmlsim-core's compiler) and links to slidesim with slidesim's memory. One call advances every
+cell of the process (one process in the browser), with the same `H_MIN`, step attempts and
+failures as the QFunction, so a cell takes the steps it takes on the batched path; its math is
+that of sbmlsim-core's mathlib, which agrees with the C library within the last bits (the run of
+an hour of the SPT lobule agrees with the native one within about 1e-14 relatively). Two
+differences: the kernel initializes the cells (a parameter of the cell fixed, every other one its
+SBML value and initial assignment), so a parameter of `cells.parameters` which is a state of the
+model (the initial amount of a species) is written into the state after the initialization and
+the initial assignments which read that state are not evaluated again; and an output of
+`cells.outputs` which is the target of an assignment rule keeps the value the initialization
+computed, since the kernel exports no evaluation of the rules: right for a rule of parameters
+alone (the protein of the SPT model), constant otherwise. `"solver": "engine"` is refused there.
+
 ## Strang splitting
 
 The time from one output time to the next is split into equal split steps of at most

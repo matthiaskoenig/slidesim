@@ -2,8 +2,8 @@
 //!
 //! Loads the inputs of the study ([`Inputs::load`]: the study, its scene and its cell model) and
 //! makes the [`Simulation`] (every check, the cell model compiled, the mesh, the maps, the flow,
-//! the problems of the fields and the cells; the quality of a generated mesh printed in one
-//! line). Then process 0 removes the outputs `<out>/<field id>_<index>.vtu` and
+//! the problems of the fields and the cells; its log, the quality of a generated mesh in one line,
+//! printed). Then process 0 removes the outputs `<out>/<field id>_<index>.vtu` and
 //! `<out>/cells_<index>.vtu` of an earlier run (`pressure.vtu` and `velocity.vtu` included;
 //! other files in `<out>` stay) and prints the notes of the simulation
 //! ([`Simulation::notes`]: fields without a mass balance over the output intervals, pressure
@@ -29,7 +29,8 @@ use simulation::{Inputs, ResultWriter, Simulation};
 /// the module documentation), for a process started at `started`. Collective.
 pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Result<()> {
     let inputs = Inputs::load(study_path)?;
-    let mut simulation = Simulation::new(petsc, inputs, started)?;
+    // The log of the simulation (the quality of a generated mesh, on process 0) to stdout.
+    let mut simulation = Simulation::new(petsc, inputs, started, &mut |line| println!("{line}"))?;
     let comm = petsc.comm();
     // Refuse what the result store cannot hold before anything is written or removed.
     simulation.check_result_options()?;

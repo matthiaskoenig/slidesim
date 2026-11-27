@@ -350,3 +350,34 @@ is the number of output times reached so far, as in `result/1` where an index `t
 complete. `meshQuality()` is the quality report of a generated mesh, `null` for a loaded mesh. `lobuleScene(params, tags)` builds a lobule `scene/1`; the tag names
 are supplied by the caller (the lobule demo uses the area `tissue`, the edges `central_wall`, `portal_wall` and `field_cut`, and the map `zonation`); slidesim fixes no names.
 `CreateOptions.memory.maximumPages` caps the wasm memory, exceeding it is an `Error`.
+
+Under the live API lies the C ABI of `slidesim.wasm` (`crates/slidesim-wasm`, a WASI reactor,
+`_initialize` first), over its exported memory, pointers and lengths `u32` byte offsets and
+counts:
+
+| Export | Meaning |
+| --- | --- |
+| `slidesim_alloc(len) -> ptr`, `slidesim_free(ptr, len)` | memory for the caller's bytes |
+| `slidesim_create(ptr, len) -> i32` | the simulation of the JSON `{"scene", "study", "kernel", "mesh"?}`: its handle, -1 with the error |
+| `slidesim_next_output(h) -> i32` | steps to the next output time: its index (the first, at time 0, without a step), -1 when none is left, -2 with the error |
+| `slidesim_time(h) -> f64` | the time reached (s) |
+| `slidesim_array(h, name_ptr, name_len) -> ptr`, `slidesim_array_len() -> u32` | the bytes of an array now, valid until the next `slidesim_array`; 0 with the error |
+| `slidesim_error_ptr() -> ptr`, `slidesim_error_len() -> u32` | the message of the last error (UTF-8) |
+| `slidesim_destroy(h)` | frees the simulation |
+
+`scene` and `study` are the documents, `kernel` the `kernel.json` of the batched kernel of the
+cell model (required with `cells`; the host compiles `kernel.wasm` from the SBML with
+sbmlsim-core's `compiler.wasm` and instantiates it with slidesim's memory and `mathlib.wasm`),
+`mesh` a `mesh.json` of `slidesim mesh` in place of the scene's mesh. The build reads no files:
+a scene whose mesh (without `mesh`) or maps are files is an error naming the file.
+`slidesim.wasm` imports `slidesim_kernel.init` and `slidesim_kernel.advance`, which the host binds
+to the kernel's `sbmlsim_kernel_init` and `sbmlsim_kernel_advance` once the kernel is
+instantiated. The arrays are the names of `result/1`, little endian (`fields/<id>`,
+`cells/<value>` and `raster/<field>/<level>` the row now), and `meta` (the `ResultMeta`, `written`
+and `complete` as above), `summary` (`summary.json`) and `quality` (`null` for a mesh of the
+inputs) as JSON, and `log`: what the simulation reported, UTF-8, one line each (the quality line
+of a generated mesh, which `slidesim run` prints); slidesim writes nothing to stdout or stderr.
+A memory growth past the host's cap fails the call (a trap or an error); Mmg, the remesher of the
+mesher, caps itself at 2 GiB in wasm (a constant of
+`scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`; PETSc's adaptor sets no
+`MMG2D_IPARAM_mem`), so a lower cap of the host is the one that holds.

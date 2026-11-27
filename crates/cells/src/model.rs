@@ -1,19 +1,29 @@
 //! The cell model of a study: compiled once, loaded by every process, and checked against the
 //! spec ([`CellModel`]), the links of its species to the blood, and the outputs of a cell
-//! ([`Outputs`]), which both paths share.
+//! ([`Outputs`]), which every path shares.
 
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::io::Write as _;
+#[cfg(feature = "native")]
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use contracts::{CellSolverKind, CellsSpec};
+#[cfg(feature = "native")]
 use petsc::Comm;
 use sbmlsim_abi::{EntityKind, ModelDescription};
+#[cfg(feature = "native")]
 use sbmlsim_c::{CError, CModel, Library, QSource};
+#[cfg(feature = "native")]
 use sbmlsim_engine::ModelFns;
 
-use crate::{CellsError, OutputValue, Result, agree};
+#[cfg(feature = "native")]
+use crate::agree;
+#[cfg(not(feature = "native"))]
+use crate::kernel::KernelLayout;
+use crate::{CellsError, OutputValue, Result};
 
 /// How an output is computed from a cell.
 #[derive(Debug, Clone, Copy)]
@@ -57,25 +67,77 @@ impl Volume {
 /// study, before anything is solved. Both paths read the model of sbmlsim-core's C target (the
 /// engine path integrates it, the batched path initializes its cells and evaluates their rules
 /// with it); for the batched path ([`CellSolverKind::Batched`]) it also holds the QFunction of
-/// the model.
+/// the model. Without the feature `native`, the batched kernel of the model instead
+/// ([`CellModel::from_kernel`]), which the host compiled and links.
 pub struct CellModel {
+    #[cfg(feature = "native")]
     pub(crate) model: CModel,
     pub(crate) description: Arc<ModelDescription>,
     pub(crate) links: Vec<Link>,
     /// For the batched path.
+    #[cfg(feature = "native")]
     pub(crate) qfunction: Option<Arc<QModel>>,
+    /// The layout of the points of the kernel.
+    #[cfg(not(feature = "native"))]
+    pub(crate) kernel: KernelLayout,
 }
 
 impl std::fmt::Debug for CellModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CellModel")
-            .field("id", &self.description.id)
-            .field("batched", &self.qfunction.is_some())
-            .finish_non_exhaustive()
+        let mut debug = f.debug_struct("CellModel");
+        debug.field("id", &self.description.id);
+        #[cfg(feature = "native")]
+        debug.field("batched", &self.qfunction.is_some());
+        debug.finish_non_exhaustive()
     }
 }
 
+/// Both tolerances of `spec` are positive.
+fn check_tolerances(spec: &CellsSpec) -> Result<()> {
+    for (what, value) in [("rtol", spec.rtol), ("atol", spec.atol)] {
+        if !(value.is_finite() && value > 0.0) {
+            return Err(CellsError::Tolerance { what, value });
+        }
+    }
+    Ok(())
+}
+
+/// The checks of the model `description` against `spec`, on every path ([`CellModel::new`]):
+/// its links.
+fn check(description: &ModelDescription, spec: &CellsSpec) -> Result<Vec<Link>> {
+    let links = links(description, spec)?;
+    check_volumes(description, spec)?;
+    check_parameters(description, spec)?;
+    check_outputs(description, spec)?;
+    Ok(links)
+}
+
 impl CellModel {
+    /// The cell model of the batched kernel `kernel` (`kernel.json` of sbmlsim-core, which the
+    /// host compiled from the SBML of the study and links), checked as `spec` uses it, as
+    /// [`CellModel::new`] checks a model: on [`KernelLayout::model`]. Without the feature
+    /// `native`.
+    ///
+    /// Errors: [`CellsError::EngineNeedsNative`] for the engine path; [`CellsError::Model`] for
+    /// a kernel whose states or parameters are not those of its model; [`CellsError::Unsupported`]
+    /// for a model the kernel does not integrate (events, delays, algebraic rules), and the
+    /// errors of the checks of [`CellModel::new`].
+    #[cfg(not(feature = "native"))]
+    pub fn from_kernel(spec: &CellsSpec, kernel: KernelLayout) -> Result<CellModel> {
+        if spec.solver == CellSolverKind::Engine {
+            return Err(CellsError::EngineNeedsNative);
+        }
+        check_tolerances(spec)?;
+        kernel.check()?;
+        let description = Arc::new(kernel.model.clone());
+        let links = check(&description, spec)?;
+        Ok(CellModel {
+            description,
+            links,
+            kernel,
+        })
+    }
+
     /// The model `model_sbml` (an SBML document), translated to C and compiled once (`sbmlsim_c`,
     /// cached across processes and runs, see [`sbmlsim_c::Library::build`]: process 0 first,
     /// then the others, which load it from the cache, see `first_on_root`), and
@@ -89,18 +151,12 @@ impl CellModel {
     /// has) and [`CellsError::Invalid`] for the checks; on every process,
     /// [`CellsError::Model`] if the model cannot be translated, compiled or loaded, and
     /// [`CellsError::Unsupported`] for a model the batched path does not integrate (events,
-    /// delays, algebraic rules).
+    /// delays, algebraic rules). With the feature `native`.
+    #[cfg(feature = "native")]
     pub fn new(comm: &Comm, spec: &CellsSpec, model_sbml: &str) -> Result<CellModel> {
-        for (what, value) in [("rtol", spec.rtol), ("atol", spec.atol)] {
-            if !(value.is_finite() && value > 0.0) {
-                return Err(CellsError::Tolerance { what, value });
-            }
-        }
+        check_tolerances(spec)?;
         let (model, description) = first_on_root(comm, || compile(model_sbml))?;
-        let links = links(&description, spec)?;
-        check_volumes(&description, spec)?;
-        check_parameters(&description, spec)?;
-        check_outputs(&description, spec)?;
+        let links = check(&description, spec)?;
         let qfunction = match spec.solver {
             CellSolverKind::Batched => Some(Arc::new(first_on_root(comm, || {
                 QModel::new(model_sbml, &description)
@@ -120,6 +176,7 @@ impl CellModel {
 /// compiled models is compiled by process 0 alone, and the others load it from the cache,
 /// instead of every process compiling it at once. The error of process 0 on every process (the
 /// others do not build then), else the first error of the others. Collective.
+#[cfg(feature = "native")]
 fn first_on_root<T>(comm: &Comm, build: impl Fn() -> Result<T>) -> Result<T> {
     let first = (comm.rank() == 0).then(&build);
     let local = match agree(comm, first.transpose())? {
@@ -132,6 +189,7 @@ fn first_on_root<T>(comm: &Comm, build: impl Fn() -> Result<T>) -> Result<T> {
 /// The QFunction of a model for the batched path ([`sbmlsim_c::generate_qfunction`]): the model
 /// with the Rosenbrock integrator RODAS4, step attempts per point until it is done or failed, at
 /// most a number per application (`RosenbrockContext::attempts`).
+#[cfg(feature = "native")]
 pub(crate) struct QModel {
     pub(crate) q: QSource,
     /// The library of [`QSource::host_code`], whose [`QSource::host_symbol`] the CPU backends of
@@ -142,6 +200,7 @@ pub(crate) struct QModel {
     pub(crate) source: PathBuf,
 }
 
+#[cfg(feature = "native")]
 impl QModel {
     /// The QFunction of `sbml`, whose model of the C target is the one of `description`.
     ///
@@ -191,6 +250,7 @@ impl QModel {
 
 /// Writes `text` into the file `path` unless it holds it already: into a file of this process
 /// beside it, renamed into place, so that another process never reads a part of it.
+#[cfg(feature = "native")]
 fn write_once(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     if fs::read(path).is_ok_and(|bytes| bytes == text.as_bytes()) {
         return Ok(());
@@ -207,17 +267,22 @@ fn write_once(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 /// The outputs of the cells ([`crate::CellSolver::output_values`]) and how each is computed from
 /// the state and the parameters of a cell, the same on both paths.
 pub(crate) struct Outputs {
+    #[cfg(feature = "native")]
     model: CModel,
     values: Vec<OutputValue>,
     sources: Vec<Source>,
     /// Whether an output is the target of an assignment rule.
+    #[cfg(feature = "native")]
     rules: bool,
     /// The number of constants of the model, behind its parameters.
+    #[cfg(feature = "native")]
     n_constants: usize,
 }
 
-/// The vectors of the model for [`Outputs::push`], kept from one cell to the next.
+/// The vectors of the model for [`Outputs::push`], kept from one cell to the next (unused
+/// without native code).
 #[derive(Debug, Default)]
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub(crate) struct Work {
     y: Vec<f64>,
     p: Vec<f64>,
@@ -228,10 +293,13 @@ impl Outputs {
     pub(crate) fn new(model: &CellModel, spec: &CellsSpec) -> Outputs {
         let (values, sources) = outputs(&model.description, spec);
         Outputs {
+            #[cfg(feature = "native")]
             model: model.model.clone(),
+            #[cfg(feature = "native")]
             rules: sources.iter().any(|s| matches!(s, Source::Parameter(_))),
             values,
             sources,
+            #[cfg(feature = "native")]
             n_constants: model.description.n_constants as usize,
         }
     }
@@ -252,6 +320,12 @@ impl Outputs {
     /// targets of the rules, which is why the engine calls it after every change of the
     /// parameters. So a first call computes the constants of the cell's parameters, and a
     /// second one the targets of the rules with them.
+    ///
+    /// Without the feature `native` there is no model to evaluate the rules with: the target of
+    /// a rule is its value in `parameters`, which the kernel's initialization computed
+    /// (`sbmlsim_kernel_init`, from the initial state). That is its value at any time for a rule
+    /// of parameters alone (such as the protein of the SPT model), not for a rule of the state
+    /// or the time (the kernel of `kernel/1` exports no evaluation of the rules).
     pub(crate) fn push(
         &self,
         t: f64,
@@ -260,6 +334,27 @@ impl Outputs {
         work: &mut Work,
         out: &mut Vec<f64>,
     ) {
+        let p = self.rules(t, state, parameters, work);
+        // The rules may write states too; the outputs of the states stay those of the
+        // integration.
+        for source in &self.sources {
+            out.push(match *source {
+                Source::State(i, volume) => state[i] / volume.of(p, state),
+                Source::Parameter(k) => p[k],
+            });
+        }
+    }
+
+    /// The parameters of a cell with the targets of the rules evaluated at its state (see
+    /// [`Outputs::push`]), in `work`.
+    #[cfg(feature = "native")]
+    fn rules<'w>(
+        &self,
+        t: f64,
+        state: &[f64],
+        parameters: &[f64],
+        work: &'w mut Work,
+    ) -> &'w [f64] {
         let Work { y, p } = work;
         p.clear();
         p.extend_from_slice(parameters);
@@ -274,14 +369,20 @@ impl Outputs {
             self.model.assign(t, y, p);
             self.model.end_parameters();
         }
-        // The rules may write states too; the outputs of the states stay those of the
-        // integration.
-        for source in &self.sources {
-            out.push(match *source {
-                Source::State(i, volume) => state[i] / volume.of(p, state),
-                Source::Parameter(k) => p[k],
-            });
-        }
+        p
+    }
+
+    /// The parameters of a cell as they are: without native code no rule is evaluated (see
+    /// [`Outputs::push`]).
+    #[cfg(not(feature = "native"))]
+    fn rules<'a>(
+        &self,
+        _t: f64,
+        _state: &[f64],
+        parameters: &'a [f64],
+        _work: &mut Work,
+    ) -> &'a [f64] {
+        parameters
     }
 }
 
@@ -351,6 +452,7 @@ fn outputs(description: &ModelDescription, spec: &CellsSpec) -> (Vec<OutputValue
 }
 
 /// The model of `sbml` compiled to native code, and its description.
+#[cfg(feature = "native")]
 fn compile(sbml: &str) -> Result<(CModel, Arc<ModelDescription>)> {
     let model_error = |e: sbmlsim_c::CError| CellsError::Model {
         message: e.to_string(),

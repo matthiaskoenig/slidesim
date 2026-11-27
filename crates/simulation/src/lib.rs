@@ -8,7 +8,8 @@
 //! section against the study and the scene, translates the cell model to C, compiles it and
 //! checks it against the study (before anything is solved), makes the mesh (distributed over the
 //! processes, refined `mesh.refinements` times; tagged polygons and lobules meshed by process 0
-//! first, the quality of such a mesh printed in one line on stdout, or the mesh of the inputs),
+//! first, the quality of such a mesh reported in one line to the caller's log, or the mesh of the
+//! inputs),
 //! reads the maps over the cells of each process (the zonation map of lobules computed there,
 //! `zonation_map`), solves the Darcy [`Flow`] if the study has a `perfusion` section, and
 //! builds one [`Problem`] per field and, with `cells`, the cells and their exchange with the
@@ -33,7 +34,17 @@
 //!
 //! [`ResultWriter`] writes the state of each output time into the store `result/1`,
 //! `<out>/result.zarr`, for viewers: the canonical finest mesh, the fields at its vertices and
-//! the cell values per element (see its module); [`read_result`] reads such a store.
+//! the cell values per element (see its module); [`read_result`] reads such a store. Neither is
+//! built for WASI (Zarr's filesystem store needs positioned file I/O): the browser build serves
+//! the arrays from memory, from a [`ResultLayout`] and the values of each output time.
+//!
+//! The library prints nothing: what it reports goes to the log the caller gives
+//! [`Simulation::new`] (`slidesim run` prints it, the browser build keeps it as its array `log`),
+//! and the notes of a run are the caller's to show ([`Simulation::notes`]).
+//!
+//! With the feature `native` (the default) the cell model is the SBML of the study, compiled to
+//! native code at the start ([`Inputs::model_sbml`]); without it (the browser build) the batched
+//! kernel of the model which the host compiled and links (`Inputs::kernel`, `cells::KernelCells`).
 //!
 //! Every process calls the functions marked collective, in the same order. An error which every
 //! process meets at the same point carries the context [`OnEveryProcess`]; after any other
@@ -51,7 +62,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use ceed::Ceed;
 use cells::CellModel;
 use contracts::{LobuleSpec, MeshSource, Scene, Study};
@@ -64,6 +75,8 @@ use petsc::{Comm, Petsc};
 use crate::coupled::Coupled;
 pub use crate::inputs::Inputs;
 use crate::phases::Phases;
+pub use crate::result::ResultLayout;
+#[cfg(not(target_os = "wasi"))]
 pub use crate::result::{RESULT_STORE, ResultData, ResultWriter, read_result};
 pub use crate::summary::{
     Attempts, BalanceSummary, CellsSummary, FieldSummary, InflowSummary, IslandsSummary,
@@ -137,27 +150,26 @@ pub struct Simulation<'p> {
 impl<'p> Simulation<'p> {
     /// The simulation of `inputs` on the processes of `petsc`, for a process started at
     /// `started` (the start of the phase `setup` of the summary): every check, the setup and the
-    /// flow (see the crate documentation). Prints the quality of a mesh it generates in one
-    /// line on stdout ([`quality_line`], on process 0). Collective.
+    /// flow (see the crate documentation). Gives `log` the quality of a mesh it generates in one
+    /// line ([`quality_line`], on process 0), as soon as it is made. Collective.
     ///
-    /// Errors: those of [`Inputs::load`]'s checks, the cell model (a study with `cells` and no
-    /// `inputs.model_sbml`, or one which does not compile or does not fit the study), the mesh
-    /// (with the context [`OnEveryProcess`] if every process has the error, see
+    /// Errors: those of [`Inputs::load`]'s checks; a study without fields, or with `cells` and
+    /// no cell model in the inputs (both with [`OnEveryProcess`]); the cell model (one which
+    /// does not compile or does not fit the study), the mesh (with the context
+    /// [`OnEveryProcess`] if every process has the error, see
     /// [`mesh::MeshError::is_collective`]), the maps, the flow, the problems and the cells.
-    pub fn new(petsc: &'p Petsc, inputs: Inputs, started: Instant) -> Result<Simulation<'p>> {
-        let Inputs {
-            study,
-            scene,
-            model_sbml,
-            mesh,
-        } = inputs;
-        inputs::check(&study, &scene)?;
+    pub fn new(
+        petsc: &'p Petsc,
+        inputs: Inputs,
+        started: Instant,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Simulation<'p>> {
+        inputs::check_inputs(&inputs)?;
         let comm = petsc.comm();
-        let model = match (&study.cells, &model_sbml) {
-            (Some(spec), Some(sbml)) => Some(CellModel::new(&comm, spec, sbml).context("cells")?),
-            (Some(_), None) => bail!("cells: the inputs have no cell model"),
-            (None, _) => None,
-        };
+        let model = cell_model(&comm, &inputs)?;
+        let Inputs {
+            study, scene, mesh, ..
+        } = inputs;
         let mesh = match &mesh {
             Some(tagged) => {
                 ensure!(
@@ -178,7 +190,7 @@ impl<'p> Simulation<'p> {
             }
         })?;
         if let Some((_, quality)) = mesh.generated() {
-            println!("{}", quality_line(quality));
+            log(&quality_line(quality));
         }
         let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
         let mut phases = Phases::new(comm, started);
@@ -343,7 +355,7 @@ impl<'p> Simulation<'p> {
 
     /// The time the fields reached (s): 0 at the start, an output time after a
     /// [`Simulation::next_output`] which returned its index, `time.end` after the one which
-    /// returned `None`.
+    /// returned `None`. (A study has a field: [`Simulation::new`] checks it.)
     pub fn time(&self) -> f64 {
         self.problems[0].time()
     }
@@ -484,6 +496,28 @@ impl<'p> Simulation<'p> {
             Some(flow) => vtu::write_flow(flow, out),
             None => Ok(()),
         }
+    }
+}
+
+/// The cell model of the study of `inputs`, checked against it: its SBML compiled to native code
+/// ([`CellModel::new`]); none without `cells`. Collective.
+#[cfg(feature = "native")]
+fn cell_model(comm: &Comm, inputs: &Inputs) -> Result<Option<CellModel>> {
+    match (&inputs.study.cells, &inputs.model_sbml) {
+        (Some(spec), Some(sbml)) => Ok(Some(CellModel::new(comm, spec, sbml).context("cells")?)),
+        _ => Ok(None),
+    }
+}
+
+/// The cell model of the study of `inputs`, checked against it: the batched kernel of the inputs
+/// ([`CellModel::from_kernel`]); none without `cells`.
+#[cfg(not(feature = "native"))]
+fn cell_model(_comm: &Comm, inputs: &Inputs) -> Result<Option<CellModel>> {
+    match (&inputs.study.cells, &inputs.kernel) {
+        (Some(spec), Some(kernel)) => Ok(Some(
+            CellModel::from_kernel(spec, kernel.clone()).context("cells")?,
+        )),
+        _ => Ok(None),
     }
 }
 
