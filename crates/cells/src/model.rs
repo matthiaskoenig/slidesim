@@ -120,8 +120,9 @@ impl CellModel {
     ///
     /// Errors: [`CellsError::EngineNeedsNative`] for the engine path; [`CellsError::Model`] for
     /// a kernel whose states or parameters are not those of its model; [`CellsError::Unsupported`]
-    /// for a model the kernel does not integrate (events, delays, algebraic rules), and the
-    /// errors of the checks of [`CellModel::new`].
+    /// for a model the kernel does not integrate (events, delays, algebraic rules), and for an
+    /// output which is the target of a rule of a kernel which cannot evaluate rules (no
+    /// `assigned_ids`), and the errors of the checks of [`CellModel::new`].
     #[cfg(not(feature = "native"))]
     pub fn from_kernel(spec: &CellsSpec, kernel: KernelLayout) -> Result<CellModel> {
         if spec.solver == CellSolverKind::Engine {
@@ -131,6 +132,20 @@ impl CellModel {
         kernel.check()?;
         let description = Arc::new(kernel.model.clone());
         let links = check(&description, spec)?;
+        if kernel.assigned_ids.is_none()
+            && let Some(id) = spec
+                .outputs
+                .iter()
+                .find(|id| description.parameters.iter().any(|p| &p.id == *id))
+        {
+            return Err(CellsError::Model {
+                message: format!(
+                    "cells.outputs '{id}' is the target of an assignment rule, and the kernel \
+                     cannot evaluate rules (its kernel.json has no assigned_ids: a kernel of \
+                     sbmlsim-core without sbmlsim_kernel_assign)"
+                ),
+            });
+        }
         Ok(CellModel {
             description,
             links,
@@ -272,7 +287,6 @@ pub(crate) struct Outputs {
     values: Vec<OutputValue>,
     sources: Vec<Source>,
     /// Whether an output is the target of an assignment rule.
-    #[cfg(feature = "native")]
     rules: bool,
     /// The number of constants of the model, behind its parameters.
     #[cfg(feature = "native")]
@@ -295,13 +309,18 @@ impl Outputs {
         Outputs {
             #[cfg(feature = "native")]
             model: model.model.clone(),
-            #[cfg(feature = "native")]
             rules: sources.iter().any(|s| matches!(s, Source::Parameter(_))),
             values,
             sources,
             #[cfg(feature = "native")]
             n_constants: model.description.n_constants as usize,
         }
+    }
+
+    /// Whether an output is the target of an assignment rule.
+    #[cfg_attr(feature = "native", allow(dead_code))]
+    pub(crate) fn has_rules(&self) -> bool {
+        self.rules
     }
 
     /// The values of the outputs.
@@ -321,11 +340,9 @@ impl Outputs {
     /// parameters. So a first call computes the constants of the cell's parameters, and a
     /// second one the targets of the rules with them.
     ///
-    /// Without the feature `native` there is no model to evaluate the rules with: the target of
-    /// a rule is its value in `parameters`, which the kernel's initialization computed
-    /// (`sbmlsim_kernel_init`, from the initial state). That is its value at any time for a rule
-    /// of parameters alone (such as the protein of the SPT model), not for a rule of the state
-    /// or the time (the kernel of `kernel/1` exports no evaluation of the rules).
+    /// Without the feature `native` the caller evaluates the rules with the kernel
+    /// (`sbmlsim_kernel_assign` of all cells at once, see `KernelCells`), and `parameters` holds
+    /// their targets at `t` and the state already.
     pub(crate) fn push(
         &self,
         t: f64,
@@ -372,8 +389,8 @@ impl Outputs {
         p
     }
 
-    /// The parameters of a cell as they are: without native code no rule is evaluated (see
-    /// [`Outputs::push`]).
+    /// The parameters of a cell as they are: without native code the caller evaluated the rules
+    /// with the kernel (see [`Outputs::push`]).
     #[cfg(not(feature = "native"))]
     fn rules<'a>(
         &self,

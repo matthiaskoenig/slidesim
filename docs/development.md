@@ -102,12 +102,15 @@ native `slidesim` (`deps/install/native-check`, or `NATIVE_DEPS`) and `slidesim.
 wasi-sdk's `wasm-ld` against its wasi-libc, and writes their paths to `target/wasm/artifacts.env`.
 
 The tests of `wasm/host` run `slidesim.wasm` in wasmtime as a page runs it: the kernel
-instantiated with slidesim's memory and mathlib, slidesim's imports `slidesim_kernel.init` and
-`slidesim_kernel.advance` bound to it. `lobule_matches_native` runs the SPT study of an hour on
+instantiated with slidesim's memory and mathlib, slidesim's imports `slidesim_kernel.init`,
+`slidesim_kernel.advance` and `slidesim_kernel.assign` bound to it. `lobule_matches_native` runs the SPT study of an hour on
 the lobule (`testdata/studies/lobules/spt_1h.study.json`) natively and in wasm on the native
 mesh: the mesh arrays agree bitwise, the fields within 1e-5 of their maximum and the cell values
 within `1e-4 |y| + 1e-8` (measured: about 1e-14 relative; the math functions of mathlib and of the
-C library differ in the last bits). The others check the lobule meshed in wasm against the
+C library differ in the last bits). `rule_outputs_match_native` does the same for the targets of
+assignment rules which read a state (`necrosis_trigger` of the SPT model, its threshold lowered so
+that it moves within the hour), evaluated by the kernel's `sbmlsim_kernel_assign`. The others
+check the lobule meshed in wasm against the
 mesher's bounds and twice the same, the refusals of the engine path and of a file scene, and a
 cap of the memory (an error naming it, the host lives on). `mesher_wall_times` (ignored) prints
 the time of the mesher in wasm.

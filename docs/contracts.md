@@ -370,9 +370,11 @@ cell model (required with `cells`; the host compiles `kernel.wasm` from the SBML
 sbmlsim-core's `compiler.wasm` and instantiates it with slidesim's memory and `mathlib.wasm`),
 `mesh` a `mesh.json` of `slidesim mesh` in place of the scene's mesh. The build reads no files:
 a scene whose mesh (without `mesh`) or maps are files is an error naming the file.
-`slidesim.wasm` imports `slidesim_kernel.init` and `slidesim_kernel.advance`, which the host binds
-to the kernel's `sbmlsim_kernel_init` and `sbmlsim_kernel_advance` once the kernel is
-instantiated. The arrays are the names of `result/1`, little endian (`fields/<id>`,
+`slidesim.wasm` imports `slidesim_kernel.init`, `slidesim_kernel.advance` and
+`slidesim_kernel.assign`, which the host binds to the kernel's `sbmlsim_kernel_init`,
+`sbmlsim_kernel_advance` and `sbmlsim_kernel_assign` once the kernel is instantiated (`assign`
+evaluates the targets of the assignment rules in `cells.outputs`; with a kernel which has none,
+whose `kernel.json` has no `assigned_ids`, such an output is refused and `assign` never called). The arrays are the names of `result/1`, little endian (`fields/<id>`,
 `cells/<value>` and `raster/<field>/<level>` the row now), and `meta` (the `ResultMeta`, `written`
 and `complete` as above), `summary` (`summary.json`) and `quality` (`null` for a mesh of the
 inputs) as JSON, and `log`: what the simulation reported, UTF-8, one line each (the quality line

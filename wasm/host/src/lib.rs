@@ -6,10 +6,13 @@
 //! The modules and how they are linked:
 //!
 //! - `slidesim.wasm`, a WASI preview 1 reactor (its `_initialize` is called first), imports
-//!   `slidesim_kernel.init` and `slidesim_kernel.advance`, the functions of the batched kernel
-//!   (`kernel/1` of sbmlsim-core: `sbmlsim_kernel_init(n, parameters, state) -> i32` and
-//!   `sbmlsim_kernel_advance(n, state, parameters, control, counts, context, scratch) -> i32`,
-//!   byte offsets into the memory of slidesim). The kernel imports the memory it works in, so it
+//!   `slidesim_kernel.init`, `slidesim_kernel.advance` and `slidesim_kernel.assign`, the functions
+//!   of the batched kernel (`kernel/1` of sbmlsim-core: `sbmlsim_kernel_init(n, parameters,
+//!   state) -> i32`, `sbmlsim_kernel_advance(n, state, parameters, control, counts, context,
+//!   scratch) -> i32` and `sbmlsim_kernel_assign(n, state, parameters, control) -> i32`, byte
+//!   offsets into the memory of slidesim). A kernel without `sbmlsim_kernel_assign` (before it
+//!   was added to sbmlsim-core) is linked too: `assign` is then an error if called, which slidesim
+//!   never does for such a kernel (it refuses outputs of rule targets without `assigned_ids`). The kernel imports the memory it works in, so it
 //!   is instantiated after slidesim, with slidesim's exported memory: the imports of slidesim
 //!   are bound late, to host functions which call the kernel once it is there.
 //! - `mathlib.wasm` of sbmlsim-core (no imports), whose functions the kernel imports as `math.*`.
@@ -144,6 +147,8 @@ type AdvanceArgs = (i32, i32, i32, i32, i32, i32, i32);
 struct Kernel {
     init: TypedFunc<(i32, i32, i32), i32>,
     advance: TypedFunc<AdvanceArgs, i32>,
+    /// None for a kernel before `sbmlsim_kernel_assign`.
+    assign: Option<TypedFunc<(i32, i32, i32, i32), i32>>,
 }
 
 struct State {
@@ -277,6 +282,21 @@ impl Host {
                     .call(&mut caller, (n, y, p, control, counts, context, scratch))
             },
         )?;
+        linker.func_wrap(
+            "slidesim_kernel",
+            "assign",
+            |mut caller: Caller<'_, State>,
+             n: i32,
+             y: i32,
+             p: i32,
+             control: i32|
+             -> wasmtime::Result<i32> {
+                let assign = kernel_of(&caller)?.assign.ok_or_else(|| {
+                    wasmtime::Error::msg("kernel.wasm has no sbmlsim_kernel_assign")
+                })?;
+                assign.call(&mut caller, (n, y, p, control))
+            },
+        )?;
         let host_error = |store: &mut Store<State>, e: wasmtime::Error, what: &str| {
             memory_error(store.data(), max_pages)
                 .unwrap_or_else(|| anyhow::Error::from(e).context(what.to_string()))
@@ -309,6 +329,9 @@ impl Host {
         let kernel = Kernel {
             init: kernel.get_typed_func(&mut store, "sbmlsim_kernel_init")?,
             advance: kernel.get_typed_func(&mut store, "sbmlsim_kernel_advance")?,
+            assign: kernel
+                .get_typed_func(&mut store, "sbmlsim_kernel_assign")
+                .ok(),
         };
         store.data_mut().kernel = Some(kernel);
         Ok(Host {

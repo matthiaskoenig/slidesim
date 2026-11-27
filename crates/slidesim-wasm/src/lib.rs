@@ -7,8 +7,9 @@
 //! The cells run on the batched kernel of sbmlsim-core (`kernel/1`, `cells::KernelCells`): the
 //! host compiles the kernel of the cell model (`kernel.wasm` and its `kernel.json`, which the
 //! inputs carry), instantiates it with slidesim's exported memory and mathlib, and binds
-//! slidesim's imports `slidesim_kernel.init` and `slidesim_kernel.advance` to its
-//! `sbmlsim_kernel_init` and `sbmlsim_kernel_advance`. Only `"solver": "batched"` runs; the
+//! slidesim's imports `slidesim_kernel.init`, `slidesim_kernel.advance` and
+//! `slidesim_kernel.assign` to its `sbmlsim_kernel_init`, `sbmlsim_kernel_advance` and
+//! `sbmlsim_kernel_assign`. Only `"solver": "batched"` runs; the
 //! engine path needs native code.
 //!
 //! The build reads and writes no files: the inputs are JSON, the results arrays in memory. A

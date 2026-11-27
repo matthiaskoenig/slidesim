@@ -6,9 +6,9 @@
 //! the QFunction of the batched path (sbmlsim-core's `kernel/1`, see the documentation of
 //! `sbmlsim_abi` at the pinned revision `SBMLSIM_CORE_KERNEL_REV` of `deps/versions.env`), which
 //! the host compiles from the SBML of the study (`compiler.compileKernel` of sbmlsim-core's
-//! JavaScript, `sbmlsim-core compile --kernel`). Its two functions take byte offsets into the
+//! JavaScript, `sbmlsim-core compile --kernel`). Its functions take byte offsets into the
 //! memory of their caller: the browser build of slidesim imports them as
-//! `slidesim_kernel.init` and `slidesim_kernel.advance`, and the host instantiates the kernel
+//! `slidesim_kernel.init`, `slidesim_kernel.advance` and `slidesim_kernel.assign`, and the host instantiates the kernel
 //! with slidesim's memory and binds them (`wasm/host`, Task 17's JavaScript).
 
 use sbmlsim_abi::ModelDescription;
@@ -19,6 +19,8 @@ use crate::{CellsError, Result};
 /// The layout of the points of a batched kernel and the description of its model: the keys of
 /// `kernel.json` which slidesim reads (the others, such as `version`, `control` and `counts`,
 /// are ignored: `kernel/1` fixes the four values of the control and the two of the counts).
+/// `assigned_ids` is optional: a kernel of sbmlsim-core before `sbmlsim_kernel_assign` has
+/// none, and then a target of an assignment rule cannot be an output ([`crate::CellModel`]).
 #[derive(Debug, Clone, Deserialize)]
 pub struct KernelLayout {
     /// The ids of the states of a point, in their order.
@@ -27,17 +29,22 @@ pub struct KernelLayout {
     pub parameter_ids: Vec<String>,
     /// The `f64` of the scratch of a point, the work of the integrator.
     pub scratch_per_point: usize,
+    /// The parameters which `sbmlsim_kernel_assign` writes, the targets of the assignment rules
+    /// in the order of the rules; `None` for a kernel without `sbmlsim_kernel_assign`.
+    #[serde(default)]
+    pub assigned_ids: Option<Vec<String>>,
     /// The description of the model (of sbmlsim-core's C target), which the checks of a study
     /// read as natively.
     pub model: ModelDescription,
 }
 
 impl KernelLayout {
-    /// Checks the kernel: a model it integrates, of its states and parameters.
+    /// Checks the kernel: a model it integrates, of its states and parameters, and assigning
+    /// parameters of it.
     ///
     /// Errors: [`CellsError::Unsupported`] for a model with events, delays or algebraic rules
     /// (which no kernel integrates), [`CellsError::Model`] for states or parameters other than
-    /// those of the model.
+    /// those of the model, or an assigned id which is not a parameter.
     pub fn check(&self) -> Result<()> {
         let model = &self.model;
         let refused = [
@@ -58,6 +65,20 @@ impl KernelLayout {
                 message: format!(
                     "the kernel of the model {} has other states or parameters than its \
                      description",
+                    model.id
+                ),
+            });
+        }
+        if let Some(id) = self
+            .assigned_ids
+            .iter()
+            .flatten()
+            .find(|id| !self.parameter_ids.contains(id))
+        {
+            return Err(CellsError::Model {
+                message: format!(
+                    "the kernel of the model {} assigns '{id}', which is not one of its \
+                     parameters",
                     model.id
                 ),
             });
@@ -110,6 +131,14 @@ mod solver {
             context: *const f64,
             scratch: *mut f64,
         ) -> i32;
+        /// `sbmlsim_kernel_assign(n, state, parameters, control) -> i32`.
+        #[link_name = "assign"]
+        fn kernel_assign(
+            n: i32,
+            state: *const f64,
+            parameters: *mut f64,
+            control: *const f64,
+        ) -> i32;
     }
 
     /// The cells of a process on the batched kernel of their model: the batched path without
@@ -130,7 +159,9 @@ mod solver {
     ///
     /// An advance is one call of `sbmlsim_kernel_advance` for all cells, with the attempts of
     /// the context `MAX_ATTEMPTS`: each cell steps until it is done or failed. The scratch of
-    /// the integrator is slidesim's (`scratch_per_point` values per cell). One process: the
+    /// the integrator is slidesim's (`scratch_per_point` values per cell). The outputs which are
+    /// targets of assignment rules are evaluated at the time and the states of the cells by one
+    /// call of `sbmlsim_kernel_assign` for all cells whenever they are read. One process: the
     /// browser build has one.
     pub struct KernelCells {
         species: Vec<String>,
@@ -437,14 +468,45 @@ mod solver {
 
         fn outputs(&self, out: &mut Vec<f64>) {
             out.clear();
+            let n = self.elements.len();
             let (ns, np) = (self.state_ids.len(), self.n_parameters);
             let t = self.t / self.time_unit_s;
+            // The targets of the assignment rules at the time the cells reached and their states
+            // (`sbmlsim_kernel_assign`), as the native paths evaluate them (`model_assign`), into
+            // a copy of the parameters: the advances keep the values of the initialization.
+            let assigned;
+            let parameters = if self.outputs.has_rules() && n > 0 {
+                let mut p = self.parameters.clone();
+                let mut control = vec![0.0; n * CONTROL];
+                for c in control.chunks_mut(CONTROL) {
+                    c[CONTROL_T] = t;
+                }
+                // SAFETY: the states, parameters and controls of `n` points of the kernel's
+                // layout, in slidesim's memory.
+                let code = unsafe {
+                    kernel_assign(
+                        points(n).expect("the cells were initialized"),
+                        self.states.as_ptr(),
+                        p.as_mut_ptr(),
+                        control.as_ptr(),
+                    )
+                };
+                // Arguments the kernel refuses are a bug of slidesim: its own arrays.
+                assert_eq!(
+                    code, 0,
+                    "sbmlsim_kernel_assign refused the arrays of {n} cells"
+                );
+                assigned = p;
+                &assigned
+            } else {
+                &self.parameters
+            };
             let mut work = Work::default();
-            for i in 0..self.elements.len() {
+            for i in 0..n {
                 self.outputs.push(
                     t,
                     &self.states[i * ns..(i + 1) * ns],
-                    &self.parameters[i * np..(i + 1) * np],
+                    &parameters[i * np..(i + 1) * np],
                     &mut work,
                     out,
                 );
@@ -488,10 +550,27 @@ mod tests {
             }
         }"#;
         let layout: KernelLayout = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            layout.assigned_ids, None,
+            "a kernel before sbmlsim_kernel_assign"
+        );
         assert_eq!(layout.state_ids, ["x"]);
         assert_eq!(layout.parameter_ids, ["k", "V"]);
         assert_eq!(layout.scratch_per_point, 13);
         layout.check().unwrap();
+
+        let mut assigning = layout.clone();
+        assigning.assigned_ids = Some(vec!["k".into()]);
+        assigning.check().unwrap();
+        assigning.assigned_ids = Some(vec!["x".into()]);
+        let e = assigning.check().unwrap_err();
+        assert!(e.to_string().contains("assigns 'x'"), "{e}");
+        let with_key = text.replace(
+            r#""scratch_per_point": 13,"#,
+            r#""scratch_per_point": 13, "assigned_ids": ["k"],"#,
+        );
+        let read: KernelLayout = serde_json::from_str(&with_key).unwrap();
+        assert_eq!(read.assigned_ids, Some(vec!["k".to_string()]));
 
         let mut other = layout.clone();
         other.parameter_ids.reverse();

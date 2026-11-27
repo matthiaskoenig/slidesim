@@ -209,12 +209,83 @@ fn assert_bitwise(what: &str, a: &[f64], b: &[f64]) {
 /// maximum at every output time, the cell values within `1e-4 |y| + 1e-8`.
 #[test]
 fn lobule_matches_native() {
+    let study = lobules().join("spt_1h.study.json");
+    let (native, wasm) = native_and_wasm("lobule_matches_native", &study);
+    assert_agreement(&native, &wasm);
+}
+
+/// The targets of assignment rules among the outputs of the cells, evaluated by the kernel
+/// (`sbmlsim_kernel_assign`) at the time and the states of the cells, agree with the native ones
+/// (`model_assign`) within the bound of [`lobule_matches_native`]: the SPT study of one hour with
+/// `necrosis_trigger` (a ramp of the state T between `T_threshold` and `T_threshold (1 + w)`)
+/// among the outputs, its threshold lowered to 1.2 mM and the ramp widened to w 0.5 so that it
+/// moves within the hour.
+#[test]
+fn rule_outputs_match_native() {
+    let dir = fresh_dir("rule_outputs_match_native");
+    let mut study = read_json(&lobules().join("spt_1h.study.json"));
+    study["scene"] = json!(lobules().join("scene.json"));
+    study["cells"]["model"] = json!(root().join("testdata/models/spt_liver_cell.xml"));
+    study["cells"]["outputs"] = json!(["protein", "necrosis_trigger"]);
+    let parameters = study["cells"]["parameters"].as_array_mut().unwrap();
+    parameters.push(json!({"id": "T_threshold", "value": 1.2}));
+    parameters.push(json!({"id": "necrosis_w", "value": 0.5}));
+    let path = dir.join("rules.study.json");
+    std::fs::write(&path, study.to_string()).unwrap();
+    let (native, wasm) = native_and_wasm("rule_outputs_match_native", &path);
+    // The trigger moves: 0 everywhere at the start, in the ramp or past it in some cells at the
+    // end, and the same in both runs.
+    let trigger = &native.cells["necrosis_trigger"];
+    let c = native.cell_elements.len();
+    let last = &trigger[trigger.len() - c..];
+    assert!(trigger[..c].iter().all(|&v| v == 0.0), "at t = 0");
+    let moving = last.iter().filter(|&&v| v > 0.0 && v < 1.0).count();
+    assert!(moving > 0, "no cell in the ramp at the end");
+    eprintln!("necrosis_trigger at the end: {moving} of {c} cells in the ramp");
+    assert_agreement(&native, &wasm);
+}
+
+/// A kernel which cannot evaluate rules (a `kernel.json` without `assigned_ids`, as before
+/// `sbmlsim_kernel_assign`) is refused for an output which is the target of a rule (SPT
+/// `protein`), naming it, instead of giving a value which does not follow the cell.
+#[test]
+fn rule_output_needs_assign() {
     let a = Artifacts::load();
-    let dir = fresh_dir("lobule_matches_native");
-    let (scene, study) = (
-        lobules().join("scene.json"),
-        lobules().join("spt_1h.study.json"),
+    let dir = fresh_dir("rule_output_needs_assign");
+    let mut layout = read_json(&a.spt_kernel().join("kernel.json"));
+    layout
+        .as_object_mut()
+        .unwrap()
+        .remove("assigned_ids")
+        .unwrap();
+    std::fs::write(dir.join("kernel.json"), layout.to_string()).unwrap();
+    std::fs::copy(a.spt_kernel().join("kernel.wasm"), dir.join("kernel.wasm")).unwrap();
+    let inputs = json!({
+        "scene": read_json(&lobules().join("scene.json")),
+        "study": read_json(&lobules().join("spt_1h.study.json")),
+    });
+    let e = run(
+        &a.slidesim_wasm,
+        &dir,
+        &a.mathlib,
+        &inputs.to_string(),
+        None,
+    )
+    .unwrap_err();
+    let message = format!("{e:#}");
+    assert!(
+        message.contains("cells.outputs 'protein' is the target of an assignment rule"),
+        "{message}"
     );
+}
+
+/// The native mesh of the lobule scene, the native run of the study `study` on one process, and
+/// the wasm run of it on the native mesh (in `target/tmp/<name>`).
+fn native_and_wasm(name: &str, study: &Path) -> (Store, Outputs) {
+    let a = Artifacts::load();
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let scene = lobules().join("scene.json");
     a.native(&[
         Path::new("mesh"),
         &scene,
@@ -223,18 +294,24 @@ fn lobule_matches_native() {
     ]);
     a.native(&[
         Path::new("run"),
-        &study,
+        study,
         Path::new("--out"),
         &dir.join("native"),
     ]);
     let native = read_store(&dir.join("native/result.zarr"));
     let inputs = json!({
         "scene": read_json(&scene),
-        "study": read_json(&study),
+        "study": read_json(study),
         "mesh": read_json(&dir.join("mesh/mesh.json")),
     });
     let wasm = a.run_wasm(&inputs, None).unwrap();
+    (native, wasm)
+}
 
+/// The wasm run `wasm` agrees with the native store `native`: the mesh arrays and the output
+/// times bitwise, the fields within 1e-5 of each field's maximum at every output time, the cell
+/// values within `1e-4 |y| + 1e-8`; neither prints, both finished.
+fn assert_agreement(native: &Store, wasm: &Outputs) {
     assert_eq!(wasm.stdout, "", "slidesim.wasm prints nothing");
     assert_eq!(wasm.quality, Value::Null, "a mesh of the inputs");
     for key in ["times", "fields", "cell_values", "tags", "refinements"] {

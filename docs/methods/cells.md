@@ -65,14 +65,16 @@ sbmlsim-core's compiler) and links to slidesim with slidesim's memory. One call 
 cell of the process (one process in the browser), with the same `H_MIN`, step attempts and
 failures as the QFunction, so a cell takes the steps it takes on the batched path; its math is
 that of sbmlsim-core's mathlib, which agrees with the C library within the last bits (the run of
-an hour of the SPT lobule agrees with the native one within about 1e-14 relatively). Two
-differences: the kernel initializes the cells (a parameter of the cell fixed, every other one its
-SBML value and initial assignment), so a parameter of `cells.parameters` which is a state of the
-model (the initial amount of a species) is written into the state after the initialization and
-the initial assignments which read that state are not evaluated again; and an output of
-`cells.outputs` which is the target of an assignment rule keeps the value the initialization
-computed, since the kernel exports no evaluation of the rules: right for a rule of parameters
-alone (the protein of the SPT model), constant otherwise. `"solver": "engine"` is refused there.
+an hour of the SPT lobule agrees with the native one within about 1e-14 relatively). The outputs
+of `cells.outputs` which are targets of assignment rules are evaluated by the kernel at the time
+and the states of the cells whenever they are read (`sbmlsim_kernel_assign`, as `model_assign`
+evaluates them natively); a kernel without that function (its `kernel.json` has no
+`assigned_ids`) cannot give them, and such an output is refused. One difference: the kernel
+initializes the cells (a parameter of the cell fixed, every other one its SBML value and initial
+assignment), so a parameter of `cells.parameters` which is a state of the model (the initial
+amount of a species) is written into the state after the initialization and the initial
+assignments which read that state are not evaluated again. `"solver": "engine"` is refused
+there.
 
 ## Strang splitting
 
