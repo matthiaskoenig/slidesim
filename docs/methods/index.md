@@ -8,7 +8,7 @@ backends now and are what libCEED's JIT compiles for GPUs later.
 
 | Layer | Component |
 | --- | --- |
-| Mesh | the gmsh mesh of slideviz in PETSc DMPlex with its tags, partitioned by PT-Scotch, refined uniformly `mesh.refinements` times; the coarse mesh is the level of the cells, the finest the level of the fields |
+| Mesh | a gmsh mesh, or tagged polygons or ideal lobules meshed by slidesim (`spade` and Mmg), in PETSc DMPlex with its tags, partitioned by PT-Scotch, refined uniformly `mesh.refinements` times; the coarse mesh is the level of the cells, the finest the level of the fields |
 | Maps | Zarr v3 rasters, each process reads the window over its cells, sampled bilinearly at the quadrature points of every level |
 | Operators | libCEED QFunctions in C (`crates/pde/qfunctions/`): mass, tensor diffusion, reaction, advection with SUPG, Darcy; element restrictions and bases from the PETSc discretization, as Ratel and HONEE do |
 | Time stepping | BDF2 of PETSc `TS`, fixed or adaptive steps |
@@ -55,6 +55,8 @@ backends now and are what libCEED's JIT compiles for GPUs later.
 
 The pages of this section:
 
+- [Meshing](meshing.md): tagged polygons to a graded mesh (constrained Delaunay triangulation,
+  Mmg to the metric of a size field, the boundary frozen), the ideal lobules and their zonation.
 - [Transport](transport.md): diffusion-reaction and advection of the fields, SUPG, BDF2, the
   multigrid, the mass balance.
 - [Perfusion](perfusion.md): the Darcy pressure with an anisotropic permeability, and the

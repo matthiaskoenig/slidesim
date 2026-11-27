@@ -381,7 +381,7 @@ fn parameter_ids(spec: &CellsSpec) -> Vec<String> {
 /// Writes values per coarse element as cell data of a VTU file: a field of one P0 component
 /// per value on a copy of the coarse level, named after the value, so that the data arrays are
 /// named after the values.
-struct CellWriter {
+pub(crate) struct CellWriter {
     dm: Dm,
     names: Vec<String>,
     /// For each value, the entry of each local cell in a local vector.
@@ -390,7 +390,7 @@ struct CellWriter {
 
 impl CellWriter {
     /// The writer of the values `names` on the coarse level `coarse`. Collective.
-    fn new(coarse: &Dm, names: Vec<String>) -> Result<CellWriter> {
+    pub(crate) fn new(coarse: &Dm, names: Vec<String>) -> Result<CellWriter> {
         let mut dm = coarse.clone_mesh()?;
         let dim = dm.dimension()?;
         let fe = Fe::lagrange(dim, 1, dm.is_simplex()?, 0, 1)?;
@@ -416,7 +416,7 @@ impl CellWriter {
 
     /// Writes `table` (per cell of `cells`, local coarse cells, one value per name) as the VTU
     /// file `path`; NaN for the other cells. Collective.
-    fn write(&self, cells: &[usize], table: &[f64], path: &Path) -> Result<()> {
+    pub(crate) fn write(&self, cells: &[usize], table: &[f64], path: &Path) -> Result<()> {
         let mut local = Vector::create_local(&self.dm)?;
         local.set(f64::NAN)?;
         let n = self.names.len();

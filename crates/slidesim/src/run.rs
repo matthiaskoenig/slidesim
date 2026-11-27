@@ -3,8 +3,10 @@
 //! Loads the study and its scene, checks that the maps the study names are in the scene and the
 //! `cells` section against the study and the scene, translates the cell model to C, compiles it
 //! and checks it against the study (before anything is solved), loads the mesh (distributed over
-//! the processes, refined `mesh.refinements` times), reads the maps over the cells of each
-//! process, solves the Darcy [`Flow`] if the study has a `perfusion` section, builds one
+//! the processes, refined `mesh.refinements` times; tagged polygons and lobules meshed by process
+//! 0 first, the quality of the mesh printed in one line), reads the maps over the cells of each
+//! process (the zonation map of lobules computed there, [`zonation_map`]), solves the Darcy
+//! [`Flow`] if the study has a `perfusion` section, builds one
 //! [`Problem`] per field and, with `cells`, the cells and their exchange with the fields
 //! ([`Coupled`]). It removes the outputs `<out>/<field id>_<index>.vtu` and
 //! `<out>/cells_<index>.vtu` of an earlier run (`pressure.vtu` and `velocity.vtu` included;
@@ -69,20 +71,35 @@
 //! summary); together the time of the run but the writing of `summary.json` itself.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use ceed::Ceed;
 use cells::CellModel;
-use contracts::{Scene, Study, check_cells, check_maps};
-use maps::Maps;
-use mesh::Mesh;
+use contracts::{LobuleSpec, MeshSource, Scene, Study, check_cells, check_maps};
+use maps::{Map, Maps};
+use mesh::{Mesh, MeshError};
+use mesher::Lobules;
 use pde::{Flow, Inputs, MassBalance, PdeError, Problem};
 use petsc::{Comm, Petsc, Vector, Viewer};
 use serde::Serialize;
 
 use crate::coupled::{Coupled, Seconds, linked_fields};
+use crate::mesh_command::quality_line;
+
+/// The context of an error which every process meets at the same point of the run, with the
+/// same message: a collective error, after which no process waits for another (`main` ends
+/// each process alone, without `MPI_Abort`).
+#[derive(Debug)]
+pub(crate) struct OnEveryProcess(pub(crate) &'static str);
+
+impl fmt::Display for OnEveryProcess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
 
 /// `summary.json`.
 #[derive(Debug, Serialize)]
@@ -260,7 +277,22 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
             CellModel::new(&comm, spec, &sbml).context("cells")
         })
         .transpose()?;
-    let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).context("cannot load the mesh")?;
+    let mesh = Mesh::load(petsc, &scene, study.mesh.refinements).map_err(|e| {
+        // Collective: process 0 found these and told the others.
+        let everywhere = matches!(
+            e,
+            MeshError::NotFound { .. } | MeshError::Dimension { .. } | MeshError::Mesher { .. }
+        );
+        let e = anyhow::Error::new(e);
+        if everywhere {
+            e.context(OnEveryProcess("cannot load the mesh"))
+        } else {
+            e.context("cannot load the mesh")
+        }
+    })?;
+    if let Some((_, quality)) = mesh.generated() {
+        println!("{}", quality_line(quality));
+    }
     let ceed = Ceed::new(ceed::DEFAULT_RESOURCE).context("cannot initialize libCEED")?;
     let mut phases = Phases::new(comm, started);
     let maps = read_maps(&comm, &study, &scene, &mesh)?;
@@ -462,8 +494,21 @@ fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<M
     }
     ids.sort_unstable();
     ids.dedup();
+    // The zonation map of a lobule source is computed, not read.
+    let zonation = match &scene.mesh {
+        MeshSource::Lobules(spec) if ids.contains(&spec.zonation.map.as_str()) => Some(spec),
+        _ => None,
+    };
+    ids.retain(|id| zonation.is_none_or(|spec| *id != spec.zonation.map));
     let read = match mesh.local_bounds() {
-        Some(bounds) => Maps::read(&scene.maps, &ids, bounds).map_err(anyhow::Error::from),
+        Some(bounds) => Maps::read(&scene.maps, &ids, bounds)
+            .map_err(anyhow::Error::from)
+            .and_then(|mut maps| {
+                if let Some(spec) = zonation {
+                    maps.insert(zonation_map(spec, bounds)?);
+                }
+                Ok(maps)
+            }),
         None => Ok(Maps::default()),
     };
     let failed = comm.max_int(read.is_err().into())?;
@@ -472,6 +517,27 @@ fn read_maps(comm: &Comm, study: &Study, scene: &Scene, mesh: &Mesh) -> Result<M
         Ok(_) => Err(anyhow::anyhow!("another process cannot read a map")),
         Err(e) => Err(e.context("cannot read the maps")),
     }
+}
+
+/// The zonation map of the lobules of `spec` over the window `bounds` (the local bounds of
+/// the cells of a process): the relative position between the walls ([`Lobules::position`], 0
+/// on the corner walls, 1 on the centre walls) at the pixel centres of a raster of
+/// `zonation.um_per_px` whose first pixel is centred at the lower corner of the bounding box of
+/// the lobules and which covers it.
+fn zonation_map(spec: &LobuleSpec, bounds: [[f64; 2]; 2]) -> Result<Map> {
+    let lobules = Lobules::new(spec).context("lobules")?;
+    let [lo, hi] = lobules.bounds();
+    let h = spec.zonation.um_per_px;
+    let pixels = |axis: usize| (((hi[axis] - lo[axis]) / h).ceil() as usize + 1).max(2);
+    let shape = [pixels(1), pixels(0)];
+    Ok(Map::from_fn(
+        &spec.zonation.map,
+        h,
+        lo,
+        shape,
+        bounds,
+        |x| lobules.position(x),
+    ))
 }
 
 /// Writes the pressure and the velocity of `flow` as `<out>/pressure.vtu` and

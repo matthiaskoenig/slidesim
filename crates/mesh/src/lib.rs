@@ -1,22 +1,26 @@
-//! gmsh meshes as distributed DMPlex, with named tags and a uniform refinement hierarchy.
+//! Meshes as distributed DMPlex, with named tags and a uniform refinement hierarchy.
 //!
-//! [`Mesh::load`] reads the gmsh file of a [`Scene`] into a DMPlex whose labels carry the gmsh
-//! physical names (`-dm_plex_gmsh_use_regions`), splits each vertex where the boundary of a 2D
-//! mesh touches itself into one vertex per fan of its cells (see [`Mesh::load`]), distributes
-//! it over the processes
+//! [`Mesh::load`] makes the mesh of a [`Scene`]: it reads a gmsh file into a DMPlex whose labels
+//! carry the gmsh physical names (`-dm_plex_gmsh_use_regions`), or, for the `polygons` and
+//! `lobules` sources, process 0 meshes the tagged polygons or the lobules with the [`mesher`]
+//! and turns the [`TaggedMesh`] into a DMPlex with one label per tag ([`Mesh::from_tagged`]).
+//! The rest is the same for every source ([`Mesh::from_dm`]): it splits each vertex where the
+//! boundary of a 2D mesh touches itself into one vertex per fan of its cells (see
+//! [`Mesh::load`]), distributes the mesh over the processes
 //! (`DMPlexDistribute`, no overlap) and refines it uniformly (`DMRefine`). The graph partitioner
 //! PT-Scotch decides which process owns which cell, if PETSc has it (see [`PARTITIONER`]). The
 //! levels, coarse first, are linked for multigrid (`DMSetCoarseDM`). The labels of the physical
-//! names are the mesh's [`Tag`]s; they survive distribution and refinement, so every level has
-//! them.
+//! names (or of the tags of the mesher) are the mesh's [`Tag`]s; they survive distribution and
+//! refinement, so every level has them.
 //!
-//! A tag is data from the mesh file: this crate knows no tag names.
+//! A tag is data from the mesh file or the scene: this crate knows no tag names.
 
 use std::cmp::max;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use contracts::{MeshSource, Scene};
+use contracts::{ContractError, MeshSource, Polygons, Scene};
+use mesher::{Domain, Lobules, Quality, Size, TaggedMesh};
 use petsc::{Comm, Dm, Petsc, Point};
 
 mod split;
@@ -70,8 +74,11 @@ pub enum MeshError {
         name: String,
         available: Vec<String>,
     },
-    #[error("mesh format '{format}' is not yet supported by the mesher")]
-    Source { format: &'static str },
+    /// The source of the scene cannot be meshed: the polygons file cannot be read, or the
+    /// mesher rejects the polygons or the lobules (the message names the file, if there is one,
+    /// and where in um), or the scene is not two dimensional.
+    #[error("{message}")]
+    Mesher { message: String },
     #[error(transparent)]
     Petsc(#[from] petsc::Error),
 }
@@ -87,35 +94,43 @@ pub struct Mesh {
     bounds: Option<[[f64; 2]; 2]>,
     /// The topological dimension.
     dim: usize,
+    /// See [`Mesh::generated`].
+    generated: Option<(TaggedMesh, Quality)>,
 }
 
 impl Mesh {
-    /// Reads the mesh of `scene`, distributes it over the processes of `petsc` and refines it
+    /// Makes the mesh of `scene`, distributes it over the processes of `petsc` and refines it
     /// uniformly `refinements` times. Collective.
+    ///
+    /// A gmsh source is read by process 0. For a `polygons` or a `lobules` source, process 0
+    /// alone meshes the polygons file (with the size field of the scene) or the lobules with the
+    /// [`mesher`] ([`mesh_serial`]), sends the outcome to the others, and the [`TaggedMesh`]
+    /// becomes the coarse mesh ([`Mesh::from_tagged`]); process 0 keeps it and its quality
+    /// ([`Mesh::generated`]). Then [`Mesh::from_dm`].
     ///
     /// A vertex of a 2D mesh where the boundary touches itself (two holes, or a hole and the
     /// outer boundary, meeting at one point) is split first into one vertex per fan of its
     /// cells (cells joined by the edges at the vertex), at the same coordinates: a point contact
     /// is an aperture of zero width, through which no field passes, so fields are discontinuous
     /// there. Every cell and edge keeps its tags, the copies of a vertex the tags of the vertex.
-    /// A mesh without such a vertex is used as read.
+    /// A mesh without such a vertex is used as is.
     ///
     /// Errors (on every process): [`MeshError::NotFound`] if process 0 finds no file at
     /// the gmsh path of the scene, [`MeshError::Read`] if PETSc cannot read it,
     /// [`MeshError::Dimension`] if its dimension is not `scene.dimension`,
-    /// [`MeshError::Source`] for the `polygons` and `lobules` sources (not yet supported), and
-    /// [`MeshError::Petsc`] if distributing or refining fails.
+    /// [`MeshError::Mesher`] if process 0 cannot read the polygons file or the mesher fails
+    /// (the message names the file and the place, see [`mesh_serial`]) or a generated source
+    /// is in a scene of dimension 3, and [`MeshError::Petsc`] if distributing or refining fails.
     pub fn load(petsc: &Petsc, scene: &Scene, refinements: u32) -> Result<Mesh, MeshError> {
         let path = match &scene.mesh {
             MeshSource::Gmsh { path } => path,
-            MeshSource::Polygons { .. } => {
-                return Err(MeshError::Source { format: "polygons" });
+            MeshSource::Polygons { .. } | MeshSource::Lobules(_) => {
+                return Mesh::generate(petsc, scene, refinements);
             }
-            MeshSource::Lobules(_) => return Err(MeshError::Source { format: "lobules" }),
         };
         check_readable(petsc, path)?;
         let comm = petsc.comm();
-        let mut coarse = read(petsc, &comm, path).map_err(|source| MeshError::Read {
+        let coarse = read(petsc, &comm, path).map_err(|source| MeshError::Read {
             path: path.clone(),
             source,
         })?;
@@ -127,6 +142,80 @@ impl Mesh {
                 scene: scene.dimension,
             });
         }
+        Mesh::from_dm(petsc, coarse, refinements)
+    }
+
+    /// [`Mesh::load`] of a `polygons` or a `lobules` source: process 0 meshes, sends the
+    /// outcome to the others, then [`Mesh::from_tagged`]. Collective.
+    fn generate(petsc: &Petsc, scene: &Scene, refinements: u32) -> Result<Mesh, MeshError> {
+        // Every process has the scene: no process meshes.
+        two_dimensional(scene)?;
+        let comm = petsc.comm();
+        let generated = (comm.rank() == 0).then(|| mesh_serial(petsc, scene));
+        // The first byte 0 for a mesh, or 1 and the error.
+        let mut message = Vec::new();
+        if let Some(generated) = &generated {
+            match generated {
+                Ok(_) => message.push(0),
+                Err(e) => {
+                    message.push(1);
+                    message.extend(e.to_string().into_bytes());
+                }
+            }
+        }
+        comm.broadcast_bytes(0, &mut message)?;
+        if let Some((1, text)) = message.split_first() {
+            return Err(MeshError::Mesher {
+                message: String::from_utf8_lossy(text).into_owned(),
+            });
+        }
+        let generated = generated.transpose()?;
+        let mut mesh = Mesh::from_tagged(petsc, generated.as_ref().map(|g| &g.0), refinements)?;
+        mesh.generated = generated;
+        Ok(mesh)
+    }
+
+    /// The mesh `mesh` (on process 0; `None` on the others, whose meshes would be ignored)
+    /// as the coarse mesh ([`TaggedMesh::to_dm`]: one label per tag, on every process), then
+    /// [`Mesh::from_dm`]. Collective.
+    ///
+    /// Errors: [`MeshError::Petsc`] if process 0's mesh is invalid ([`TaggedMesh::validate`],
+    /// the same error on every process) or distributing or refining fails.
+    ///
+    /// Panics if process 0 has no mesh.
+    pub fn from_tagged(
+        petsc: &Petsc,
+        mesh: Option<&TaggedMesh>,
+        refinements: u32,
+    ) -> Result<Mesh, MeshError> {
+        let comm = petsc.comm();
+        assert!(
+            comm.rank() != 0 || mesh.is_some(),
+            "process 0 holds the mesh of Mesh::from_tagged"
+        );
+        let empty = TaggedMesh {
+            tags: Vec::new(),
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            triangle_tags: Vec::new(),
+            edges: Vec::new(),
+            edge_tags: Vec::new(),
+        };
+        let coarse = mesh.unwrap_or(&empty).to_dm(&comm)?;
+        Mesh::from_dm(petsc, coarse, refinements)
+    }
+
+    /// The mesh of the DMPlex `coarse` on the processes of `petsc`, held by process 0 (as
+    /// [`Dm::plex_from_file`] reads a file or [`TaggedMesh::to_dm`] makes one), its labels the
+    /// tags: the vertices where the boundary of a 2D mesh touches itself split (see
+    /// [`Mesh::load`]), partitioned ([`PARTITIONER`]), distributed and refined uniformly
+    /// `refinements` times. Collective.
+    ///
+    /// Errors: [`MeshError::Petsc`] if splitting, distributing or refining fails.
+    pub fn from_dm(petsc: &Petsc, coarse: Dm, refinements: u32) -> Result<Mesh, MeshError> {
+        let comm = petsc.comm();
+        let mut coarse = coarse;
+        let dim = coarse.dimension()?;
         if dim == 2
             && let Some(split) = split::split_pinched_vertices(&coarse, &comm)?
         {
@@ -152,7 +241,14 @@ impl Mesh {
             tags,
             bounds,
             dim,
+            generated: None,
         })
+    }
+
+    /// On process 0, the mesh the mesher made for a `polygons` or `lobules` source and its
+    /// quality ([`Mesh::load`]); `None` on the other processes and for a gmsh source.
+    pub fn generated(&self) -> Option<&(TaggedMesh, Quality)> {
+        self.generated.as_ref()
     }
 
     /// The levels, coarse first: the distributed mesh as read, then each refinement of the one
@@ -291,6 +387,79 @@ fn check_readable(petsc: &Petsc, path: &Path) -> Result<(), MeshError> {
                 message: "process 0 cannot read the mesh file (its error tells why)".to_string(),
             }),
         }),
+    }
+}
+
+/// The 2D mesh of the source of `scene` as a [`TaggedMesh`], and its quality, made on this
+/// process alone (no collective call; `PETSC_COMM_SELF`): for a gmsh source the file read and
+/// converted ([`TaggedMesh::from_dm`], the quality without a size field); for a `polygons`
+/// source the polygons file meshed with the size field of the scene, for a `lobules` source the
+/// lobules ([`mesher::generate`], the quality against the size field).
+///
+/// Errors: [`MeshError::NotFound`] and [`MeshError::Read`] for a gmsh file which is not there or
+/// which PETSc cannot read; [`MeshError::Mesher`] if the scene is not two dimensional, the
+/// polygons file cannot be read, or the mesh cannot be made (a mesher error, with the path of
+/// the polygons or gmsh file, and the place in um).
+pub fn mesh_serial(petsc: &Petsc, scene: &Scene) -> Result<(TaggedMesh, Quality), MeshError> {
+    let mesher = |message: String| MeshError::Mesher { message };
+    two_dimensional(scene)?;
+    match &scene.mesh {
+        MeshSource::Gmsh { path } => {
+            if !path.is_file() {
+                return Err(MeshError::NotFound { path: path.clone() });
+            }
+            let dm = read(petsc, &petsc.comm_self(), path).map_err(|source| MeshError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let tagged = TaggedMesh::from_dm(&dm)
+                .map_err(|e| mesher(format!("cannot convert the mesh {}: {e}", path.display())))?;
+            let quality = tagged
+                .quality(None)
+                .map_err(|e| mesher(format!("the mesh {}: {e}", path.display())))?;
+            Ok((tagged, quality))
+        }
+        MeshSource::Polygons { path, size } => {
+            let polygons = Polygons::load(path).map_err(|e| match e {
+                // These name the file.
+                ContractError::Io { .. } | ContractError::Parse { .. } => {
+                    mesher(format!("cannot read the polygons: {e}"))
+                }
+                e => mesher(format!("cannot read the polygons {}: {e}", path.display())),
+            })?;
+            let cannot = |e: mesher::MesherError| {
+                mesher(format!("cannot mesh the polygons {}: {e}", path.display()))
+            };
+            let domain = Domain::from_polygons(&polygons).map_err(cannot)?;
+            let size = Size::new(size, &domain).map_err(cannot)?;
+            mesher::generate(petsc, &domain, &size).map_err(cannot)
+        }
+        MeshSource::Lobules(spec) => {
+            let cannot = |e: mesher::MesherError| match e {
+                // Its own message starts with "lobules: ".
+                mesher::MesherError::InvalidLobules(m) => {
+                    mesher(format!("cannot mesh the lobules: {m}"))
+                }
+                e => mesher(format!("cannot mesh the lobules: {e}")),
+            };
+            let lobules = Lobules::new(spec).map_err(cannot)?;
+            mesher::generate(petsc, lobules.domain(), lobules.size()).map_err(cannot)
+        }
+    }
+}
+
+/// An error ([`MeshError::Mesher`]) unless `scene` is two dimensional, as the meshes of the
+/// mesher are.
+fn two_dimensional(scene: &Scene) -> Result<(), MeshError> {
+    if scene.dimension == 2 {
+        Ok(())
+    } else {
+        Err(MeshError::Mesher {
+            message: format!(
+                "the mesher makes 2D meshes, but the scene has dimension {}",
+                scene.dimension
+            ),
+        })
     }
 }
 

@@ -1,8 +1,9 @@
 # Example studies
 
 The studies under `testdata/studies/` run end to end in the tests of `crates/slidesim`, and
-show the parts of `study/1` one at a time. The meshes are written by
-`testdata/meshes/make_fixtures.py` (gmsh), named as slideviz names its tags.
+show the parts of `study/1` one at a time. The gmsh meshes are written by
+`testdata/meshes/make_fixtures.py`, named as slideviz names its tags; the lobule studies run on
+meshes slidesim generates.
 
 | Study | Scene | What it shows |
 | --- | --- | --- |
@@ -10,6 +11,9 @@ show the parts of `study/1` one at a time. The meshes are written by
 | `lobule_toy/study.json` | `lobule_toy.msh`: a 400 um square with a portal and a central hole, and a `zonation` map | Darcy perfusion from `portal_wall` (390 Pa) to `central_wall` (0 Pa), sucrose carried by the flow from the portal wall |
 | `cells_toy/cells.study.json` | the scene of `lobule_toy` | the linear cell model `linear_uptake.xml`: uptake from the blood at a rate from the zonation; the amount in blood and cells changes by the wall flows only |
 | `cells_toy/spt.study.json` | the scene of `lobule_toy` | the SPT liver cell model `spt_liver_cell.xml`, `S_ext` and `P_ext` coupled to the fields `S` (5 mM at the portal wall) and `P`, for 60 min, with a lowered necrosis threshold so that necrosis starts within the hour |
+| `lobules/spt.study.json`, `lobules/spt_batched.study.json` | `lobules/scene.json`: one ideal lobule, generated | the SPT model on one lobule, 24 h, hourly outputs, engine and batched path |
+| `lobules/ring1_spt.study.json`, `lobules/ring1_spt_batched.study.json` | `lobules/ring1.scene.json`: 7 ideal lobules, generated | the same on a ring of lobules |
+| `lobules/linear.study.json` | `lobules/scene.json` | the linear cell model on the generated lobule for 1 h: conservation, agreement across process counts, order of the splitting |
 | `cells_manufactured/study.json` | the unit square | a linear cell model in a closed domain whose coupled solution is known: the order of the Strang splitting |
 | `m2_real_slide/*.study.json` | a real slide (not in the repository) | the four perfusion studies of the [milestone 2 results](results/2026-11-m2-real-slide.md): baseline, calibrated, whole blood, radial10 |
 | `m3_real_slide/spt.study.json` | a dosed real slide (not in the repository) | the SPT model for 24 h on the 281 mg/kg slide, the coupled baseline of the [performance results](results/2026-11-m3-performance.md) |
@@ -102,4 +106,51 @@ the portal walls) and `P` are carried by the flow, for 24 h with hourly outputs:
               46800, 50400, 54000, 57600, 61200, 64800, 68400, 72000, 75600, 79200, 82800, 86400]
 },
 "mesh": {"refinements": 1}
+```
+
+## Ideal lobules
+
+`testdata/studies/lobules` runs on meshes slidesim generates from parameters
+([Meshing](methods/meshing.md#ideal-lobules)): `scene.json` is one hexagonal lobule of 300 um
+circumradius with a central vein of 30 um radius and six portal fields of 25 um radius at the
+corners, `ring1.scene.json` the lobule with its ring of 6 neighbours (7 lobules, 24 portal
+fields). The edge tags are `central_wall`, `portal_wall` and `field_cut` (the outer border, the
+cut through the tissue), the area tag `tissue`, and the zonation map `zonation` is computed from
+the geometry (0 at the portal walls, 1 at the central walls):
+
+```json
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {"length": "um"},
+  "mesh": {
+    "format": "lobules",
+    "lobule_radius_um": 300.0,
+    "rings": 0,
+    "jitter": 0.0,
+    "seed": 0,
+    "centre": {"radius_um": 30.0, "tag": "central_wall"},
+    "corner": {"radius_um": 25.0, "tag": "portal_wall"},
+    "outer_tag": "field_cut",
+    "area_tag": "tissue",
+    "size": {"wall_um": 5.0, "interior_um": 20.0},
+    "zonation": {"map": "zonation", "um_per_px": 2.0}
+  }
+}
+```
+
+| Scene | Coarse mesh | Quality | Meshing (debug build) |
+| --- | --- | --- | --- |
+| `scene.json` | 5,902 triangles, 3,093 vertices | min angle 25.5 deg, SICN min 0.64, edge length / size 0.51 to 1.58 | 0.2 s |
+| `ring1.scene.json` | 41,094 triangles, 21,166 vertices | min angle 24.3 deg, SICN min 0.61, edge length / size 0.52 to 1.53 | 12 s |
+
+The SPT studies are those of `cells_toy/spt.study.json` for 24 h with hourly outputs: `S` held
+at 5 mM at the portal walls, the perfusion of the toy lobule, CYP2E1 (`protein_ext`) and the
+position from the zonation, one refinement (the cells on the coarse mesh, the fields on its
+refinement), and the model's own necrosis threshold. `spt.study.json` and
+`ring1_spt.study.json` take the engine path, the `_batched` studies the batched one.
+
+```bash
+target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh
+target/release/slidesim run testdata/studies/lobules/spt_batched.study.json --out spt
 ```

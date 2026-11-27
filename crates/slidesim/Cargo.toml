@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 contracts = { path = "../contracts" }
 maps = { path = "../maps" }
 mesh = { path = "../mesh" }
+mesher = { path = "../mesher" }
 pde = { path = "../pde" }
 petsc = { path = "../petsc" }
 serde = { version = "1", features = ["derive"] }

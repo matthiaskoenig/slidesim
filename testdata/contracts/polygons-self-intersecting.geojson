@@ -1,0 +1,11 @@
+{
+  "type": "FeatureCollection",
+  "version": "polygons/1",
+  "meta": {"source": "test: a ring crossing itself at (50, 50)"},
+  "features": [
+    {"type": "Feature", "properties": {"kind": "area", "tag": "tissue"},
+     "geometry": {"type": "Polygon", "coordinates": [[[0,0],[100,100],[100,0],[0,100],[0,0]]]}},
+    {"type": "Feature", "properties": {"kind": "edge", "tag": "section_edge"},
+     "geometry": {"type": "LineString", "coordinates": [[0,0],[100,100],[100,0],[0,100],[0,0]]}}
+  ]
+}

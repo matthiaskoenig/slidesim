@@ -201,3 +201,63 @@ fn float32_no_value_matches_in_f32_precision() {
     assert_eq!(map.sample([2.5, 2.5]).unwrap(), 1.0);
     std::fs::remove_dir_all(dir.parent().unwrap()).ok();
 }
+
+/// A map of `f(x) = x + 2 y` made by `Map::from_fn` holds the values of `f` at the pixel centres
+/// of the window `Map::read` would read: bilinear samples and gradients are those of `f` inside
+/// the window, and it is the window, values included, of the same raster read from Zarr.
+#[test]
+fn from_fn_samples_exactly_at_pixel_centres() {
+    let f = |x: [f64; 2]| x[0] + 2.0 * x[1];
+    let (um_per_px, origin_um, shape) = (0.5, [-0.5, 0.25], [40, 30]);
+    let bounds = [[3.0, 4.0], [9.0, 7.0]];
+    let map = Map::from_fn("linear", um_per_px, origin_um, shape, bounds, f);
+    assert_eq!(map.id(), "linear");
+    for x in points(200, bounds[0], bounds[1]) {
+        let v = map.sample(x).unwrap();
+        assert!((v - f(x)).abs() <= 1e-12, "{x:?}: {v} vs {}", f(x));
+        let g = map.gradient(x).unwrap();
+        assert!(
+            (g[0] - 1.0).abs() <= 1e-12 && (g[1] - 2.0).abs() <= 1e-12,
+            "{x:?}: {g:?}"
+        );
+    }
+    // The same pixels written to Zarr and read over the same bounds.
+    let mut values = Vec::with_capacity(shape[0] * shape[1]);
+    for r in 0..shape[0] {
+        for c in 0..shape[1] {
+            let x = [
+                origin_um[0] + c as f64 * um_per_px,
+                origin_um[1] + r as f64 * um_per_px,
+            ];
+            values.push(f(x));
+        }
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("from_fn_samples_exactly");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    let spec = write_test_map(&dir, &values, shape[0], shape[1], um_per_px, origin_um);
+    let read = Map::read(&spec, bounds).unwrap();
+    assert_eq!(map.window_size(), read.window_size());
+    for x in points(200, bounds[0], bounds[1]) {
+        assert_eq!(map.sample(x).unwrap(), read.sample(x).unwrap(), "{x:?}");
+        assert_eq!(map.gradient(x).unwrap(), read.gradient(x).unwrap(), "{x:?}");
+    }
+    // Beyond the window (inside the raster) there is no value.
+    assert!(matches!(
+        map.sample([12.0, 15.0]),
+        Err(MapError::Outside { .. })
+    ));
+}
+
+/// `Maps::insert` adds a map under its id, or replaces the map of that id.
+#[test]
+fn insert_adds_or_replaces_by_id() {
+    let mut maps = Maps::default();
+    let window = [[0.0, 0.0], [4.0, 4.0]];
+    maps.insert(Map::from_fn("a", 1.0, [0.0, 0.0], [8, 8], window, |_| 1.0));
+    maps.insert(Map::from_fn("b", 1.0, [0.0, 0.0], [8, 8], window, |_| 2.0));
+    maps.insert(Map::from_fn("a", 1.0, [0.0, 0.0], [8, 8], window, |_| 3.0));
+    assert_eq!(maps.get("a").unwrap().sample([1.0, 1.0]).unwrap(), 3.0);
+    assert_eq!(maps.get("b").unwrap().sample([1.0, 1.0]).unwrap(), 2.0);
+}

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use common::{cells_by_centroid, points_by_position, relative_difference, vtu_array};
+use common::{cells_by_centroid, points_by_position, relative_difference, variant, vtu_array};
 use serde_json::Value;
 use test_support::{Mpiexec, Run, run_with_timeout};
 
@@ -851,7 +851,7 @@ fn with_solver(study: &Path, solver: &str, dir: &Path) -> PathBuf {
 /// The linear cell model on `cells_toy` on 2 and 3 processes, with fixed transport steps, on
 /// both paths of the cells: the fields, the states of the cells and the integrals of
 /// `summary.json` agree with one process within 1e-10, and the cells take the same steps (their
-/// step control is their own).
+/// step control is their own) but for a few, whose inputs differ in the last digits.
 #[test]
 fn cells_parallel_matches_one() {
     let dir = scratch("cells_parallel_matches_one");
@@ -891,8 +891,20 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
             &balances(&serial, "substrate"),
             &balances(&parallel, "substrate"),
         );
-        for key in ["count", "steps", "rejected"] {
-            assert_eq!(one["cells"][key], many["cells"][key], "{key}");
+        assert_eq!(one["cells"]["count"], many["cells"]["count"]);
+        // The step control of a cell sees its means, which differ in the last digits on other
+        // numbers of processes (other partitions, the linear solves to their tolerance): among
+        // millions of steps, a few are taken otherwise.
+        let steps = one["cells"]["steps"].as_u64().unwrap() as f64;
+        for key in ["steps", "rejected"] {
+            let (a, b) = (
+                one["cells"][key].as_u64().unwrap(),
+                many["cells"][key].as_u64().unwrap(),
+            );
+            assert!(
+                a.abs_diff(b) as f64 <= 1e-4 * steps,
+                "{key}: {a} against {b} of {steps} steps"
+            );
         }
         // The fields, point by point.
         let path = |out: &Path| out.join(format!("substrate_{last}.vtu"));
@@ -912,15 +924,19 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
         );
         assert_eq!(a.len(), b.len());
         let mut cells = 0.0_f64;
+        let mut columns = Vec::new();
         for k in 0..cell_values.len() {
             assert!(a.iter().zip(&b).all(|(x, y)| x.0 == y.0));
             let column = |c: &[([i64; 2], Vec<f64>)]| c.iter().map(|x| x.1[k]).collect::<Vec<_>>();
-            cells = cells.max(relative_difference(&column(&a), &column(&b)));
+            let difference = relative_difference(&column(&a), &column(&b));
+            columns.push(format!("{} {difference:e}", cell_values[k]));
+            cells = cells.max(difference);
         }
         eprintln!(
             "{}: relative differences, {ranks} processes against 1: integrals {largest:e}, \
-             mass_balance {balance:e}, field {fields:e}, cells {cells:e}",
-            study.display()
+             mass_balance {balance:e}, field {fields:e}, cells {cells:e} ({})",
+            study.display(),
+            columns.join(", ")
         );
         assert!(largest < 1e-10, "{largest:e}");
         assert!(balance < 1e-10, "{balance:e}");
@@ -993,4 +1009,154 @@ fn spt_toy_runs() {
     }
     assert!(started.is_some(), "no necrosis");
     assert!(summary["cells"]["amounts"]["T"].as_array().is_some());
+}
+
+/// The file `name` of `testdata/studies/lobules`, the studies on the meshes slidesim generates.
+fn lobules(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/lobules")
+        .join(name)
+}
+
+/// `slidesim mesh <scene> --out <out>`.
+fn mesh_args(scene: &Path, out: &Path) -> Vec<String> {
+    vec![
+        "mesh".to_string(),
+        scene.display().to_string(),
+        "--out".to_string(),
+        out.display().to_string(),
+    ]
+}
+
+/// `slidesim mesh` of the lobule scene: the mesh as JSON (a `TaggedMesh` with the tags of the
+/// scene), as VTU (a cell array per area tag) and its quality (also in one line on stdout).
+#[test]
+fn mesh_command_writes_mesh_and_quality() {
+    let out = scratch("mesh_command_writes_mesh_and_quality").join("out");
+    let run = slidesim(&mesh_args(&lobules("scene.json"), &out));
+    assert_success(&run);
+    for file in ["mesh.json", "mesh.vtu", "quality.json"] {
+        assert!(out.join(file).is_file(), "{file}");
+    }
+    let quality: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap()).unwrap();
+    let min_angle = quality["min_angle_deg"].as_f64().unwrap();
+    assert!(min_angle >= 20.0, "{quality}");
+    let mesh: mesher::TaggedMesh =
+        serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+    let mut names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["central_wall", "field_cut", "portal_wall", "tissue"]
+    );
+    assert_eq!(
+        quality["triangles"].as_u64().unwrap() as usize,
+        mesh.triangles.len()
+    );
+    // One cell array per area tag, its value in every triangle.
+    let tissue = vtu_array(&out.join("mesh.vtu"), "tissue");
+    assert_eq!(tissue.len(), mesh.triangles.len());
+    assert!(tissue.iter().all(|&v| v == 1.0), "{:?}", &tissue[..10]);
+    assert!(run.stdout.contains("min angle"), "{}", run.stdout);
+}
+
+/// `slidesim mesh` meshes on one process: on two it is a usage error, and no process waits.
+#[test]
+fn mesh_command_on_two_processes_is_a_usage_error() {
+    let out = scratch("mesh_command_on_two_processes_is_a_usage_error").join("out");
+    let Some(run) = slidesim_parallel(2, &mesh_args(&lobules("scene.json"), &out)) else {
+        return;
+    };
+    assert!(!run.status.unwrap().success(), "{}", run.stderr);
+    assert!(run.stderr.contains("one process"), "{}", run.stderr);
+    assert!(!out.exists());
+}
+
+/// The SPT study of the generated lobule on the batched path, shortened to 30 min: it runs, and
+/// every mass balance closes.
+#[test]
+fn lobule_spt_runs() {
+    let dir = scratch("lobule_spt_runs");
+    let study = variant(&lobules("spt_batched.study.json"), &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(1800.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 900.0, 1800.0]);
+    });
+    let out = dir.join("out");
+    let run = slidesim(&args(&study, &out, &[]));
+    assert_success(&run);
+    assert!(run.stdout.contains("min angle"), "{}", run.stdout);
+    for field in ["S", "P"] {
+        let balances = balances(&out, field);
+        assert_eq!(balances.len(), 3);
+        assert!(balances[0].is_none());
+        for terms in balances.iter().flatten() {
+            assert_closes(terms);
+        }
+    }
+    let summary = summary_json(&out);
+    assert!(
+        summary["cells"]["count"].as_u64().unwrap() > 1000,
+        "{summary}"
+    );
+}
+
+/// [`cells_parallel_matches_one`] on the mesh slidesim generates for one lobule (process 0
+/// meshes, every process gets its part), with the linear study shortened to 15 min, the linear
+/// solves to 1e-12 and the cells to 1e-12 (rtol; atol 1e-16).
+///
+/// The tolerances are those of an agreement to 1e-10. With the linear solves to 1e-10 the
+/// fields of other partitions differ by 5e-11, which the cells carry to 1.4e-10 in `A` and
+/// `uptake_rate`. And a cell whose step control decides otherwise (inputs which differ in the
+/// last digits; a few of millions of steps) differs by its integration error: 4e-10 in `A` at
+/// the study's rtol 1e-8, 9e-11 at 1e-11.
+#[test]
+fn cells_parallel_matches_one_on_generated_lobule() {
+    let dir = scratch("cells_parallel_matches_one_on_generated_lobule");
+    let study = variant(&lobules("linear.study.json"), &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(900.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0, 900.0]);
+        doc["solver"] = serde_json::json!({"petsc_options": "-ksp_rtol 1e-12"});
+        doc["cells"]["rtol"] = Value::from(1e-12);
+        doc["cells"]["atol"] = Value::from(1e-16);
+    });
+    cells_parallel_matches_one_on(&study, &dir);
+}
+
+/// A polygons scene which the mesher rejects (a ring crossing itself) on two processes: process
+/// 0 meshes alone, and every process ends with exit code 1 and the error, which names the
+/// polygons file and the crossing; none waits for another.
+#[test]
+fn mesher_failure_on_process_0_stops_all() {
+    let dir = scratch("mesher_failure_on_process_0_stops_all");
+    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/contracts");
+    let scene = contracts.join("scene-polygons-self-intersecting.json");
+    let study = dir.join("study.json");
+    let doc = serde_json::json!({
+        "version": "study/1",
+        "scene": scene.display().to_string(),
+        "fields": [{
+            "id": "u", "diffusion": 1.0, "decay": 0.0, "source": 0.0, "initial": 0.0,
+            "boundaries": [{"tag": "section_edge", "dirichlet": 1.0}]
+        }],
+        "time": {"end": 1.0, "dt": 0.5, "outputs": [1.0]}
+    });
+    std::fs::write(&study, doc.to_string()).unwrap();
+    let out = dir.join("out");
+    let Some(run) = slidesim_parallel(2, &args(&study, &out, &[])) else {
+        return;
+    };
+    assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+    let file = std::path::absolute(contracts.join("polygons-self-intersecting.geojson")).unwrap();
+    for rank in 0..2 {
+        let line = run
+            .stderr
+            .lines()
+            .find(|l| l.starts_with(&format!("[rank {rank}] error:")))
+            .unwrap_or_else(|| panic!("no error of rank {rank}: {}", run.stderr));
+        assert!(line.contains(&file.display().to_string()), "{line}");
+        assert!(line.contains("cross at (50, 50) um"), "{line}");
+    }
+    assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    assert!(!run.stderr.contains("MPI_Abort"), "{}", run.stderr);
 }

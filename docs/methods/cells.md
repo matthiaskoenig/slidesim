@@ -70,7 +70,13 @@ The second half of one split step and the first half of the next, with no transp
 them, are one cell step from \(m_k\) to \(m_{k+1}\): the same scheme with half the cell steps and
 half the restarts of the time integration of the fields. At an output time the half steps stay
 apart, so the cells reach it before the outputs are written. The splitting is of order 2 in the
-split step.
+split step once the split step is short against the time in which the transport replenishes the
+blood next to a cell. Over longer split steps a cell depletes its blood within a cell step with
+no supply, and the error is of first order: with the perfusion of a lobule (the blood replenished
+within seconds) and split steps of minutes, the amount the linear model takes up on the generated
+lobule in 1 h differs by 3 % between split steps of 120 and 60 s, the differences of successive
+halvings falling by a factor 1.9. With the transport 100 times slower, the same split steps show
+order 2.
 
 ## Exchange with the blood
 
@@ -119,6 +125,14 @@ solves than steps in the 24 h run on a real slide
 - Coupling, manufactured: a linear cell model in a closed domain with a known coupled solution,
   order 2 of the Strang splitting in the split step (`strang_order_two`,
   `testdata/studies/cells_manufactured`).
+- Coupling on the generated lobule (`testdata/studies/lobules/linear.study.json`): order 2 of
+  the splitting with split steps of 240, 120 and 60 s and the transport slowed
+  (`strang_order_two_on_generated_lobule`), conservation
+  (`coupled_conservation_on_generated_lobule`), and 1, 2 and 3 processes within 1e-10
+  (`cells_parallel_matches_one_on_generated_lobule`, with the linear solves and the cells to
+  1e-12: with the linear solves to 1e-10 the fields of other partitions differ by 5e-11, which
+  the cells carry to 1.4e-10, and a cell whose step control decides otherwise differs by its
+  integration error).
 - Conservation: the amount of substance in blood and cells together changes by the boundary
   flows only (`coupled_conservation`, also with adaptive steps).
 - End to end on a real slide, 24 h on 41,252 cells: the two paths agree on every cell's

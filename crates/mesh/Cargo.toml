@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 contracts = { path = "../contracts" }
+mesher = { path = "../mesher" }
 petsc = { path = "../petsc" }
 thiserror = "2"
 

@@ -24,7 +24,9 @@ the processes (PT-Scotch), and every result agrees across process counts within 
    checks the `cells` section against the study and the scene. With cells, it translates the
    model to C, compiles it and checks it against the study, all before anything is solved.
 2. Loads the mesh, distributed over the processes and refined `mesh.refinements` times, and
-   reads the maps over the cells of each process.
+   reads the maps over the cells of each process. Tagged polygons and lobules are meshed by
+   process 0 first ([Meshing](methods/meshing.md)), and the run prints the quality of the mesh
+   in one line; the zonation map of lobules is computed over the cells of each process.
 3. With `perfusion`: solves the steady Darcy flow once ([Perfusion](methods/perfusion.md)).
 4. Steps the fields to each output time of `time.outputs` in turn, then to `time.end`: each field
    alone, or with `cells` all fields and the cells together by Strang splitting
@@ -139,6 +141,33 @@ target/debug/slidesim run testdata/studies/cells_toy/spt.study.json --out out
 `cells.solver` chooses the path: `batched` (the default, the cells of a process as one libCEED
 operator) or `engine` (one sbmlsim-core engine instance per cell, for every model sbmlsim-core
 handles).
+
+## Meshes
+
+`slidesim mesh` writes the mesh of a `scene/1` and its quality, without a run: the mesh a run
+makes of the scene before the refinements of the study. A gmsh mesh is read and converted,
+tagged polygons and lobules are meshed ([Meshing](methods/meshing.md)). It runs on one process
+(under `mpiexec` with more it is a usage error).
+
+```text
+slidesim mesh <SCENE> --out <DIR>
+```
+
+```bash
+target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh
+```
+
+```text
+mesh: 5902 triangles, 3093 vertices, min angle 25.46 deg, SICN min 0.641 mean 0.960, edge length / size 0.51 to 1.58
+```
+
+`DIR` is created if missing; the three files in it are overwritten.
+
+| File | Content |
+| --- | --- |
+| `mesh.json` | the mesh: `vertices` (`[x, y]` in um), `triangles` (three vertex indices, counterclockwise), `triangle_tags` (the index of the area tag of each triangle), `edges` (the tagged edges, `[a, b]` with `a < b`, one entry per edge and tag), `edge_tags` (the index of the tag of each), and `tags` (`name`, `value` and `dim`: 2 for an area tag, 1 for an edge tag) |
+| `mesh.vtu` | for ParaView: one cell array per area tag, named after it, with the value of the tag in its triangles and NaN elsewhere |
+| `quality.json` | `triangles`, `vertices`, `min_angle_deg`, `min_sicn`, `mean_sicn`, and for a generated mesh `edge_ratio`: the smallest and largest ratio of an edge length to the size field (null for a gmsh mesh) |
 
 ## PETSc options
 

@@ -1033,6 +1033,7 @@ name = "mesh"
 version = "0.1.0"
 dependencies = [
  "contracts",
+ "mesher",
  "petsc",
  "test-support",
  "thiserror",
@@ -1770,6 +1771,7 @@ dependencies = [
  "contracts",
  "maps",
  "mesh",
+ "mesher",
  "pde",
  "petsc",
  "serde",

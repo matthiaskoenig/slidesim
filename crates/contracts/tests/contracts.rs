@@ -304,8 +304,11 @@ fn example_studies_are_valid() {
             "{study}"
         );
         let scene = Scene::load(&loaded.scene).unwrap();
-        let path = scene.mesh.path().unwrap();
-        assert!(path.is_file(), "{}", path.display());
+        // The file of the mesh or the polygons; a lobule source has none.
+        if let Some(path) = scene.mesh.path() {
+            assert!(path.is_file(), "{}", path.display());
+        }
+        check_maps(&loaded, &scene).unwrap();
     }
 }
 

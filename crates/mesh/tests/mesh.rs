@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use contracts::{LengthUnit, MeshSource, SCENE_VERSION, Scene, Units};
 use mesh::{Mesh, MeshError, Tag};
+use mesher::TaggedMesh;
 use petsc::{Dm, Petsc, Point};
 
 /// The radius in um of the two holes of `tissue_small.msh` (`HOLE_RADIUS` of
@@ -486,8 +487,11 @@ fn coarse_cell_contains_fine_centroids() {
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 14] = [
+const PARALLEL_TESTS: [&str; 17] = [
     "mpi_world_has_the_expected_size",
+    "from_tagged_matches_load_of_the_same_mesh",
+    "lobule_scene_loads",
+    "mesher_error_names_the_polygons_file",
     "coarse_cell_contains_fine_centroids",
     "pinched_vertex_is_split_per_fan",
     "mesh_without_pinched_vertex_is_unchanged",
@@ -519,19 +523,84 @@ fn parallel_on_3_processes() {
     test_support::parallel(3, &PARALLEL_TESTS);
 }
 
+/// The `TaggedMesh` of `lobule_toy.msh` (read on process 0 alone, converted with
+/// `TaggedMesh::from_dm`) through `Mesh::from_tagged` gives the mesh `Mesh::load` gives: the same
+/// cells, tags, area and points per tag, on every level.
 #[test]
-fn generated_sources_are_not_yet_supported() {
+fn from_tagged_matches_load_of_the_same_mesh() {
+    let p = Petsc::init(&[]).unwrap();
+    let tagged = (p.comm().rank() == 0).then(|| {
+        let dm = p
+            .with_option("-dm_plex_gmsh_use_regions", Some("true"), || {
+                Dm::plex_from_file(&p.comm_self(), &fixture("lobule_toy.msh"), "mesh", true)
+            })
+            .unwrap();
+        TaggedMesh::from_dm(&dm).unwrap()
+    });
+    for refinements in [0, 1] {
+        let generated = Mesh::from_tagged(&p, tagged.as_ref(), refinements).unwrap();
+        let loaded = Mesh::load(&p, &scene("lobule_toy.msh"), refinements).unwrap();
+        assert_eq!(generated.tags(), loaded.tags());
+        assert_eq!(generated.levels().len(), loaded.levels().len());
+        for (g, l) in generated.levels().iter().zip(loaded.levels()) {
+            assert_eq!(global_cells(g), global_cells(l));
+            let (a, b) = (area(g), area(l));
+            assert!(((a - b) / b).abs() < 1e-12, "{a} != {b}");
+            assert_eq!(census(g, generated.tags()), census(l, loaded.tags()));
+        }
+    }
+}
+
+/// The lobule scene of the example studies (one lobule, rings 0) meshed on process 0 and
+/// distributed: its tags, the area of the analytic geometry, and 4 times the coarse cells after
+/// one refinement.
+#[test]
+fn lobule_scene_loads() {
+    let p = Petsc::init(&[]).unwrap();
+    let scene = Scene::load(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/lobules/scene.json"),
+    )
+    .unwrap();
+    let mesh = Mesh::load(&p, &scene, 1).unwrap();
+    assert_eq!(
+        mesh.tags(),
+        [
+            tag("central_wall", 1),
+            tag("field_cut", 1),
+            tag("portal_wall", 1),
+            tag("tissue", 2)
+        ]
+    );
+    let exact = 227072.43481658038;
+    let a = area(mesh.finest());
+    assert!(
+        ((a - exact) / exact).abs() < 1e-3,
+        "area {a}, exact {exact}"
+    );
+    let coarse = global_cells(&mesh.levels()[0]);
+    assert_eq!(global_cells(mesh.finest()), 4 * coarse);
+    // Process 0 meshed, and holds the mesh and its quality.
+    assert_eq!(mesh.generated().is_some(), p.comm().rank() == 0);
+    if let Some((tagged, quality)) = mesh.generated() {
+        assert_eq!(tagged.triangles.len() as i32, coarse);
+        assert_eq!(quality.triangles, tagged.triangles.len());
+        assert!(quality.min_angle_deg >= 20.0, "{quality:?}");
+    }
+}
+
+/// A polygons scene the mesher cannot mesh (a ring crossing itself): an error on every process
+/// which names the polygons file and the crossing.
+#[test]
+fn mesher_error_names_the_polygons_file() {
     let p = Petsc::init(&[]).unwrap();
     let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/contracts");
-    for (file, format) in [
-        ("scene-polygons.json", "polygons"),
-        ("scene-lobules.json", "lobules"),
-    ] {
-        let scene = Scene::load(contracts.join(file)).unwrap();
-        let err = Mesh::load(&p, &scene, 0).unwrap_err();
-        assert!(
-            matches!(err, MeshError::Source { format: f } if f == format),
-            "{file}: {err}"
-        );
-    }
+    let scene = Scene::load(contracts.join("scene-polygons-self-intersecting.json")).unwrap();
+    let err = Mesh::load(&p, &scene, 0).unwrap_err();
+    let MeshError::Mesher { message } = &err else {
+        panic!("{err:?}");
+    };
+    let file = std::path::absolute(contracts.join("polygons-self-intersecting.geojson")).unwrap();
+    assert!(message.contains(&file.display().to_string()), "{message}");
+    assert!(message.contains("cross at (50, 50) um"), "{message}");
+    assert_eq!(err.to_string(), *message);
 }

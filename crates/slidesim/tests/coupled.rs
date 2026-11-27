@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use common::vtu_array;
+use common::{variant, vtu_array};
 use serde_json::Value;
 use test_support::{Run, run_with_timeout};
 
@@ -59,27 +59,6 @@ fn run(study: &Path, out: &Path) {
         status.is_some_and(|s| s.success()),
         "{status:?}:\n{stdout}\n{stderr}"
     );
-}
-
-/// The study `path` with its scene and cell model as absolute paths, changed by `change`,
-/// written into `dir`.
-fn variant(path: &Path, dir: &Path, name: &str, change: impl FnOnce(&mut Value)) -> PathBuf {
-    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    let base = path.parent().unwrap();
-    doc["scene"] = Value::from(
-        base.join(doc["scene"].as_str().unwrap())
-            .display()
-            .to_string(),
-    );
-    doc["cells"]["model"] = Value::from(
-        base.join(doc["cells"]["model"].as_str().unwrap())
-            .display()
-            .to_string(),
-    );
-    change(&mut doc);
-    let study = dir.join(format!("{name}.study.json"));
-    std::fs::write(&study, doc.to_string()).unwrap();
-    study
 }
 
 fn summary(out: &Path) -> Value {
@@ -179,28 +158,75 @@ fn strang_order_two() {
 /// mass balance of the field closes with the exchange, and the cells hold what they took.
 #[test]
 fn coupled_conservation() {
-    conservation("coupled_conservation", false);
+    conservation("coupled_conservation", CELLS_TOY, false);
 }
 
 /// As [`coupled_conservation`], with adaptive steps of the fields: each steps to the end of a
 /// split step, its last step shortened to end there.
 #[test]
 fn coupled_conservation_with_adaptive_steps() {
-    conservation("coupled_conservation_with_adaptive_steps", true);
+    conservation("coupled_conservation_with_adaptive_steps", CELLS_TOY, true);
 }
 
-fn conservation(name: &str, adaptive: bool) {
+/// The linear model on `cells_toy`.
+const CELLS_TOY: &str = "studies/cells_toy/cells.study.json";
+
+/// The linear model on the generated lobule.
+const LOBULE: &str = "studies/lobules/linear.study.json";
+
+/// [`coupled_conservation`] on the mesh which slidesim generates for one lobule.
+#[test]
+fn coupled_conservation_on_generated_lobule() {
+    conservation("coupled_conservation_on_generated_lobule", LOBULE, false);
+}
+
+/// The linear model on the generated lobule for 1 h with split steps of 240, 120 and 60 s and
+/// the same transport steps: the amount in the cells at 1 h converges at second order, the
+/// ratio of the successive differences at least 3.5 (4 for an error of exactly second order).
+///
+/// The transport is 100 times slower than in the study (the portal pressure and the diffusion
+/// coefficient): second order needs split steps short against the time in which the transport
+/// replenishes the blood the cells deplete. At the flow of the study that time is seconds, and
+/// over split steps of minutes the cells deplete their blood without replenishment: an error of
+/// first order (the ratio is 1.9 there, the amounts of split steps of 120 and 60 s 3 % apart).
+#[test]
+fn strang_order_two_on_generated_lobule() {
+    let dir = scratch("strang_order_two_on_generated_lobule");
+    let mut amounts = Vec::new();
+    for split in [240.0, 120.0, 60.0] {
+        let name = format!("split_{split}");
+        let study = variant(&testdata(LOBULE), &dir, &name, |doc| {
+            assert_eq!(doc["perfusion"]["boundaries"][0]["tag"], "portal_wall");
+            doc["perfusion"]["boundaries"][0]["pressure"] = Value::from(3.9);
+            doc["fields"][0]["diffusion"] = Value::from(10.0);
+            doc["cells"]["split_step"] = Value::from(split);
+            doc["time"]["outputs"] = serde_json::json!([0.0, 3600.0]);
+        });
+        let out = dir.join(&name);
+        run(&study, &out);
+        let summary = summary(&out);
+        assert_eq!(
+            numbers(&summary["fields"]["substrate"]["times"]),
+            [0.0, 3600.0]
+        );
+        let amount = numbers(&summary["cells"]["amounts"]["A"])[1];
+        eprintln!("split step {split} s: cells {amount}");
+        amounts.push(amount);
+    }
+    let ratio = (amounts[0] - amounts[1]) / (amounts[1] - amounts[2]);
+    eprintln!("amounts {amounts:?}, ratio of the differences {ratio}");
+    assert!(ratio >= 3.5, "{amounts:?}: {ratio}");
+}
+
+/// The study `study` (of `testdata`), the linear model without decay, conserves the substance
+/// (see [`coupled_conservation`]); with adaptive steps of the fields if `adaptive`.
+fn conservation(name: &str, study: &str, adaptive: bool) {
     let dir = scratch(name);
-    let study = variant(
-        &testdata("studies/cells_toy/cells.study.json"),
-        &dir,
-        "cells",
-        |doc| {
-            assert_eq!(doc["cells"]["parameters"][1]["id"], "d");
-            assert_eq!(doc["cells"]["parameters"][1]["value"], 0.0);
-            doc["time"]["adaptive"] = Value::from(adaptive);
-        },
-    );
+    let study = variant(&testdata(study), &dir, "cells", |doc| {
+        assert_eq!(doc["cells"]["parameters"][1]["id"], "d");
+        assert_eq!(doc["cells"]["parameters"][1]["value"], 0.0);
+        doc["time"]["adaptive"] = Value::from(adaptive);
+    });
     let out = dir.join("out");
     run(&study, &out);
     let summary = summary(&out);

@@ -51,7 +51,8 @@ tags (`portal_wall`, `central_wall`, `vessel_wall`, `section_edge`, `field_cut`,
 
 **`polygons`**: `{"format": "polygons", "path": "tissue.geojson", "size": {...}}`. `path` is a
 `polygons/1` file (below), relative to the scene file, which slidesim meshes with the size field
-`size`:
+`size` ([Meshing](methods/meshing.md)); the area and edge tags of the file are the tags of the
+mesh:
 
 | Key | Meaning |
 | --- | --- |
@@ -62,7 +63,8 @@ tags (`portal_wall`, `central_wall`, `vessel_wall`, `section_edge`, `field_cut`,
 | `walls` | edge tags the distance is measured from (default none: `max_um` everywhere) |
 
 **`lobules`**: parametric hexagonal liver lobules, generated and meshed by slidesim, with a
-central vein and a portal vein at every corner. All lengths in um.
+central vein and a portal vein at every corner ([Meshing](methods/meshing.md#ideal-lobules)). All
+lengths in um.
 
 | Key | Meaning |
 | --- | --- |
@@ -83,7 +85,26 @@ The veins must not touch even in the worst displacement: `centre.radius_um + cor
 and `2 corner.radius_um` are both below `(1 - 2 jitter) lobule_radius_um / 2`. The size field of
 the mesh is `wall_um` up to `2 wall_um` from the vein walls (the centre and corner tags), linear
 to `interior_um` at `10 interior_um`. Studies refer to the zonation map like to an entry of
-`maps`.
+`maps`. It is computed, not read: the relative position `d_p / (d_p + d_c)` between the walls
+(`d_p` the distance to the nearest corner wall, `d_c` to the nearest centre wall), at the pixel
+centres of a raster of `um_per_px` over the bounding box of the lobules.
+
+```json
+"mesh": {
+  "format": "lobules",
+  "lobule_radius_um": 300.0,
+  "rings": 0,
+  "centre": {"radius_um": 30.0, "tag": "central_wall"},
+  "corner": {"radius_um": 25.0, "tag": "portal_wall"},
+  "outer_tag": "field_cut",
+  "area_tag": "tissue",
+  "size": {"wall_um": 5.0, "interior_um": 20.0},
+  "zonation": {"map": "zonation", "um_per_px": 2.0}
+}
+```
+
+Both generated sources are 2D (`dimension` 2), meshed by process 0 of a run. An input the mesher
+cannot mesh is an error naming the polygons file and the place in um.
 
 A **map** is a 2D Zarr v3 array (rows along y, columns along x, float32 or float64), sampled
 bilinearly by slidesim at the quadrature points of every mesh level that needs it. Each process
@@ -132,7 +153,9 @@ members `version` and `meta` (free JSON, ignored). Coordinates are `[x, y]` in t
 
 The first ring of a polygon is its outer boundary, the others are holes. `Polygons::load` checks
 the kinds, the geometry types, the values and that no tag is both an area and an edge tag; the
-geometry (closed rings, no self-intersections, edges on area boundaries) is checked by the mesher.
+geometry is checked by the mesher, whose errors name the file and the place in um: rings or
+chains which cross, areas which overlap, a boundary segment without an edge tag (a gap between
+areas: borders shared by areas must match exactly), an edge tag off the boundaries of the areas.
 
 ## study/1
 
