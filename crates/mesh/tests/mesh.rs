@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 
 use contracts::{LengthUnit, MeshSource, SCENE_VERSION, Scene, Units};
-use mesh::{Mesh, MeshError, Tag};
+use mesh::{CanonicalMesh, Mesh, MeshError, Tag};
 use mesher::TaggedMesh;
 use petsc::{Dm, Petsc, Point};
 
@@ -487,8 +487,10 @@ fn coarse_cell_contains_fine_centroids() {
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 18] = [
+const PARALLEL_TESTS: [&str; 20] = [
     "mpi_world_has_the_expected_size",
+    "gathered_vertex_values_follow_canonical_order",
+    "gathered_element_values_are_sorted_by_id",
     "polygons_scene_loads",
     "from_tagged_matches_load_of_the_same_mesh",
     "lobule_scene_loads",
@@ -516,11 +518,13 @@ fn mpi_world_has_the_expected_size() {
 
 #[test]
 fn parallel_on_2_processes() {
+    compare_with_one_process(2);
     test_support::parallel(2, &PARALLEL_TESTS);
 }
 
 #[test]
 fn parallel_on_3_processes() {
+    compare_with_one_process(3);
     test_support::parallel(3, &PARALLEL_TESTS);
 }
 
@@ -660,4 +664,439 @@ fn mesher_error_names_the_polygons_file() {
     assert!(message.contains("cross at (50, 50) um"), "{message}");
     assert_eq!(err.to_string(), *message);
     assert!(err.is_collective());
+}
+
+/// Set in the runs of [`PARTITION_TESTS`] under `mpiexec`: the directory of the outcomes of one
+/// process to compare with ([`compare_with_one_process`]).
+const REFERENCE: &str = "SLIDESIM_TEST_MESH_REFERENCE";
+
+/// The tests which compare their outcome on several processes with the outcome on one: the
+/// element ids and the canonical mesh are partition independent.
+const PARTITION_TESTS: [&str; 3] = [
+    "element_ids_are_partition_independent",
+    "fine_element_ids_are_partition_independent",
+    "canonical_mesh_is_partition_independent",
+];
+
+/// Writes the outcomes of [`PARTITION_TESTS`] on this process alone, then runs each of them on
+/// `ranks` processes to compare (nothing inside a run under `mpiexec`).
+fn compare_with_one_process(ranks: usize) {
+    if std::env::var_os(test_support::MPI_RANKS).is_some() {
+        return;
+    }
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("mesh-reference-{ranks}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let p = Petsc::init(&[]).unwrap();
+        let outcomes = [
+            element_outcomes(&p),
+            fine_outcomes(&p),
+            canonical_outcomes(&p),
+        ];
+        for (key, text) in outcomes.into_iter().flatten() {
+            std::fs::write(dir.join(key), text.expect("one process")).unwrap();
+        }
+        // MPI is finalized before mpiexec starts.
+    }
+    test_support::parallel_with_env(
+        ranks,
+        &PARTITION_TESTS,
+        &[(REFERENCE, dir.to_str().unwrap())],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Compares `outcome` (on process 0) with the outcome `key` of one process, if this is a run of
+/// [`compare_with_one_process`]: the same lines, the numbers in them equal up to `tolerance`
+/// relative to their size (at least 1); exactly equal with a tolerance of 0.
+fn compare(key: &str, outcome: Option<&str>, tolerance: f64) {
+    let (Ok(dir), Some(outcome)) = (std::env::var(REFERENCE), outcome) else {
+        return;
+    };
+    let reference = std::fs::read_to_string(Path::new(&dir).join(key)).unwrap();
+    let (lines, reference_lines) = (outcome.lines().count(), reference.lines().count());
+    assert_eq!(lines, reference_lines, "{key}: lines");
+    for (i, (a, b)) in outcome.lines().zip(reference.lines()).enumerate() {
+        if a == b {
+            continue;
+        }
+        let close = tolerance > 0.0 && {
+            let (x, y): (Vec<&str>, Vec<&str>) = (a.split(' ').collect(), b.split(' ').collect());
+            x.len() == y.len()
+                && x.iter().zip(&y).all(|(x, y)| {
+                    x == y
+                        || match (x.parse::<f64>(), y.parse::<f64>()) {
+                            (Ok(x), Ok(y)) => (x - y).abs() <= tolerance * y.abs().max(1.0),
+                            _ => false,
+                        }
+                })
+        };
+        assert!(
+            close,
+            "{key} line {i}: {a:?} on {} processes, {b:?} on one",
+            test_support::ranks()
+        );
+    }
+}
+
+/// The meshes of [`PARTITION_TESTS`], refined twice: the gmsh fixture of a lobule, the lobule
+/// scene of the example studies (meshed by the mesher), and a mesh whose pinched vertex is split.
+fn partition_meshes(p: &Petsc) -> Vec<(&'static str, Mesh)> {
+    vec![
+        (
+            "lobule_toy",
+            Mesh::load(p, &scene("lobule_toy.msh"), 2).unwrap(),
+        ),
+        ("lobule", Mesh::load(p, &lobule_scene(), 2).unwrap()),
+        ("pinched", Mesh::load(p, &scene("pinched.msh"), 2).unwrap()),
+    ]
+}
+
+/// The lobule scene of the example studies (one lobule, rings 0).
+fn lobule_scene() -> Scene {
+    Scene::load(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/studies/lobules/scene.json"),
+    )
+    .unwrap()
+}
+
+/// The id and the centroid of every cell of level `level` over all processes, on process 0 as
+/// lines `id x y` sorted by id; `None` on the others. The ids are the element ids on level 0
+/// ([`Mesh::element_ids`]), the fine element ids on the others; on every level, they are the
+/// numbers from 0 of the cells of the level, each once.
+fn ids_and_centroids(mesh: &Mesh, level: usize) -> Option<String> {
+    let dm = &mesh.levels()[level];
+    let cells = dm.height_stratum(0).unwrap();
+    let mut bytes = Vec::new();
+    for cell in cells.clone() {
+        let c = (cell - cells.start) as usize;
+        let id = mesh.fine_element_id(level, c);
+        if level == 0 {
+            assert_eq!(id, mesh.element_ids()[c]);
+        } else {
+            assert_eq!(
+                id >> (2 * level),
+                mesh.element_ids()[mesh.coarse_cell(level, c)]
+            );
+        }
+        let vertices = cell_vertices(dm, cell);
+        let centroid = [0, 1].map(|i| vertices.iter().map(|v| v[i]).sum::<f64>() / 3.0);
+        bytes.extend(id.to_le_bytes());
+        bytes.extend(centroid[0].to_le_bytes());
+        bytes.extend(centroid[1].to_le_bytes());
+    }
+    assert_eq!(
+        mesh.element_ids().len(),
+        mesh.levels()[0].height_stratum(0).unwrap().len()
+    );
+    let n = global_cells(dm) as u64;
+    let gathered = dm.comm().gather_bytes(0, &bytes).unwrap()?;
+    let mut rows: Vec<(u64, f64, f64)> = gathered
+        .concat()
+        .as_chunks::<24>()
+        .0
+        .iter()
+        .map(|r| {
+            let word = |i: usize| <[u8; 8]>::try_from(&r[8 * i..8 * i + 8]).unwrap();
+            (
+                u64::from_le_bytes(word(0)),
+                f64::from_le_bytes(word(1)),
+                f64::from_le_bytes(word(2)),
+            )
+        })
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    let ids: Vec<u64> = rows.iter().map(|r| r.0).collect();
+    assert!(
+        ids.iter().copied().eq(0..n),
+        "level {level}: the ids are not 0..{n}, each once"
+    );
+    Some(
+        rows.iter()
+            .map(|(id, x, y)| format!("{id} {x:?} {y:?}\n"))
+            .collect(),
+    )
+}
+
+/// The outcomes of [`element_ids_are_partition_independent`], keyed by mesh.
+fn element_outcomes(p: &Petsc) -> Vec<(String, Option<String>)> {
+    partition_meshes(p)
+        .into_iter()
+        .map(|(name, mesh)| {
+            if p.comm().size() == 1 {
+                // The numbers of the cells of the undistributed mesh.
+                let n = mesh.levels()[0].height_stratum(0).unwrap().len() as u64;
+                assert!(mesh.element_ids().iter().copied().eq(0..n), "{name}");
+            }
+            (format!("{name}-elements"), ids_and_centroids(&mesh, 0))
+        })
+        .collect()
+}
+
+/// Each coarse cell has the element id of its cell in the undistributed mesh, on any number of
+/// processes: the ids are 0..n, each once over the processes, and the centroid of the cell of
+/// each id is that on one process.
+#[test]
+fn element_ids_are_partition_independent() {
+    let p = Petsc::init(&[]).unwrap();
+    for (key, outcome) in element_outcomes(&p) {
+        compare(&key, outcome.as_deref(), 1e-12);
+    }
+}
+
+/// The outcomes of [`fine_element_ids_are_partition_independent`], keyed by mesh and level.
+fn fine_outcomes(p: &Petsc) -> Vec<(String, Option<String>)> {
+    let mut outcomes = Vec::new();
+    for (name, mesh) in partition_meshes(p) {
+        for level in [1, 2] {
+            outcomes.push((
+                format!("{name}-level-{level}"),
+                ids_and_centroids(&mesh, level),
+            ));
+        }
+    }
+    outcomes
+}
+
+/// The fine element ids of the cells of levels 1 and 2 are partition independent as the element
+/// ids are: the numbering of the regular refinement (children consecutive, in the order of their
+/// parents, the same children of a parent on every process) on the distributed mesh.
+#[test]
+fn fine_element_ids_are_partition_independent() {
+    let p = Petsc::init(&[]).unwrap();
+    for (key, outcome) in fine_outcomes(&p) {
+        compare(&key, outcome.as_deref(), 1e-12);
+    }
+}
+
+/// `canonical` as text: every value of every array, the coordinates as the bits of the numbers.
+fn canonical_text(canonical: &CanonicalMesh) -> String {
+    let mut text = format!("vertices {}\n", canonical.vertices.len());
+    for [x, y] in &canonical.vertices {
+        text.push_str(&format!("{:016x} {:016x}\n", x.to_bits(), y.to_bits()));
+    }
+    text.push_str(&format!("triangles {}\n", canonical.triangles.len()));
+    for ([a, b, c], e) in canonical.triangles.iter().zip(&canonical.element) {
+        text.push_str(&format!("{a} {b} {c} {e}\n"));
+    }
+    for tag in &canonical.tags {
+        text.push_str(&format!(
+            "tag {} {} triangles {} edges {}\n",
+            tag.name,
+            tag.dim,
+            tag.triangles.len(),
+            tag.edges.len()
+        ));
+        for t in &tag.triangles {
+            text.push_str(&format!("{t}\n"));
+        }
+        for [a, b] in &tag.edges {
+            text.push_str(&format!("{a} {b}\n"));
+        }
+    }
+    text
+}
+
+/// What the canonical mesh of a mesh holds, from the distributed mesh (collective).
+struct Expected {
+    /// The cells of the finest level and of the coarse level.
+    cells: [usize; 2],
+    area: f64,
+    tags: Vec<Tag>,
+    /// [`census`] of the finest level.
+    census: Vec<(String, [i32; 3])>,
+}
+
+impl Expected {
+    fn of(mesh: &Mesh) -> Expected {
+        Expected {
+            cells: [global_cells(mesh.finest()), global_cells(&mesh.levels()[0])]
+                .map(|n| n as usize),
+            area: area(mesh.finest()),
+            tags: mesh.tags().to_vec(),
+            census: census(mesh.finest(), mesh.tags()),
+        }
+    }
+}
+
+/// What holds for the canonical mesh on any number of processes: every cell of the finest level
+/// once, counterclockwise, the coarse elements in order, the vertices numbered by first
+/// appearance, the area that of the mesh, each tag on the triangles or the edges it marks.
+fn check_canonical(name: &str, expected: &Expected, canonical: &CanonicalMesh) {
+    let n = canonical.triangles.len();
+    assert_eq!(n, expected.cells[0], "{name}");
+    assert_eq!(canonical.element.len(), n, "{name}");
+    assert!(
+        canonical.element.is_sorted(),
+        "{name}: the elements are not sorted"
+    );
+    assert_eq!(
+        canonical.element.last().map(|&e| e as usize + 1),
+        Some(expected.cells[1]),
+        "{name}"
+    );
+    let mut next = 0;
+    let mut area = 0.0;
+    for t in &canonical.triangles {
+        for &v in t {
+            assert!(v <= next, "{name}: vertex {v} appears before {next}");
+            next = next.max(v + 1);
+        }
+        let [a, b, c] = t.map(|v| canonical.vertices[v as usize]);
+        let twice = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        assert!(
+            twice > 0.0,
+            "{name}: triangle {t:?} is not counterclockwise"
+        );
+        area += twice / 2.0;
+    }
+    assert_eq!(next as usize, canonical.vertices.len(), "{name}");
+    let exact = expected.area;
+    assert!(
+        ((area - exact) / exact).abs() < 1e-12,
+        "{name}: area {area}, {exact}"
+    );
+    let names: Vec<(&str, u8)> = canonical
+        .tags
+        .iter()
+        .map(|t| (t.name.as_str(), t.dim))
+        .collect();
+    let tags: Vec<(&str, u8)> = expected
+        .tags
+        .iter()
+        .map(|t| (t.name.as_str(), t.dim))
+        .collect();
+    assert_eq!(names, tags, "{name}");
+    for tag in &canonical.tags {
+        let [cells, edges, _] = expected
+            .census
+            .iter()
+            .find(|(n, _)| *n == tag.name)
+            .unwrap()
+            .1;
+        assert!(
+            tag.triangles.is_sorted() && tag.edges.is_sorted(),
+            "{name} {}",
+            tag.name
+        );
+        match tag.dim {
+            2 => assert_eq!((tag.triangles.len(), tag.edges.len()), (cells as usize, 0)),
+            1 => assert_eq!((tag.triangles.len(), tag.edges.len()), (0, edges as usize)),
+            _ => panic!("{name}: tag {} of dimension {}", tag.name, tag.dim),
+        }
+        assert!(tag.edges.iter().all(|[a, b]| a < b), "{name} {}", tag.name);
+    }
+}
+
+/// The number of cells of level `level` over all processes.
+fn mesh_cells(mesh: &Mesh, level: usize) -> u64 {
+    global_cells(&mesh.levels()[level]) as u64
+}
+
+/// The outcomes of [`canonical_mesh_is_partition_independent`], keyed by mesh.
+fn canonical_outcomes(p: &Petsc) -> Vec<(String, Option<String>)> {
+    partition_meshes(p)
+        .into_iter()
+        .map(|(name, mesh)| {
+            let expected = Expected::of(&mesh);
+            let canonical = mesh.canonical().unwrap();
+            assert_eq!(canonical.is_some(), p.comm().rank() == 0, "{name}");
+            let text = canonical.map(|c| {
+                check_canonical(name, &expected, &c);
+                canonical_text(&c)
+            });
+            (format!("{name}-canonical"), text)
+        })
+        .collect()
+}
+
+/// The canonical finest mesh on process 0 is the same, bitwise, on any number of processes.
+#[test]
+fn canonical_mesh_is_partition_independent() {
+    let p = Petsc::init(&[]).unwrap();
+    for (key, outcome) in canonical_outcomes(&p) {
+        compare(&key, outcome.as_deref(), 0.0);
+    }
+}
+
+/// Values at the local vertices of the finest level, gathered on process 0, are in the order of
+/// the vertices of the canonical mesh: `x + 2 y` at each local vertex gives `x + 2 y` at each
+/// canonical vertex, exactly (also at the two copies of a split pinched vertex).
+#[test]
+fn gathered_vertex_values_follow_canonical_order() {
+    let p = Petsc::init(&[]).unwrap();
+    for (file, refinements) in [
+        ("lobule_toy.msh", 1),
+        ("pinched.msh", 1),
+        ("unit_square.msh", 0),
+    ] {
+        let mesh = Mesh::load(&p, &scene(file), refinements).unwrap();
+        let canonical = mesh.canonical().unwrap();
+        let dm = mesh.finest();
+        let vertices = dm.depth_stratum(0).unwrap();
+        let dim = dm.coordinate_dimension().unwrap();
+        let coordinates = dm.local_coordinates().unwrap();
+        let values: Vec<f64> = vertices
+            .clone()
+            .map(|v| {
+                let i = (v - vertices.start) as usize * dim;
+                coordinates[i] + 2.0 * coordinates[i + 1]
+            })
+            .collect();
+        for _ in 0..2 {
+            // Again: the order of the vertices is kept from the first gather.
+            let gathered = mesh.gather_vertex_values(&values).unwrap();
+            assert_eq!(gathered.is_some(), p.comm().rank() == 0);
+            if let (Some(gathered), Some(canonical)) = (gathered, &canonical) {
+                let expected: Vec<f64> = canonical
+                    .vertices
+                    .iter()
+                    .map(|[x, y]| x + 2.0 * y)
+                    .collect();
+                assert!(
+                    gathered == expected,
+                    "{file}: the values are not in canonical order"
+                );
+            }
+        }
+        // Not one value per local vertex: an error on every process.
+        let short = if p.comm().rank() == p.comm().size() - 1 {
+            &values[1..]
+        } else {
+            &values[..]
+        };
+        let e = mesh.gather_vertex_values(short).unwrap_err();
+        assert!(e.to_string().contains("vertices"), "{e}");
+    }
+}
+
+/// Rows of values per element, gathered on process 0, sorted by element id; a wrong number of
+/// values on one process is an error on every process.
+#[test]
+fn gathered_element_values_are_sorted_by_id() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = Mesh::load(&p, &scene("lobule_toy.msh"), 0).unwrap();
+    let ids = mesh.element_ids();
+    let values: Vec<f64> = ids
+        .iter()
+        .flat_map(|&id| [id as f64, -2.0 * id as f64])
+        .collect();
+    let gathered = mesh.gather_element_values(ids, &values, 2).unwrap();
+    assert_eq!(gathered.is_some(), p.comm().rank() == 0);
+    let n = mesh_cells(&mesh, 0);
+    if let Some((ids, values)) = gathered {
+        assert!(ids.iter().copied().eq(0..n));
+        let expected: Vec<f64> = (0..n)
+            .flat_map(|id| [id as f64, -2.0 * id as f64])
+            .collect();
+        assert_eq!(values, expected);
+    }
+    let short = if p.comm().rank() == p.comm().size() - 1 {
+        &values[1..]
+    } else {
+        &values[..]
+    };
+    let e = mesh.gather_element_values(ids, short, 2).unwrap_err();
+    assert!(e.to_string().contains("width 2"), "{e}");
 }

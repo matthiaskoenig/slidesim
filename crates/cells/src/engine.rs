@@ -32,7 +32,7 @@ pub struct EngineCells {
     /// Of each linked species.
     links: Vec<Link>,
     time_unit_s: f64,
-    global: Vec<i64>,
+    elements: Vec<u64>,
     centroids: Vec<[f64; 2]>,
     comm: OwnedComm,
     /// The error of a failed advance, after which the cells are not advanced again.
@@ -100,7 +100,7 @@ impl EngineCells {
                     changes,
                 )
                 .map_err(|e| CellsError::Element {
-                    cell: setup.global[i],
+                    element: setup.elements[i],
                     centroid: setup.centroids[i],
                     message: format!("the cell model does not initialize: {e}"),
                 })
@@ -118,7 +118,7 @@ impl EngineCells {
             states,
             links,
             time_unit_s: spec.time_unit_s,
-            global: setup.global.clone(),
+            elements: setup.elements.clone(),
             centroids: setup.centroids.clone(),
             comm,
             poison: Poison::default(),
@@ -169,7 +169,7 @@ impl EngineCells {
             let step = stepper
                 .advance(&self.work, m0, m1)
                 .map_err(|e| CellsError::Element {
-                    cell: self.global[i],
+                    element: self.elements[i],
                     centroid: self.centroids[i],
                     message: format!("the cell model failed from t = {t0} s to t = {t1} s: {e}"),
                 })?;

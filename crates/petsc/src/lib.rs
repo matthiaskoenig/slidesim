@@ -402,6 +402,83 @@ impl<'a> Comm<'a> {
         )
     }
 
+    /// The bytes `data` of every process on the process `root`, one vector per process in the
+    /// order of the ranks (`MPI_Gather` of the lengths, `MPI_Gatherv`): `Some` on `root`, `None`
+    /// on the others. Collective.
+    ///
+    /// Errors (on every process) if `root` is not a rank of the communicator, or if the bytes of
+    /// all processes together exceed `i32::MAX` (MPI counts them in an `int`).
+    pub fn gather_bytes(&self, root: usize, data: &[u8]) -> Result<Option<Vec<Vec<u8>>>> {
+        error::ensure_alive("MPI_Gatherv")?;
+        let size = self.size();
+        let root_rank = c_int::try_from(root)
+            .ok()
+            .filter(|_| root < size)
+            .ok_or_else(|| {
+                Error::new(
+                    sys::PETSC_ERR_ARG_OUTOFRANGE,
+                    format!("rank {root} of a communicator of {size} processes"),
+                )
+            })?;
+        // Exact: far below 2^53.
+        let total = self.sum_real(data.len() as f64)?;
+        if total > f64::from(c_int::MAX) {
+            return Err(Error::new(
+                sys::PETSC_ERR_ARG_OUTOFRANGE,
+                format!("{total} bytes to gather; MPI counts them in a 32-bit integer"),
+            ));
+        }
+        let count = c_int::try_from(data.len()).expect("checked against the total");
+        let is_root = self.rank() == root;
+        let mut counts: Vec<c_int> = vec![0; if is_root { size } else { 1 }];
+        // SAFETY: one int in; `counts` holds one per process on the root (and is not written
+        // elsewhere).
+        let ierr =
+            unsafe { sys::petsc_sys_mpi_gather_int(count, counts.as_mut_ptr(), root_rank, self.0) };
+        mpi_result(ierr, "MPI_Gather")?;
+        let offsets: Vec<c_int> = counts
+            .iter()
+            .scan(0, |offset, &n| {
+                let o = *offset;
+                *offset += n;
+                Some(o)
+            })
+            .collect();
+        let total = if is_root {
+            counts.iter().map(|&n| n as usize).sum()
+        } else {
+            0
+        };
+        // MPICH refuses the dangling buffer of an empty vector: at least one byte each.
+        let mut gathered = vec![0u8; total.max(1)];
+        let one = [0u8];
+        let send = if data.is_empty() { &one[..] } else { data };
+        // SAFETY: `send` holds `count` bytes; on the root, `gathered` holds the `total` bytes
+        // of `counts` at `offsets` (one per process); elsewhere they are not used.
+        let ierr = unsafe {
+            sys::petsc_sys_mpi_gatherv_bytes(
+                send.as_ptr().cast(),
+                count,
+                gathered.as_mut_ptr().cast(),
+                counts.as_ptr(),
+                offsets.as_ptr(),
+                root_rank,
+                self.0,
+            )
+        };
+        mpi_result(ierr, "MPI_Gatherv")?;
+        if !is_root {
+            return Ok(None);
+        }
+        Ok(Some(
+            offsets
+                .iter()
+                .zip(&counts)
+                .map(|(&o, &n)| gathered[o as usize..(o + n) as usize].to_vec())
+                .collect(),
+        ))
+    }
+
     /// `MPI_Bcast` of `count` values of `datatype` at `buffer` from `root`.
     fn broadcast(
         &self,
@@ -465,6 +542,19 @@ impl<'a> Comm<'a> {
 
     pub fn as_raw(&self) -> sys::MPI_Comm {
         self.0
+    }
+}
+
+/// An error unless the MPI call `call` returned `ierr` 0 (MPI aborts on errors by default; any
+/// other return is reported).
+fn mpi_result(ierr: c_int, call: &str) -> Result<()> {
+    if ierr == 0 {
+        Ok(())
+    } else {
+        Err(Error::new(
+            sys::PETSC_ERR_MPI,
+            format!("{call} failed with MPI error {ierr}"),
+        ))
     }
 }
 

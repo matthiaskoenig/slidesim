@@ -735,6 +735,19 @@ impl Problem {
         Ok(local)
     }
 
+    /// The solution at each local vertex of the finest level, in the order of the local vertices
+    /// (depth 0), ghosts and Dirichlet values included: the input of
+    /// `mesh::Mesh::gather_vertex_values`. Collective.
+    pub fn vertex_values(&self) -> Result<Vec<f64>> {
+        let local = self.local_solution()?;
+        let dm = self.disc.dm();
+        let vertices = dm.depth_stratum(0)?;
+        let offsets = vertices
+            .map(|v| dm.local_dofs(v).map(|dofs| dofs.start))
+            .collect::<petsc::Result<Vec<_>>>()?;
+        Ok(local.with_array(|u| offsets.iter().map(|&i| u[i]).collect())?)
+    }
+
     /// The amount of substance in the domain, `int phi u`: the integral of the solution weighed
     /// by the porosity (in mM*um^2), whose rate of change is [`MassBalance::storage_rate`].
     /// Collective.

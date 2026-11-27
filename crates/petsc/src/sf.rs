@@ -75,6 +75,23 @@ impl Sf {
     /// Errors if `roots` is shorter than the number of roots of this process, or `leaves` does
     /// not hold every leaf of this process.
     pub fn bcast(&self, roots: &[f64], leaves: &mut [f64]) -> Result<()> {
+        // SAFETY: MPIU_REAL is the MPI type of f64 (PetscReal).
+        self.bcast_of(roots, leaves, unsafe { sys::petsc_sys_mpiu_real() })
+    }
+
+    /// [`Sf::bcast`] of integers.
+    pub fn bcast_int(&self, roots: &[sys::PetscInt], leaves: &mut [sys::PetscInt]) -> Result<()> {
+        // SAFETY: MPIU_INT is the MPI type of PetscInt.
+        self.bcast_of(roots, leaves, unsafe { sys::petsc_sys_mpiu_int() })
+    }
+
+    /// [`Sf::bcast`] of values of the MPI type `datatype`, which is that of `T`.
+    fn bcast_of<T: Copy>(
+        &self,
+        roots: &[T],
+        leaves: &mut [T],
+        datatype: sys::MPI_Datatype,
+    ) -> Result<()> {
         let (num_roots, graph) = self.graph()?;
         let needed = graph.iter().map(|l| l.leaf as usize + 1).max().unwrap_or(0);
         if roots.len() < num_roots || leaves.len() < needed {
@@ -88,13 +105,13 @@ impl Sf {
                 ),
             ));
         }
-        let (real, replace) = unsafe { (sys::petsc_sys_mpiu_real(), sys::petsc_sys_mpi_replace()) };
-        // SAFETY: the arrays hold every root and leaf (checked above), and stay borrowed until
-        // the broadcast ends.
+        let replace = unsafe { sys::petsc_sys_mpi_replace() };
+        // SAFETY: the arrays hold every root and leaf (checked above), of `datatype` (the
+        // caller's contract), and stay borrowed until the broadcast ends.
         chk!(unsafe {
             sys::PetscSFBcastBegin(
                 self.raw,
-                real,
+                datatype,
                 roots.as_ptr().cast(),
                 leaves.as_mut_ptr().cast(),
                 replace,
@@ -103,7 +120,7 @@ impl Sf {
         chk!(unsafe {
             sys::PetscSFBcastEnd(
                 self.raw,
-                real,
+                datatype,
                 roots.as_ptr().cast(),
                 leaves.as_mut_ptr().cast(),
                 replace,

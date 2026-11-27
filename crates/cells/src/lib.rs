@@ -20,8 +20,8 @@
 //!
 //! Processes: each process holds the cells of its coarse elements. Errors one process finds
 //! (a map without value in a cell's tissue, a cell model which fails) are errors on every
-//! process, the same on each ([`CellsError::Element`] names the element by its global number
-//! on the coarse level and its centroid), so that no process waits for another which left a
+//! process, the same on each ([`CellsError::Element`] names the element by its element id,
+//! the same on any number of processes, and its centroid), so that no process waits for another which left a
 //! collective call. A cell's step control is its own: it depends on no other cell and not on
 //! the number of processes.
 
@@ -202,11 +202,12 @@ pub enum CellsError {
          does (\"solver\": \"engine\")"
     )]
     Unsupported { feature: String },
-    /// A failure at one element: `cell` is its global number on the coarse level of the mesh,
-    /// `centroid` its centroid (um). The same on every process.
-    #[error("element {cell} at ({}, {}) um: {message}", .centroid[0], .centroid[1])]
+    /// A failure at one element: `element` is its element id (`mesh::Mesh::element_ids`, the
+    /// same on any number of processes), `centroid` its centroid (um). The same on every
+    /// process.
+    #[error("element {element} at ({}, {}) um: {message}", .centroid[0], .centroid[1])]
     Element {
-        cell: i64,
+        element: u64,
         centroid: [f64; 2],
         message: String,
     },
@@ -279,12 +280,12 @@ fn encode(e: &CellsError) -> Vec<u8> {
     let mut bytes = Vec::new();
     match e {
         CellsError::Element {
-            cell,
+            element,
             centroid,
             message,
         } => {
             bytes.push(ELEMENT);
-            bytes.extend(cell.to_le_bytes());
+            bytes.extend(element.to_le_bytes());
             bytes.extend(centroid[0].to_le_bytes());
             bytes.extend(centroid[1].to_le_bytes());
             bytes.extend(message.as_bytes());
@@ -315,7 +316,7 @@ fn decode(bytes: &[u8]) -> CellsError {
     let f64_at = |i: usize| f64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
     match bytes.first() {
         Some(&ELEMENT) => CellsError::Element {
-            cell: i64::from_le_bytes(bytes[1..9].try_into().expect("8 bytes")),
+            element: u64::from_le_bytes(bytes[1..9].try_into().expect("8 bytes")),
             centroid: [f64_at(9), f64_at(17)],
             message: text(&bytes[25..]),
         },
@@ -337,17 +338,17 @@ mod tests {
     #[test]
     fn errors_round_trip() {
         let element = CellsError::Element {
-            cell: -3,
+            element: (7 << 40) | 3,
             centroid: [1.5, -2.25],
             message: "it failed: é".into(),
         };
         match decode(&encode(&element)) {
             CellsError::Element {
-                cell,
+                element,
                 centroid,
                 message,
             } => {
-                assert_eq!(cell, -3);
+                assert_eq!(element, (7 << 40) | 3);
                 assert_eq!(centroid, [1.5, -2.25]);
                 assert_eq!(message, "it failed: é");
             }

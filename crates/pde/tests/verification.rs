@@ -780,6 +780,42 @@ fn local_solution_has_the_dirichlet_values() {
     assert!(norm > 1.0 && norm < 3.0, "{norm}");
 }
 
+/// The solution at the local vertices, Dirichlet values included, gathered into the order of
+/// the canonical mesh: 3 on the left side, 1 elsewhere, at each canonical vertex.
+#[test]
+fn vertex_values_gather_in_canonical_order() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = unit_square(&p, 1);
+    let mut field = natural_field(
+        0.0,
+        vec![BoundarySpec {
+            tag: "left".to_string(),
+            condition: Condition::Dirichlet { value: 3.0 },
+        }],
+    );
+    field.initial = 1.0;
+    let problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.25),
+        &ceed(),
+        ACCURATE,
+        &no_maps(),
+    )
+    .unwrap();
+    let values = problem.vertex_values().unwrap();
+    assert_eq!(values.len(), mesh.finest().depth_stratum(0).unwrap().len());
+    let canonical = mesh.canonical().unwrap();
+    let gathered = mesh.gather_vertex_values(&values).unwrap();
+    assert_eq!(gathered.is_some(), p.comm().rank() == 0);
+    if let (Some(canonical), Some(gathered)) = (canonical, gathered) {
+        for ([x, y], u) in canonical.vertices.iter().zip(&gathered) {
+            let expected = if *x == 0.0 { 3.0 } else { 1.0 };
+            assert_eq!(*u, expected, "at ({x}, {y})");
+        }
+    }
+}
+
 #[test]
 fn unknown_boundary_tag_is_error() {
     let p = Petsc::init(&[]).unwrap();
@@ -964,8 +1000,9 @@ fn spatial_order_variable_coefficients_on_refinements_1_and_2() {
 
 /// The tests `parallel_on_*_processes` run on several processes: the integrals over cells and
 /// boundary edges of each process, the Dirichlet values and the solvers on a distributed mesh.
-const PARALLEL_TESTS: [&str; 14] = [
+const PARALLEL_TESTS: [&str; 15] = [
     "mpi_world_has_the_expected_size",
+    "vertex_values_gather_in_canonical_order",
     "mass_conserved_with_zero_flux",
     "flux_balances_mass",
     "divergence_is_error",

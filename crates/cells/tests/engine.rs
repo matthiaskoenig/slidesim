@@ -158,7 +158,6 @@ fn parameters_are_area_means() {
     assert!(total > 0);
     let means = child_means(&mesh, &fine, |x| x[0]);
     let centroids = centroids(&mesh, &ceed);
-    let numbering = mesh.levels()[0].cell_numbering().unwrap();
     assert_eq!(setup.parameters.len(), setup.cells.len());
     for (i, &c) in setup.cells.iter().enumerate() {
         let k = value(&setup, i, "k");
@@ -173,7 +172,7 @@ fn parameters_are_area_means() {
         assert!((value(&setup, i, "Vext") - porosity).abs() <= 1e-12);
         assert!((value(&setup, i, "Vli") - (1.0 - porosity)).abs() <= 1e-12);
         assert_eq!(setup.parameters[i].len(), 3, "{:?}", setup.parameters[i]);
-        assert_eq!(setup.global[i], i64::from(numbering[c]));
+        assert_eq!(setup.elements[i], mesh.element_ids()[c]);
         for axis in 0..2 {
             assert!((setup.centroids[i][axis] - centroids[c][axis]).abs() <= 1e-12);
         }
@@ -263,13 +262,17 @@ fn no_value_in_tissue_is_an_error() {
         "k",
         table("hole", &[[0.0, 0.0], [1.0, 1.0]]),
     )]);
+    let elements = p
+        .comm()
+        .sum_int(mesh.element_ids().len().try_into().unwrap())
+        .unwrap();
     match CellSetup::new(&fine, &mesh, &spec, &maps, &porosity) {
         Err(CellsError::Element {
-            cell,
+            element,
             centroid,
             message,
         }) => {
-            assert!(cell >= 0);
+            assert!(element < u64::try_from(elements).unwrap());
             let distance = (centroid[0] - 0.5).hypot(centroid[1] - 0.5);
             assert!(distance < 0.1 + 0.25, "{centroid:?}");
             assert!(message.contains("map 'hole'"), "{message}");
@@ -426,7 +429,7 @@ fn engine_cells_match_stepper() {
     assert!(setup.cells.len() >= n);
     setup.cells.truncate(n);
     setup.parameters.truncate(n);
-    setup.global.truncate(n);
+    setup.elements.truncate(n);
     setup.centroids.truncate(n);
     let sbml = model("spt_liver_cell.xml");
     let mut cells = EngineCells::new(&setup, &spec, &sbml).unwrap();
@@ -572,18 +575,22 @@ fn failure_on_one_process_stops_all() {
     }
     let element = comm
         .max_int(if comm.rank() == failing {
-            setup.global[0].try_into().unwrap()
+            setup.elements[0].try_into().unwrap()
         } else {
             -1
         })
         .unwrap();
-    let element = i64::from(element);
+    let element = u64::try_from(element).unwrap();
     let mut cells = EngineCells::new(&setup, &spec, &model("linear_uptake.xml")).unwrap();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(0.0, 600.0, &mut blood) {
-        Err(CellsError::Element { cell, message, .. }) => {
+        Err(CellsError::Element {
+            element: id,
+            message,
+            ..
+        }) => {
             println!("{message}");
-            assert_eq!(cell, element, "{message}");
+            assert_eq!(id, element, "{message}");
             assert!(message.contains("600"), "{message}");
         }
         other => panic!("expected an error naming the element, got {other:?}"),
@@ -592,7 +599,7 @@ fn failure_on_one_process_stops_all() {
     let states = cells.states().to_vec();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(600.0, 1200.0, &mut blood) {
-        Err(CellsError::Element { cell, .. }) => assert_eq!(cell, element),
+        Err(CellsError::Element { element: id, .. }) => assert_eq!(id, element),
         other => panic!("expected the error again, got {other:?}"),
     }
     assert_eq!(cells.states(), states.as_slice());

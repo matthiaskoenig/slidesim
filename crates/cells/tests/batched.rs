@@ -81,7 +81,7 @@ fn fifty_cells(p: &Petsc, ceed: &Ceed) -> (Mesh, CellSetup, CellsSpec, Vec<f64>)
     assert!(setup.cells.len() >= n, "{} cells", setup.cells.len());
     setup.cells.truncate(n);
     setup.parameters.truncate(n);
-    setup.global.truncate(n);
+    setup.elements.truncate(n);
     setup.centroids.truncate(n);
     for (cell, set) in setup.parameters.iter_mut().zip(&sets) {
         let volumes: Vec<(String, f64)> = cell
@@ -415,20 +415,35 @@ fn failure_on_one_process_stops_all() {
             }
         }
     }
+    // The element id of the first cell of the failing process (partition independent).
+    assert_eq!(setup.elements[0], mesh.element_ids()[setup.cells[0]]);
     let element = comm
         .max_int(if comm.rank() == failing {
-            setup.global[0].try_into().unwrap()
+            setup.elements[0].try_into().unwrap()
         } else {
             -1
         })
         .unwrap();
-    let element = i64::from(element);
+    let element = u64::try_from(element).unwrap();
     let mut cells = BatchedCells::new(&setup, &spec, &model("linear_uptake.xml"), &ceed).unwrap();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(0.0, 600.0, &mut blood) {
-        Err(CellsError::Element { cell, message, .. }) => {
-            println!("{message}");
-            assert_eq!(cell, element, "{message}");
+        Err(e @ CellsError::Element { .. }) => {
+            let text = e.to_string();
+            println!("{text}");
+            assert!(
+                text.starts_with(&format!("element {element} at (")),
+                "{text}"
+            );
+            let CellsError::Element {
+                element: id,
+                message,
+                ..
+            } = e
+            else {
+                unreachable!()
+            };
+            assert_eq!(id, element, "{message}");
             assert!(message.contains("600"), "{message}");
         }
         other => panic!("expected an error naming the element, got {other:?}"),
@@ -437,7 +452,7 @@ fn failure_on_one_process_stops_all() {
     let states = cells.states().to_vec();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(600.0, 1200.0, &mut blood) {
-        Err(CellsError::Element { cell, .. }) => assert_eq!(cell, element),
+        Err(CellsError::Element { element: id, .. }) => assert_eq!(id, element),
         other => panic!("expected the error again, got {other:?}"),
     }
     assert_eq!(cells.states(), states.as_slice());

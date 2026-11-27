@@ -13,8 +13,16 @@
 //! names (or of the tags of the mesher) are the mesh's [`Tag`]s; they survive distribution and
 //! refinement, so every level has them.
 //!
+//! The numbering of the points of a distributed mesh depends on the partition. What does not:
+//! the element ids ([`Mesh::element_ids`], the number of each coarse cell in the undistributed
+//! mesh, carried through the distribution) and the fine element ids of the refined cells
+//! ([`Mesh::fine_element_id`]). On them rests the canonical finest mesh on process 0
+//! ([`Mesh::canonical`], the same for any number of processes) and the gathers of values into
+//! its order ([`Mesh::gather_vertex_values`], [`Mesh::gather_element_values`]).
+//!
 //! A tag is data from the mesh file or the scene: this crate knows no tag names.
 
+use std::cell::OnceCell;
 use std::cmp::max;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -23,7 +31,10 @@ use contracts::{ContractError, MeshSource, Polygons, Scene};
 use mesher::{Domain, Lobules, Quality, Size, TaggedMesh};
 use petsc::{Comm, Dm, Petsc, Point};
 
+mod canonical;
 mod split;
+
+pub use canonical::{CanonicalMesh, CanonicalTag, ElementRows};
 
 /// The name of the DM of a mesh.
 const NAME: &str = "mesh";
@@ -79,6 +90,12 @@ pub enum MeshError {
     /// and where in um), or the scene is not two dimensional.
     #[error("{message}")]
     Mesher { message: String },
+    /// A gather onto process 0 ([`Mesh::canonical`], [`Mesh::gather_vertex_values`],
+    /// [`Mesh::gather_element_values`]) failed: its arguments do not fit the mesh on some
+    /// process, or PETSc failed on one (the message of the lowest such process). The same on
+    /// every process.
+    #[error("gather onto process 0: {0}")]
+    Gather(String),
     #[error(transparent)]
     Petsc(#[from] petsc::Error),
 }
@@ -86,14 +103,17 @@ pub enum MeshError {
 impl MeshError {
     /// Whether every process of [`Mesh::load`] has this error, with the same message, at the
     /// same point: [`MeshError::NotFound`] and [`MeshError::Mesher`] (process 0 finds them and
-    /// tells the others) and [`MeshError::Dimension`] (every process reads the dimension of the
-    /// same mesh). After such an error no process waits for another, so a caller may end each
+    /// tells the others), [`MeshError::Dimension`] (every process reads the dimension of the
+    /// same mesh) and [`MeshError::Gather`] (the processes agree on it). After such an error no process waits for another, so a caller may end each
     /// process alone. A PETSc error, or one of reading (the collective read may fail on one
     /// process only), may be on some processes only.
     pub fn is_collective(&self) -> bool {
         matches!(
             self,
-            MeshError::NotFound { .. } | MeshError::Dimension { .. } | MeshError::Mesher { .. }
+            MeshError::NotFound { .. }
+                | MeshError::Dimension { .. }
+                | MeshError::Mesher { .. }
+                | MeshError::Gather(_)
         )
     }
 }
@@ -111,6 +131,10 @@ pub struct Mesh {
     dim: usize,
     /// See [`Mesh::generated`].
     generated: Option<(TaggedMesh, Quality)>,
+    /// See [`Mesh::element_ids`].
+    element_ids: Vec<u64>,
+    /// The order of [`Mesh::gather_vertex_values`], made with the first canonical mesh.
+    vertex_order: OnceCell<canonical::VertexOrder>,
 }
 
 impl Mesh {
@@ -226,6 +250,10 @@ impl Mesh {
     /// [`Mesh::load`]), partitioned ([`PARTITIONER`]), distributed and refined uniformly
     /// `refinements` times. Collective.
     ///
+    /// The cell numbering of the split coarse mesh gives the element ids
+    /// ([`Mesh::element_ids`]): the migration star forest of `DMPlexDistribute` carries the
+    /// number of each cell to the process and the local cell it becomes.
+    ///
     /// Errors: [`MeshError::Petsc`] if splitting, distributing or refining fails.
     pub fn from_dm(petsc: &Petsc, coarse: Dm, refinements: u32) -> Result<Mesh, MeshError> {
         let comm = petsc.comm();
@@ -237,9 +265,16 @@ impl Mesh {
             coarse = split;
         }
         select_partitioner(petsc, &coarse)?;
-        if let Some(distributed) = coarse.distribute(0)? {
-            coarse = distributed;
-        }
+        // The numbers of the cells of the undistributed mesh: the element ids.
+        let numbers = coarse.cell_numbering()?;
+        let element_ids = match coarse.distribute_with_migration(0)? {
+            Some((distributed, migration)) => {
+                let ids = migrated_numbers(&coarse, &numbers, &distributed, &migration)?;
+                coarse = distributed;
+                ids
+            }
+            None => numbers.iter().map(|&g| owned_number(g)).collect(),
+        };
         coarse.set_up_local_coordinates()?;
         let tags = tags(&coarse, dim)?;
         let mut levels = vec![coarse];
@@ -257,6 +292,8 @@ impl Mesh {
             bounds,
             dim,
             generated: None,
+            element_ids,
+            vertex_order: OnceCell::new(),
         })
     }
 
@@ -319,6 +356,53 @@ impl Mesh {
                 available: self.tags.iter().map(|t| t.name.clone()).collect(),
             })
     }
+}
+
+/// The global number `g` of a cell or vertex of a numbering of PETSc (`-(g + 1)` for a point of
+/// another process).
+fn owned_number(g: petsc::sys::PetscInt) -> u64 {
+    (if g >= 0 { g } else { -(g + 1) }) as u64
+}
+
+/// The numbers `numbers` of the cells of `coarse` (its cell numbering), carried to the cells of
+/// `distributed` by the star forest `migration` of [`Dm::distribute_with_migration`]: the number
+/// of each local cell of `distributed`, in the order of its cells. Collective.
+///
+/// Errors (on every process) if a cell of `distributed` comes from no cell of `coarse`.
+fn migrated_numbers(
+    coarse: &Dm,
+    numbers: &[petsc::sys::PetscInt],
+    distributed: &Dm,
+    migration: &petsc::Sf,
+) -> Result<Vec<u64>, MeshError> {
+    let points = |dm: &Dm| -> petsc::Result<usize> {
+        let chart = (0..=dm.dimension()?)
+            .map(|d| dm.depth_stratum(d).map(|s| s.end))
+            .collect::<petsc::Result<Vec<_>>>()?;
+        Ok(chart.into_iter().max().unwrap_or(0).max(0) as usize)
+    };
+    let cells = coarse.height_stratum(0)?;
+    let mut roots = vec![-1; points(coarse)?];
+    for (cell, &g) in cells.zip(numbers) {
+        roots[cell as usize] = owned_number(g) as petsc::sys::PetscInt;
+    }
+    let mut leaves = vec![-1; points(distributed)?];
+    migration.bcast_int(&roots, &mut leaves)?;
+    let cells = distributed.height_stratum(0)?;
+    let ids: Vec<petsc::sys::PetscInt> = cells.map(|c| leaves[c as usize]).collect();
+    let missing = ids.iter().filter(|&&g| g < 0).count();
+    let missing = distributed
+        .comm()
+        .sum_int(petsc::sys::PetscInt::try_from(missing).unwrap_or(petsc::sys::PetscInt::MAX))?;
+    if missing > 0 {
+        return Err(MeshError::Petsc(petsc::Error {
+            code: petsc::sys::PETSC_ERR_PLIB,
+            message: format!(
+                "{missing} cells of the distributed mesh come from no cell of the coarse mesh"
+            ),
+        }));
+    }
+    Ok(ids.into_iter().map(|g| g as u64).collect())
 }
 
 /// The bounding box of the coordinates of the local cells of `levels` (see

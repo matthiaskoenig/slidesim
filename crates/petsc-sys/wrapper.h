@@ -16,6 +16,10 @@ MPI_Op petsc_sys_mpi_max(void);
 /* MPI_REPLACE, for PetscSFBcast. */
 MPI_Op petsc_sys_mpi_replace(void);
 
+/* MPI_Gather of one int per process, MPI_Gatherv of bytes (MPIUNI defines both as macros). */
+int petsc_sys_mpi_gather_int(int value, int *values, int root, MPI_Comm comm);
+int petsc_sys_mpi_gatherv_bytes(const void *data, int count, void *gathered, const int *counts, const int *offsets, int root, MPI_Comm comm);
+
 /* PetscFree of an array PETSc allocated for the caller. */
 PetscErrorCode petsc_sys_free(void *p);
 

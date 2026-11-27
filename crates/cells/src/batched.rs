@@ -84,7 +84,7 @@ pub struct BatchedCells {
     time_unit_s: f64,
     rtol: f64,
     atol: f64,
-    global: Vec<i64>,
+    elements: Vec<u64>,
     centroids: Vec<[f64; 2]>,
     comm: OwnedComm,
     /// The error of a failed advance, after which the cells are not advanced again.
@@ -98,7 +98,7 @@ pub struct BatchedCells {
 impl std::fmt::Debug for BatchedCells {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchedCells")
-            .field("cells", &self.global.len())
+            .field("cells", &self.elements.len())
             .field("species", &self.species)
             .field("state_ids", &self.state_ids)
             .field("time_unit_s", &self.time_unit_s)
@@ -287,7 +287,7 @@ impl BatchedCells {
                     changes,
                 )
                 .map_err(|e| CellsError::Element {
-                    cell: setup.global[i],
+                    element: setup.elements[i],
                     centroid: setup.centroids[i],
                     message: format!("the cell model does not initialize: {e}"),
                 })?;
@@ -321,7 +321,7 @@ impl BatchedCells {
             time_unit_s: spec.time_unit_s,
             rtol: spec.rtol,
             atol: spec.atol,
-            global: setup.global.clone(),
+            elements: setup.elements.clone(),
             centroids: setup.centroids.clone(),
             comm,
             poison: Poison::default(),
@@ -335,7 +335,7 @@ impl BatchedCells {
     /// copies on the host. The QFunction and its library, which the cells share, are not
     /// counted.
     pub fn memory_bytes(&self) -> usize {
-        let n = self.global.len();
+        let n = self.elements.len();
         let (ns, np) = (self.state_ids.len(), self.parameters.len() / n.max(1));
         let host = self.states.capacity()
             + self.next.capacity()
@@ -349,7 +349,7 @@ impl BatchedCells {
     /// The advance of every cell of this process; a failure an error of the first element
     /// which failed.
     fn advance_local(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
-        let n = self.global.len();
+        let n = self.elements.len();
         let (ns, nb) = (self.state_ids.len(), self.links.len());
         let np = self.parameters.len() / n.max(1);
         if blood.len() != n * nb {
@@ -406,7 +406,7 @@ impl BatchedCells {
             &mut self.next,
         )?;
         let element = |i: usize, message: String| CellsError::Element {
-            cell: self.global[i],
+            element: self.elements[i],
             centroid: self.centroids[i],
             message,
         };
@@ -459,7 +459,7 @@ impl BatchedCells {
 
 impl CellSolver for BatchedCells {
     fn n_cells(&self) -> usize {
-        self.global.len()
+        self.elements.len()
     }
 
     fn species(&self) -> &[String] {
@@ -487,7 +487,7 @@ impl CellSolver for BatchedCells {
 
     fn outputs(&self, out: &mut Vec<f64>) {
         out.clear();
-        let n = self.global.len();
+        let n = self.elements.len();
         let ns = self.state_ids.len();
         let np = self.parameters.len() / n.max(1);
         let t = self.t / self.time_unit_s;
