@@ -47,6 +47,16 @@
 //! slidesim prints nothing to stdout or stderr (a panic, a bug, writes its message to stderr and
 //! traps). PETSc is initialized once, at the first `slidesim_create`, and stays.
 //!
+//! After a trap (a panic, an allocation past the memory the host allows, any other) the instance
+//! must be discarded, with every simulation in it: the trap leaves the state of slidesim as it was
+//! in the middle of a call (its `RefCell` borrowed, PETSc's objects half updated), so that every
+//! later call would trap again or worse. A host instantiates `slidesim.wasm`, mathlib and the
+//! kernel again for the next simulation. An error (-1, -2, a null array) is not a trap: the
+//! instance and its other simulations stay usable.
+//!
+//! A pointer with a length of 0 is never read, so it may be anything, 0 included (0 is a valid
+//! address in wasm, and the host need not allocate for an empty name or input).
+//!
 //! Memory: a wasm32 memory has at most 4 GiB; the host may cap it lower (`wasm/host`,
 //! `CreateOptions.memory` of the JavaScript API), and an allocation past the cap fails the call
 //! (a trap, or an error of PETSc or Mmg). Mmg, the remesher of the mesher, caps itself at 2 GiB
@@ -330,18 +340,34 @@ pub extern "C" fn slidesim_alloc(len: usize) -> *mut u8 {
 /// `ptr` and `len` are those of a [`slidesim_alloc`] not freed yet.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slidesim_free(ptr: *mut u8, len: usize) {
+    if len == 0 {
+        // Nothing was allocated: `slidesim_alloc(0)` gives a dangling pointer.
+        return;
+    }
     // SAFETY: the memory of a `Vec<u8>` of the capacity `len` (the caller's contract).
     drop(unsafe { Vec::from_raw_parts(ptr, 0, len) });
+}
+
+/// The `len` bytes at `ptr`; none, whatever `ptr` is (0 included), for a length of 0.
+///
+/// # Safety
+/// For a length above 0, `ptr` points to `len` readable bytes which live for `'a`.
+unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: the caller's contract; not null, since `len` bytes are there.
+    unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
 /// The simulation of the inputs at `ptr` of `len` bytes: its handle, or -1 with the error.
 ///
 /// # Safety
-/// `ptr` points to `len` readable bytes.
+/// `ptr` points to `len` readable bytes (any pointer for 0 bytes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slidesim_create(ptr: *const u8, len: usize) -> i32 {
     // SAFETY: the caller's contract.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let bytes = unsafe { bytes(ptr, len) };
     with_state(|state| {
         state.create(bytes).unwrap_or_else(|e| {
             state.error = causes(&e);
@@ -378,7 +404,7 @@ pub extern "C" fn slidesim_time(handle: i32) -> f64 {
 /// (see the crate documentation), valid until the next call; null with the error.
 ///
 /// # Safety
-/// `name_ptr` points to `name_len` readable bytes.
+/// `name_ptr` points to `name_len` readable bytes (any pointer for 0 bytes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slidesim_array(
     handle: i32,
@@ -386,7 +412,7 @@ pub unsafe extern "C" fn slidesim_array(
     name_len: usize,
 ) -> *const u8 {
     // SAFETY: the caller's contract.
-    let name = unsafe { std::slice::from_raw_parts(name_ptr, name_len) };
+    let name = unsafe { bytes(name_ptr, name_len) };
     with_state(|state| {
         let array = std::str::from_utf8(name)
             .map_err(|_| anyhow!("the name of an array is not UTF-8"))

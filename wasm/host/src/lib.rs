@@ -24,7 +24,9 @@
 //! with a wasmtime [`ResourceLimiter`]: a growth past the cap is refused (`memory.grow` gives -1,
 //! so a C `malloc` returns NULL and Rust's allocator aborts, a trap), and any failure of the run
 //! after a refused growth is reported as an error naming the cap. The host process lives on:
-//! a trap of slidesim is an error of [`run`], not a crash of the host.
+//! a trap of slidesim is an error of [`run`], not a crash of the host. Every [`run`] instantiates the
+//! modules afresh, so an instance that trapped is dropped with its store, as it must be (see
+//! `crates/slidesim-wasm`: after a trap its state is that of the middle of a call).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -190,25 +192,30 @@ pub fn run(
     inputs: &str,
     max_pages: Option<u64>,
 ) -> Result<Outputs> {
-    let mut inputs: Value = serde_json::from_str(inputs).context("the inputs are not JSON")?;
     let kernel_json = kernel_dir.join("kernel.json");
-    let kernel: Value = serde_json::from_str(
-        &std::fs::read_to_string(&kernel_json)
-            .with_context(|| format!("cannot read {}", kernel_json.display()))?,
-    )
-    .with_context(|| format!("{} is not JSON", kernel_json.display()))?;
-    inputs
-        .as_object_mut()
-        .context("the inputs are not a JSON object")?
-        .insert("kernel".into(), kernel);
+    let kernel = std::fs::read_to_string(&kernel_json)
+        .with_context(|| format!("cannot read {}", kernel_json.display()))?;
+    let inputs = with_kernel(inputs, &kernel)
+        .with_context(|| format!("the inputs with {}", kernel_json.display()))?;
     let mut host = Host::new(
         slidesim,
         &kernel_dir.join("kernel.wasm"),
         mathlib,
         max_pages,
     )?;
-    let result = host.simulate(&serde_json::to_vec(&inputs)?);
+    let result = host.simulate(inputs.as_bytes());
     host.finish(result)
+}
+
+/// The JSON object `inputs` with the key `kernel` set to the JSON `kernel`. The values pass
+/// through as they are: a float of a mesh.json keeps its bits (serde_json reads floats correctly
+/// rounded with the feature `float_roundtrip` and writes the shortest text which reads back).
+fn with_kernel(inputs: &str, kernel: &str) -> Result<String> {
+    let mut inputs: serde_json::Map<String, Value> =
+        serde_json::from_str(inputs).context("the inputs are not a JSON object")?;
+    let kernel: Value = serde_json::from_str(kernel).context("the kernel is not JSON")?;
+    inputs.insert("kernel".into(), kernel);
+    Ok(serde_json::to_string(&inputs)?)
 }
 
 impl Host {
@@ -579,4 +586,40 @@ fn u64s(bytes: &[u8]) -> Vec<u64> {
         .iter()
         .map(|b| u64::from_le_bytes(*b))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Floats pass [`with_kernel`] bit for bit: 10^4 of them spread over the bits of f64.
+    #[test]
+    fn inputs_keep_their_floats() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let values: Vec<f64> = (0..10_000)
+            .map(|_| {
+                // xorshift64: arbitrary bits, of finite floats.
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let v = f64::from_bits(x);
+                if v.is_finite() { v } else { 1.0 / 3.0 }
+            })
+            .collect();
+        let inputs = serde_json::json!({"mesh": {"vertices": values}}).to_string();
+        let out: Value = serde_json::from_str(&with_kernel(&inputs, "{}").unwrap()).unwrap();
+        let back: Vec<f64> = out["mesh"]["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        let differ = values
+            .iter()
+            .zip(&back)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differ, 0, "{differ} of {} floats changed", values.len());
+        assert_eq!(out["kernel"], serde_json::json!({}));
+    }
 }

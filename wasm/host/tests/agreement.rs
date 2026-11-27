@@ -253,47 +253,114 @@ fn lobule_matches_native() {
     assert_eq!(wasm.outputs.len(), t);
 
     for (id, values) in &native.fields {
-        let v = values.len() / t;
         let max = values.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
-        let mut worst = 0.0_f64;
-        for (k, output) in wasm.outputs.iter().enumerate() {
-            assert_eq!(output.index, k);
-            assert_eq!(output.time, native.time[k]);
-            let row = &output.fields[id];
-            assert_eq!(row.len(), v, "field {id}");
-            for (w, n) in row.iter().zip(&values[k * v..(k + 1) * v]) {
-                worst = worst.max((w - n).abs());
-            }
-        }
+        let rows: Vec<&[f64]> = wasm
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(k, output)| {
+                assert_eq!(output.index, k);
+                assert_eq!(output.time, native.time[k]);
+                output.fields[id].as_slice()
+            })
+            .collect();
+        let worst =
+            compare(values, &rows, |_| 1e-5 * max).unwrap_or_else(|e| panic!("field {id}: {e}"));
         eprintln!(
-            "field {id}: max |wasm - native| {worst:.3e}, field maximum {max:.6e}, ratio {:.3e}",
-            worst / max
+            "field {id}: max |wasm - native| / (1e-5 max) {:.3e} (wasm {:e}, native {:e}), field \
+             maximum {max:.6e}",
+            worst.ratio, worst.wasm, worst.native
         );
-        assert!(
-            worst <= 1e-5 * max,
-            "field {id}: {worst:e} > 1e-5 * {max:e}"
-        );
+        assert!(worst.ratio <= 1.0, "field {id}: {worst:?}, maximum {max:e}");
     }
     for (name, values) in &native.cells {
-        let c = values.len() / t;
-        assert_eq!(c, native.cell_elements.len());
-        // The largest difference against the bound, and the difference there.
-        let (mut ratio, mut at) = (0.0_f64, (0.0, 0.0));
-        for (k, output) in wasm.outputs.iter().enumerate() {
-            let row = &output.cells[name];
-            for (w, n) in row.iter().zip(&values[k * c..(k + 1) * c]) {
-                let r = (w - n).abs() / (1e-4 * n.abs() + 1e-8);
-                if r > ratio {
-                    (ratio, at) = (r, (*w, *n));
-                }
+        assert_eq!(values.len(), t * native.cell_elements.len(), "cells {name}");
+        let rows: Vec<&[f64]> = wasm
+            .outputs
+            .iter()
+            .map(|output| output.cells[name].as_slice())
+            .collect();
+        let worst = compare(values, &rows, |n| 1e-4 * n.abs() + 1e-8)
+            .unwrap_or_else(|e| panic!("cells {name}: {e}"));
+        eprintln!(
+            "cells {name}: largest |wasm - native| / (1e-4 |y| + 1e-8) {:.3e} (wasm {:e}, native \
+             {:e})",
+            worst.ratio, worst.wasm, worst.native
+        );
+        assert!(worst.ratio <= 1.0, "cells {name}: {worst:?}");
+    }
+}
+
+/// The largest difference of a comparison against its bound ([`compare`]), and the values there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Worst {
+    ratio: f64,
+    wasm: f64,
+    native: f64,
+}
+
+/// The rows `rows` of the wasm run (one per output time) against the native values `native`
+/// (`[T, n]`, row by row): the largest `|wasm - native| / bound(native)` (a difference of 0 is 0,
+/// also against a bound of 0). Errors: another number of rows or a row of another length, and a
+/// value which is not finite (unless both are NaN, as the fill of a value no cell has).
+fn compare(native: &[f64], rows: &[&[f64]], bound: impl Fn(f64) -> f64) -> Result<Worst, String> {
+    let t = rows.len();
+    if t == 0 || !native.len().is_multiple_of(t) {
+        return Err(format!("{t} rows for {} native values", native.len()));
+    }
+    let n = native.len() / t;
+    let mut worst = Worst {
+        ratio: 0.0,
+        wasm: 0.0,
+        native: 0.0,
+    };
+    for (k, row) in rows.iter().enumerate() {
+        if row.len() != n {
+            return Err(format!("row {k} has {} values, native {n}", row.len()));
+        }
+        for (i, (&w, &v)) in row.iter().zip(&native[k * n..(k + 1) * n]).enumerate() {
+            if w.is_nan() && v.is_nan() {
+                continue;
+            }
+            if !(w.is_finite() && v.is_finite()) {
+                return Err(format!("row {k} value {i}: wasm {w}, native {v}"));
+            }
+            let d = (w - v).abs();
+            let ratio = if d == 0.0 { 0.0 } else { d / bound(v) };
+            // Not `ratio > worst.ratio` alone: a ratio which is NaN (a bound which is) must be the
+            // worst too, so that it fails.
+            if ratio.is_nan() || ratio > worst.ratio {
+                worst = Worst {
+                    ratio,
+                    wasm: w,
+                    native: v,
+                };
             }
         }
-        eprintln!(
-            "cells {name}: largest |wasm - native| / (1e-4 |y| + 1e-8) {ratio:.3e} (wasm {:e}, native {:e})",
-            at.0, at.1
-        );
-        assert!(ratio <= 1.0, "cells {name}: wasm {} native {}", at.0, at.1);
     }
+    Ok(worst)
+}
+
+/// The comparison fails on NaN against a number, on infinities, on short or missing rows; a
+/// difference within the bound passes, both NaN pass.
+#[test]
+fn compare_fails_on_nan_and_short_rows() {
+    let native = [1.0, 2.0, 3.0, 4.0];
+    let bound = |_: f64| 1e-3;
+    let ok = compare(&native, &[&[1.0, 2.0005], &[3.0, 4.0]], bound).unwrap();
+    assert!((ok.ratio - 0.5).abs() < 1e-9, "{ok:?}");
+    assert!(compare(&native, &[&[1.0, f64::NAN], &[3.0, 4.0]], bound).is_err());
+    assert!(compare(&native, &[&[1.0, 2.0], &[3.0, f64::INFINITY]], bound).is_err());
+    assert!(compare(&native, &[&[1.0], &[3.0, 4.0]], bound).is_err());
+    assert!(compare(&native, &[&[1.0, 2.0]], bound).is_err());
+    let nan = [f64::NAN, 2.0];
+    assert_eq!(
+        compare(&nan, &[&[f64::NAN, 2.0]], bound).unwrap().ratio,
+        0.0
+    );
+    // A difference against a bound of 0 is past it, no difference is not.
+    assert!(compare(&[0.0], &[&[1e-300]], |_| 0.0).unwrap().ratio > 1.0);
+    assert_eq!(compare(&[0.0], &[&[0.0]], |_| 0.0).unwrap().ratio, 0.0);
 }
 
 /// The wasm build meshes the lobule itself within the mesher's bounds, the same mesh twice.

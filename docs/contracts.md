@@ -381,3 +381,12 @@ A memory growth past the host's cap fails the call (a trap or an error); Mmg, th
 mesher, caps itself at 2 GiB in wasm (a constant of
 `scripts/deps/patches/mmg-0001-memory-size-on-wasm.patch`; PETSc's adaptor sets no
 `MMG2D_IPARAM_mem`), so a lower cap of the host is the one that holds.
+
+After a trap of `slidesim.wasm` (a panic, an allocation past the host's cap) the instance must be
+discarded with every simulation in it: the trap leaves slidesim in the middle of a call (its state
+borrowed, PETSc's objects half updated), so every later call would trap again or worse. The host
+instantiates `slidesim.wasm`, mathlib and the kernel again for the next simulation; the live API
+rejects the `createSimulation` or `step()` that trapped with an `Error` and marks the
+`Simulation` unusable. An error (-1, -2, a null array) is not a trap: the instance and its other
+simulations stay usable. A pointer with a length of 0 is never read, so it may be anything,
+0 included.

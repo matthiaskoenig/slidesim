@@ -12,7 +12,9 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-serde_json = "1"
+# Floats read correctly rounded (float_roundtrip): the inputs pass `run` bit for bit, a mesh.json
+# included, for every consumer of the library, not only for the tests (where zarrs turns it on).
+serde_json = { version = "1", features = ["float_roundtrip"] }
 wasmtime = "=50.0.1"
 wasmtime-wasi = "=50.0.1"
 
