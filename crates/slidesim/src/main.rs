@@ -1,19 +1,18 @@
 //! `slidesim`: spatial simulations of diffusing fields on tissue meshes.
 //!
 //! `slidesim run <study.json> --out <dir> [-- <petsc options>]` runs a `study/1` end to end (see
-//! [`run`]; with cell models coupled to the fields, [`coupled`]), on one process or under
-//! `mpiexec`. `slidesim mesh <scene.json> --out <dir>` writes the mesh of a `scene/1` and its
-//! quality ([`mesh_command`]), on one process.
+//! [`run`], over the library `simulation`), on one process or under `mpiexec`. `slidesim mesh
+//! <scene.json> --out <dir>` writes the mesh of a `scene/1` and its quality ([`mesh_command`]),
+//! on one process.
 //!
 //! Exit code 0 on success. Otherwise 1, with the error (and its causes) on stderr. On several
 //! processes an error ends every process (`MPI_Abort`, exit code 1), since the others may wait
 //! for the failing one in a collective call forever; each failing process prints its error
 //! prefixed with its rank. So does a panic (a bug): `[rank <k>] panic: <message> (at <location>)`.
-//! An error which every process meets at the same point ([`run::OnEveryProcess`], as an error
-//! of the mesher on process 0, which reaches the others) ends each process alone: each prints
-//! it prefixed with its rank and exits with 1, without `MPI_Abort`.
+//! An error which every process meets at the same point ([`simulation::OnEveryProcess`], as an
+//! error of the mesher on process 0, which reaches the others) ends each process alone: each
+//! prints it prefixed with its rank and exits with 1, without `MPI_Abort`.
 
-mod coupled;
 mod mesh_command;
 mod run;
 
@@ -197,7 +196,7 @@ fn run_command(args: &RunArgs, started: Instant) -> ExitCode {
             let comm = petsc.comm();
             if comm.size() > 1 {
                 eprintln!("[rank {}] error: {}", comm.rank(), causes(&e));
-                if e.downcast_ref::<run::OnEveryProcess>().is_some() {
+                if e.downcast_ref::<simulation::OnEveryProcess>().is_some() {
                     // Every process has it: none waits for another.
                     return ExitCode::FAILURE;
                 }

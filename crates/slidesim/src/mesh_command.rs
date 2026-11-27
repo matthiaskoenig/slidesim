@@ -7,9 +7,9 @@
 //!   `triangle_tags`, `edges`, `edge_tags`), the coarse mesh a run makes of the scene;
 //! - `mesh.vtu`: the mesh for ParaView, one cell array per area tag, named after it, with the
 //!   value of the tag in its triangles and NaN elsewhere;
-//! - `quality.json`: its [`Quality`]: the numbers of triangles and vertices, the smallest angle
-//!   in degrees, the smallest and mean SICN and, for a generated mesh, the smallest and largest
-//!   ratio of an edge length to the size field.
+//! - `quality.json`: its [`mesher::Quality`]: the numbers of triangles and vertices, the
+//!   smallest angle in degrees, the smallest and mean SICN and, for a generated mesh, the
+//!   smallest and largest ratio of an edge length to the size field.
 //!
 //! The quality is printed in one line ([`quality_line`]), as a run prints it for a generated
 //! mesh.
@@ -19,22 +19,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use contracts::Scene;
 use mesh::Mesh;
-use mesher::{Quality, TaggedMesh};
+use mesher::TaggedMesh;
 use petsc::Petsc;
-
-use crate::coupled::CellWriter;
-
-/// The quality of a mesh in one line.
-pub(crate) fn quality_line(q: &Quality) -> String {
-    let mut line = format!(
-        "mesh: {} triangles, {} vertices, min angle {:.2} deg, SICN min {:.3} mean {:.3}",
-        q.triangles, q.vertices, q.min_angle_deg, q.min_sicn, q.mean_sicn
-    );
-    if let Some([lo, hi]) = q.edge_ratio {
-        line.push_str(&format!(", edge length / size {lo:.2} to {hi:.2}"));
-    }
-    line
-}
+use simulation::quality_line;
+use simulation::vtu::CellWriter;
 
 /// Writes the mesh of the scene `scene_path` into the directory `out` (created if missing; see
 /// the module documentation) and prints its quality. On one process.

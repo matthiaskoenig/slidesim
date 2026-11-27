@@ -1755,6 +1755,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "simulation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ceed",
+ "cells",
+ "contracts",
+ "maps",
+ "mesh",
+ "mesher",
+ "pde",
+ "petsc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1765,17 +1782,13 @@ name = "slidesim"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ceed",
- "cells",
  "clap",
  "contracts",
- "maps",
  "mesh",
  "mesher",
- "pde",
  "petsc",
- "serde",
  "serde_json",
+ "simulation",
  "test-support",
 ]
 

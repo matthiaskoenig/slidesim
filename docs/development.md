@@ -10,11 +10,13 @@ dependencies are in [Installation](installation.md).
 | `crates/petsc-sys`, `crates/ceed-sys` | `bindgen` bindings of PETSc and libCEED |
 | `crates/petsc`, `crates/ceed` | thin safe wrappers of the calls slidesim uses |
 | `crates/contracts` | `scene/1` and `study/1` (serde), and their JSON Schemas in `schemas/` |
-| `crates/mesh` | gmsh to DMPlex with tags, refinement, partitioning |
+| `crates/mesh` | gmsh files and generated meshes to DMPlex with tags, refinement, partitioning, partition-independent element ids |
+| `crates/mesher` | tagged polygons and ideal lobules to a graded, adapted triangle mesh (spade, Mmg through PETSc) |
 | `crates/maps` | Zarr v3 maps: windowed reads, bilinear samples and gradients |
 | `crates/pde` | P1 discretization, libCEED operators (QFunctions in `crates/pde/qfunctions/`), multigrid, transport, Darcy flow, mass balance, exchange with cells |
 | `crates/cells` | cell models per element: the engine path and the batched path |
-| `crates/slidesim` | the command line, `slidesim run`, and the coupled runs |
+| `crates/simulation` | a study as a simulation in memory: setup, the coupled runs of fields and cells, stepped from output time to output time, the summary and the VTU outputs |
+| `crates/slidesim` | the command line: `slidesim run` over `crates/simulation`, `slidesim mesh` |
 | `crates/test-support` | helpers of the tests, among them runs under `mpiexec` |
 | `testdata/` | meshes, maps, models, contracts and example studies of the tests |
 | `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
