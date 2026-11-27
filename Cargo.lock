@@ -1762,6 +1762,7 @@ dependencies = [
  "ceed",
  "cells",
  "contracts",
+ "jsonschema",
  "maps",
  "mesh",
  "mesher",
@@ -1769,6 +1770,8 @@ dependencies = [
  "petsc",
  "serde",
  "serde_json",
+ "test-support",
+ "zarrs",
 ]
 
 [[package]]

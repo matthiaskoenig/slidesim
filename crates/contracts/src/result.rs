@@ -21,6 +21,16 @@
 //! triangles of `mesh/triangles` are sorted by that fine id, the vertices are numbered by first
 //! appearance in that order, and `mesh/element` holds the coarse id of each triangle.
 //!
+//! Each triangle starts at its vertex with the smallest x (of two with the same x, the smaller
+//! y) and runs counterclockwise. An area tag holds the indices of its triangles ascending; an
+//! edge tag holds its edges as vertex index pairs `[min, max]`, the pairs ascending. A tag of
+//! dimension 0 (points) is not written: no array and no entry of `tags`. `cells/element` is
+//! ascending; a study without cells has an empty `cells/element` (shape `[0]`) and no
+//! `cells/<value>`. `study` and `scene` are the file names of the study and its scene, without
+//! directories. The rows of `fields/<id>` and `cells/<value>` hold the fill value NaN until
+//! their output time is written. The mesh is limited to about 40 million finest triangles: the
+//! writer gathers it onto process 0, and MPI counts the bytes in a 32-bit integer.
+//!
 //! `written` is the number of output times reached so far; in a finished run `complete` is true
 //! and `written == times.len()`. The live API (`wasm/js/slidesim.d.ts`) says the same: a created
 //! simulation has `written == 1` (the initial state at `times[0]`), each step reaches one more.

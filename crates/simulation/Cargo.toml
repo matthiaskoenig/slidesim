@@ -17,6 +17,9 @@ mesher = { path = "../mesher" }
 pde = { path = "../pde" }
 petsc = { path = "../petsc" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zarrs = { version = "0.23.14", default-features = false, features = ["filesystem", "zstd"] }
 
 [dev-dependencies]
-serde_json = "1"
+jsonschema = { version = "0.30", default-features = false }
+test-support = { path = "../test-support" }

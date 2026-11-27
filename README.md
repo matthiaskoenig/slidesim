@@ -69,8 +69,10 @@ target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out
 mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out
 ```
 
-`out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
-an earlier run there are removed first. `slidesim run --help` describes them.
+`out` gets `<field id>_<index>.vtu` per output time (for ParaView), `summary.json` and
+`result.zarr` (the store `result/1` for viewers: the mesh and every field and cell value per output
+time, Zarr v3); outputs of an earlier run there are removed first. `slidesim run --help`
+describes them.
 
 `summary.json` has, per field and output time, the mass balance over the interval since the
 output time before (`mass_balance`, each term its mean rate there: the rate of change of the

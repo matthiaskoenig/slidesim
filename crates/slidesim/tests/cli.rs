@@ -1401,3 +1401,41 @@ fn mesher_failure_on_process_0_stops_all() {
     assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
     assert!(!run.stderr.contains("MPI_Abort"), "{}", run.stderr);
 }
+
+/// `result.zarr` of an earlier run in the output directory is replaced whole: `lobule_toy` (the
+/// field `sucrose`) and then the SPT cells on `cells_toy` (the fields `S` and `P`) into one
+/// `--out` leave the store of the second run alone, without `fields/sucrose`. The root
+/// attributes name the files of the run by their file names.
+#[test]
+fn earlier_result_is_replaced() {
+    let dir = scratch("earlier_result_is_replaced");
+    let out = dir.join("out");
+    let store = out.join(simulation::RESULT_STORE);
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    assert!(store.join("fields/sucrose").is_dir());
+    let first = simulation::read_result(&store).unwrap();
+    assert_eq!(first.meta.study, "study.json");
+    assert!(first.meta.complete);
+    let spt = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/cells_toy/spt.study.json");
+    let short = variant(&spt, &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(60.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 60.0]);
+    });
+    assert_success(&slidesim(&args(&short, &out, &[])));
+    let mut fields: Vec<String> = std::fs::read_dir(store.join("fields"))
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    fields.sort();
+    assert_eq!(fields, ["P", "S"]);
+    let data = simulation::read_result(&store).unwrap();
+    let ids: Vec<&str> = data.meta.fields.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["S", "P"]);
+    assert_eq!(data.meta.study, "short.study.json");
+    assert_eq!(data.meta.scene, "scene.json");
+    assert_eq!((data.meta.written, data.meta.complete), (2, true));
+    assert!(!data.cell_elements.is_empty());
+}

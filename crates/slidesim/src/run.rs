@@ -11,7 +11,10 @@
 //! `<out>/velocity.vtu` ([`Simulation::write_flow`]). It steps to each output time in turn
 //! ([`Simulation::next_output`], output 0 at time 0 before any step) and writes the fields and
 //! the cells there ([`Simulation::write_vtu`]: `<out>/<field id>_<index>.vtu`,
-//! `<out>/cells_<index>.vtu`), then to `time.end`. At the end, process 0 writes the summary
+//! `<out>/cells_<index>.vtu`), then to `time.end`. Beside the VTU files it writes the store
+//! `result/1`, `<out>/result.zarr` ([`ResultWriter`]: made before the first output time, an
+//! earlier store removed whole, each output time written as it is reached; `study` names the
+//! study by the file name given on the command line). At the end, process 0 writes the summary
 //! ([`Simulation::summary`], see [`simulation::Summary`]) as `<out>/summary.json`.
 
 use std::path::Path;
@@ -20,7 +23,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use contracts::Study;
 use petsc::Petsc;
-use simulation::{Inputs, Simulation};
+use simulation::{Inputs, ResultWriter, Simulation};
 
 /// Runs the study of the file `study_path` and writes its results into the directory `out` (see
 /// the module documentation), for a process started at `started`. Collective.
@@ -41,8 +44,10 @@ pub fn run(petsc: &Petsc, study_path: &Path, out: &Path, started: Instant) -> Re
         }
     }
     simulation.write_flow(out)?;
+    let mut result = ResultWriter::create(out, &simulation, study_path)?;
     while let Some(index) = simulation.next_output()? {
         simulation.write_vtu(out, index)?;
+        result.write(&simulation, index)?;
     }
     if comm.rank() == 0 {
         let path = out.join("summary.json");

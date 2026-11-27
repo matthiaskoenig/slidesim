@@ -19,6 +19,14 @@
 //!
 //! The processes identify the vertices they share by their global numbers
 //! ([`Dm::vertex_numbering`]); each process sends the coordinates of the vertices it owns.
+//!
+//! Size limit: MPI counts the bytes of a gather in a 32-bit integer, so the parts of all
+//! processes together are at most `i32::MAX` bytes (2 GiB). A part takes 32 bytes per cell, 24
+//! per owned vertex (about half a vertex per triangle) and 8 per marked cell or 16 per marked
+//! edge: about 44 bytes per triangle and the tags, so the canonical mesh holds up to about 40
+//! million finest triangles. A larger mesh is an error on every process
+//! ([`MeshError::Gather`]). A gather of values is far below it: 8 bytes per vertex, `8 (1 +
+//! width)` per element.
 
 use petsc::{Comm, Dm, Point};
 
@@ -153,11 +161,14 @@ impl Mesh {
     }
 
     /// The finest level as a [`CanonicalMesh`] on process 0, the same for any number of
-    /// processes (see the module); `None` on the other processes. Collective.
+    /// processes (see the module); `None` on the other processes. It also makes the order of
+    /// [`Mesh::gather_vertex_values`], which needs it first. Collective.
+    ///
+    /// The mesh is limited to about 40 million finest triangles (see the module).
     ///
     /// Errors (on every process): [`MeshError::Gather`] if PETSc fails on a process while it
-    /// collects its part (the message of the lowest such process); [`MeshError::Petsc`] if a
-    /// collective call fails.
+    /// collects its part (the message of the lowest such process), or the parts exceed the size
+    /// limit; [`MeshError::Petsc`] if a collective call fails.
     pub fn canonical(&self) -> Result<Option<CanonicalMesh>, MeshError> {
         let (canonical, order) = self.build_canonical()?;
         // The order is the same as of an earlier call: keep the first.
@@ -168,14 +179,24 @@ impl Mesh {
     /// The values `values` at the local vertices of the finest level (one per vertex, in the
     /// order of the local vertices, depth 0), in the order of the vertices of the
     /// [`Mesh::canonical`] mesh on process 0; `None` on the other processes. Each vertex has
-    /// the value of the process which owns it. Collective. The first gather (without an earlier
-    /// [`Mesh::canonical`]) makes the canonical mesh to learn its order.
+    /// the value of the process which owns it. Collective.
     ///
-    /// Errors (on every process): [`MeshError::Gather`] if a process has not one value per
-    /// local vertex, or as [`Mesh::canonical`].
+    /// [`Mesh::canonical`] comes first: it makes the order of the vertices, which every later
+    /// gather keeps (a gather is a few milliseconds, the canonical mesh a full collection of
+    /// the mesh; the caller needs the mesh anyway to make sense of the values).
+    ///
+    /// Errors (on every process): [`MeshError::Gather`] if there was no [`Mesh::canonical`]
+    /// before, or a process has not one value per local vertex.
     pub fn gather_vertex_values(&self, values: &[f64]) -> Result<Option<Vec<f64>>, MeshError> {
         let finest = self.finest();
         let comm = finest.comm();
+        // The same on every process: Mesh::canonical is collective.
+        let Some(order) = self.vertex_order.get() else {
+            return Err(MeshError::Gather(
+                "vertex values are gathered after Mesh::canonical, which makes their order"
+                    .to_string(),
+            ));
+        };
         let vertices = finest.depth_stratum(0)?.len();
         let fits = if values.len() == vertices {
             Ok(())
@@ -187,13 +208,12 @@ impl Mesh {
             ))
         };
         agree(&comm, fits)?;
-        let order = self.vertex_order()?;
         let bytes: Vec<u8> = order
             .owned
             .iter()
             .flat_map(|&v| values[v].to_le_bytes())
             .collect();
-        let Some(gathered) = comm.gather_bytes(0, &bytes)? else {
+        let Some(gathered) = gather(&comm, &bytes)? else {
             return Ok(None);
         };
         let (n, slots) = order.slots.as_ref().expect("process 0 has the slots");
@@ -210,8 +230,9 @@ impl Mesh {
     /// process on process 0, sorted by element id: the ids and the rows; `None` on the other
     /// processes. An element held by several processes appears once per process. Collective.
     ///
-    /// Errors (on every process): [`MeshError::Gather`] if a process has not `width` values per
-    /// id, or `width` is 0.
+    /// Errors (on every process): [`MeshError::Gather`] if `width` differs between the
+    /// processes, a process has not `width` values per id, `width` is 0, or the rows of all
+    /// processes together exceed 2 GiB (see the module).
     pub fn gather_element_values(
         &self,
         ids: &[u64],
@@ -219,7 +240,16 @@ impl Mesh {
         width: usize,
     ) -> Result<Option<ElementRows>, MeshError> {
         let comm = self.finest().comm();
-        let fits = if width > 0 && values.len() == ids.len() * width {
+        let w = petsc::sys::PetscInt::try_from(width).unwrap_or(petsc::sys::PetscInt::MAX);
+        let widest = comm.max_int(w)?;
+        let narrowest = -comm.max_int(-w)?;
+        let fits = if widest != narrowest {
+            Err(format!(
+                "width {width} on process {}, widths from {narrowest} to {widest} on the \
+                 processes",
+                comm.rank()
+            ))
+        } else if width > 0 && values.len() == ids.len() * width {
             Ok(())
         } else {
             Err(format!(
@@ -235,7 +265,7 @@ impl Mesh {
             bytes.extend(id.to_le_bytes());
             row.iter().for_each(|v| bytes.extend(v.to_le_bytes()));
         }
-        let Some(gathered) = comm.gather_bytes(0, &bytes)? else {
+        let Some(gathered) = gather(&comm, &bytes)? else {
             return Ok(None);
         };
         let mut rows: Vec<&[[u8; 8]]> = gathered
@@ -251,16 +281,6 @@ impl Mesh {
         Ok(Some((ids, values)))
     }
 
-    /// The order of [`Mesh::gather_vertex_values`]: made with the canonical mesh on the first
-    /// call. Collective on the first call (every process makes it in the same call).
-    fn vertex_order(&self) -> Result<&VertexOrder, MeshError> {
-        if let Some(order) = self.vertex_order.get() {
-            return Ok(order);
-        }
-        let (_, order) = self.build_canonical()?;
-        Ok(self.vertex_order.get_or_init(|| order))
-    }
-
     /// The canonical mesh on process 0 and the order of the vertices of this process.
     /// Collective.
     fn build_canonical(&self) -> Result<(Option<CanonicalMesh>, VertexOrder), MeshError> {
@@ -274,7 +294,7 @@ impl Mesh {
             part.as_ref().map(|_| ()).map_err(ToString::to_string),
         )?;
         let (part, owned) = part?;
-        let Some(gathered) = comm.gather_bytes(0, &part.to_bytes())? else {
+        let Some(gathered) = gather(&comm, &part.to_bytes())? else {
             return Ok((None, VertexOrder { owned, slots: None }));
         };
         let parts: Vec<Part> = gathered
@@ -468,6 +488,23 @@ fn vertex_coordinates(dm: &Dm, vertices: &std::ops::Range<Point>) -> petsc::Resu
         .collect()
 }
 
+/// The bytes `bytes` of every process on process 0 ([`Comm::gather_bytes`]), with its error of
+/// too many bytes, which every process has, as a [`MeshError::Gather`]. Collective.
+fn gather(comm: &Comm, bytes: &[u8]) -> Result<Option<Vec<Vec<u8>>>, MeshError> {
+    comm.gather_bytes(0, bytes).map_err(collective_gather_error)
+}
+
+/// The error `e` of [`Comm::gather_bytes`] to 0: [`MeshError::Gather`] if it is the error of
+/// too many bytes (the only one of its argument errors with root 0, found by every process),
+/// else [`MeshError::Petsc`].
+fn collective_gather_error(e: petsc::Error) -> MeshError {
+    if e.code == petsc::sys::PETSC_ERR_ARG_OUTOFRANGE {
+        MeshError::Gather(e.message)
+    } else {
+        MeshError::Petsc(e)
+    }
+}
+
 /// An error ([`MeshError::Gather`]) on every process if `local` is one on any: the message of
 /// the lowest process with one. Collective.
 pub(crate) fn agree(comm: &Comm, local: Result<(), String>) -> Result<(), MeshError> {
@@ -487,4 +524,30 @@ pub(crate) fn agree(comm: &Comm, local: Result<(), String>) -> Result<(), MeshEr
     Err(MeshError::Gather(
         String::from_utf8_lossy(&message).into_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collective_gather_error;
+    use crate::MeshError;
+
+    /// The size limit of a gather is a collective error; an MPI failure is not.
+    #[test]
+    fn too_many_bytes_is_collective() {
+        let limit = petsc::Error {
+            code: petsc::sys::PETSC_ERR_ARG_OUTOFRANGE,
+            message: "3e9 bytes to gather; MPI counts them in a 32-bit integer".to_string(),
+        };
+        let e = collective_gather_error(limit);
+        assert!(
+            matches!(e, MeshError::Gather(_)) && e.is_collective(),
+            "{e}"
+        );
+        assert!(e.to_string().contains("32-bit"), "{e}");
+        let mpi = petsc::Error {
+            code: petsc::sys::PETSC_ERR_MPI,
+            message: "MPI_Gatherv failed with MPI error 1".to_string(),
+        };
+        assert!(!collective_gather_error(mpi).is_collective());
+    }
 }

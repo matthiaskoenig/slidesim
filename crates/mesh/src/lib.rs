@@ -96,6 +96,10 @@ pub enum MeshError {
     /// every process.
     #[error("gather onto process 0: {0}")]
     Gather(String),
+    /// The distribution of the mesh over the processes lost cells: a cell of the distributed
+    /// mesh comes from no cell of the coarse one. The same on every process.
+    #[error("cannot distribute the mesh: {0}")]
+    Distribute(String),
     #[error(transparent)]
     Petsc(#[from] petsc::Error),
 }
@@ -104,7 +108,8 @@ impl MeshError {
     /// Whether every process of [`Mesh::load`] has this error, with the same message, at the
     /// same point: [`MeshError::NotFound`] and [`MeshError::Mesher`] (process 0 finds them and
     /// tells the others), [`MeshError::Dimension`] (every process reads the dimension of the
-    /// same mesh) and [`MeshError::Gather`] (the processes agree on it). After such an error no process waits for another, so a caller may end each
+    /// same mesh), [`MeshError::Gather`] and [`MeshError::Distribute`] (the processes agree on
+    /// them). After such an error no process waits for another, so a caller may end each
     /// process alone. A PETSc error, or one of reading (the collective read may fail on one
     /// process only), may be on some processes only.
     pub fn is_collective(&self) -> bool {
@@ -114,6 +119,7 @@ impl MeshError {
                 | MeshError::Dimension { .. }
                 | MeshError::Mesher { .. }
                 | MeshError::Gather(_)
+                | MeshError::Distribute(_)
         )
     }
 }
@@ -254,7 +260,8 @@ impl Mesh {
     /// ([`Mesh::element_ids`]): the migration star forest of `DMPlexDistribute` carries the
     /// number of each cell to the process and the local cell it becomes.
     ///
-    /// Errors: [`MeshError::Petsc`] if splitting, distributing or refining fails.
+    /// Errors: [`MeshError::Petsc`] if splitting, distributing or refining fails;
+    /// [`MeshError::Distribute`] (on every process) if the distribution loses cells.
     pub fn from_dm(petsc: &Petsc, coarse: Dm, refinements: u32) -> Result<Mesh, MeshError> {
         let comm = petsc.comm();
         let mut coarse = coarse;
@@ -368,7 +375,8 @@ fn owned_number(g: petsc::sys::PetscInt) -> u64 {
 /// `distributed` by the star forest `migration` of [`Dm::distribute_with_migration`]: the number
 /// of each local cell of `distributed`, in the order of its cells. Collective.
 ///
-/// Errors (on every process) if a cell of `distributed` comes from no cell of `coarse`.
+/// Errors: [`MeshError::Distribute`] (on every process) if a cell of `distributed` comes from
+/// no cell of `coarse`; [`MeshError::Petsc`] if PETSc fails.
 fn migrated_numbers(
     coarse: &Dm,
     numbers: &[petsc::sys::PetscInt],
@@ -395,12 +403,9 @@ fn migrated_numbers(
         .comm()
         .sum_int(petsc::sys::PetscInt::try_from(missing).unwrap_or(petsc::sys::PetscInt::MAX))?;
     if missing > 0 {
-        return Err(MeshError::Petsc(petsc::Error {
-            code: petsc::sys::PETSC_ERR_PLIB,
-            message: format!(
-                "{missing} cells of the distributed mesh come from no cell of the coarse mesh"
-            ),
-        }));
+        return Err(MeshError::Distribute(format!(
+            "{missing} cells of the distributed mesh come from no cell of the coarse mesh"
+        )));
     }
     Ok(ids.into_iter().map(|g| g as u64).collect())
 }

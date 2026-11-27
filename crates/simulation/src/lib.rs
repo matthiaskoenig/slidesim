@@ -31,6 +31,10 @@
 //! vectors `velocity`, the conservative velocity the fields are carried by, and
 //! `primal_velocity`, `-K grad p / mu`, um/s).
 //!
+//! [`ResultWriter`] writes the state of each output time into the store `result/1`,
+//! `<out>/result.zarr`, for viewers: the canonical finest mesh, the fields at its vertices and
+//! the cell values per element (see its module); [`read_result`] reads such a store.
+//!
 //! Every process calls the functions marked collective, in the same order. An error which every
 //! process meets at the same point carries the context [`OnEveryProcess`]; after any other
 //! error of a collective function, the other processes may wait for the failing one forever.
@@ -38,6 +42,7 @@
 mod coupled;
 mod inputs;
 mod phases;
+mod result;
 mod summary;
 pub mod vtu;
 
@@ -58,6 +63,7 @@ use petsc::{Comm, Petsc};
 use crate::coupled::Coupled;
 pub use crate::inputs::Inputs;
 use crate::phases::Phases;
+pub use crate::result::{RESULT_STORE, ResultData, ResultWriter, read_result};
 pub use crate::summary::{
     Attempts, BalanceSummary, CellsSummary, FieldSummary, InflowSummary, IslandsSummary,
     PerfusionSummary, Seconds, SolverSummary, Summary,

@@ -103,8 +103,12 @@ Output files in DIR:
                           pressure (the flow), transport, exchange, cells and output
   pressure.vtu            with perfusion: the pressure, point data 'pressure.Pa'
   velocity.vtu            with perfusion: the Darcy velocity (um/s), the point vector 'velocity'
+  result.zarr             the store result/1 for viewers (Zarr v3, zstd): the finest mesh, and
+                          per output time every field at its vertices and the values of the
+                          cells; written by process 0 as the output times are reached (its
+                          attributes 'written' and 'complete' tell how far)
 Files <field id>_<index>.vtu, cells_<index>.vtu, pressure.vtu and velocity.vtu of an earlier run
-in DIR are removed first; other files stay.
+in DIR are removed first, result.zarr whole; other files stay.
 
 The cell model of a study with cells is compiled with $CC (or cc) at the start of the run, and
 cached in $SBMLSIM_C_CACHE (default: $XDG_CACHE_HOME/sbmlsim/c or ~/.cache/sbmlsim/c).

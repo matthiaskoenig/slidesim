@@ -37,13 +37,14 @@ for speed, and agree to about that. `slidesim run --help` describes the outputs.
 4. Steps the fields to each output time of `time.outputs` in turn, then to `time.end`: each field
    alone, or with `cells` all fields and the cells together by Strang splitting
    ([Cell models](methods/cells.md)).
-5. At each output time (time 0 before any step) writes every field, and with cells the cells;
-   at the end, process 0 writes `summary.json`.
+5. At each output time (time 0 before any step) writes every field, and with cells the cells,
+   as VTU files and into `result.zarr`; at the end, process 0 writes `summary.json`.
 
 ## Outputs
 
 `DIR` is created if missing. The files `<field id>_<index>.vtu`, `cells_<index>.vtu`,
-`pressure.vtu` and `velocity.vtu` of an earlier run in `DIR` are removed first; other files stay.
+`pressure.vtu` and `velocity.vtu` of an earlier run in `DIR` are removed first, and
+`result.zarr` whole; other files stay.
 
 | File | Content |
 | --- | --- |
@@ -52,6 +53,27 @@ for speed, and agree to about that. `slidesim run --help` describes the outputs.
 | `pressure.vtu` | with perfusion: the pressure, point data `pressure.Pa` |
 | `velocity.vtu` | with perfusion: the point vectors `velocity` (the conservative velocity the fields are carried by) and `primal_velocity` (`-K grad p / mu`), um/s |
 | `summary.json` | per field and output time: norms, amounts and the mass balance; flows, cells and the time per phase |
+| `result.zarr` | the store [`result/1`](contracts.md#result1) for viewers (Zarr v3, zstd): the finest mesh, and per output time every field at its vertices and every value of the cells |
+
+## result.zarr
+
+Process 0 writes the store as the run goes: the mesh, the output times and empty arrays before
+the first output time, then each output time as it is reached, one chunk per array, after which
+the root attribute `written` counts it; the last output time sets `complete`. A run which stops
+early leaves `complete` false and the output times below `written` readable. The mesh is the
+finest level in a form independent of the number of processes (the same arrays from 1, 2 or 3
+processes), its vertices numbered as the field values are stored. `study` and `scene` name the
+files by their file names. Reading it in Python:
+
+```python
+import zarr
+
+root = zarr.open_group("out/result.zarr", mode="r")
+meta = root.attrs.asdict()  # ResultMeta: times, written, fields, cell_values, tags
+vertices = root["mesh/vertices"][:]  # [V, 2], um
+triangles = root["mesh/triangles"][:]  # [N, 3]
+S = root["fields/S"][meta["written"] - 1]  # [V], mM, the last output time written
+```
 
 ## summary.json
 

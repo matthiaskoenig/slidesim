@@ -287,12 +287,25 @@ canonical mesh holds the finest triangles sorted by that fine id, the vertices n
 appearance in that order, and `mesh/element` the coarse id of each triangle. A run on any number of
 processes writes the same arrays.
 
+Each triangle starts at its vertex with the smallest x (of two with the same x, the smaller y)
+and runs counterclockwise. An area tag holds the indices of its triangles ascending; an edge tag
+holds its edges as vertex index pairs `[min, max]`, the pairs ascending. A tag of dimension 0
+(points) is not written: no array and no entry of `tags`. `cells/element` is ascending; a study
+without cells has an empty `cells/element` (shape `[0]`) and no `cells/<value>`. The rows of
+`fields/<id>` and `cells/<value>` hold the fill value NaN until their output time is written:
+`slidesim run` writes each output time as it reaches it (the chunks first, then `written`), so a
+viewer may read a store while the run goes on.
+
+The mesh is limited to about 40 million finest triangles: the writer gathers the canonical mesh
+onto process 0 (`Mesh::canonical`, about 44 bytes per triangle with its vertices and tags), and
+MPI counts the bytes of a gather in a 32-bit integer (2 GiB). A larger mesh is an error.
+
 Attributes (`ResultMeta`):
 
 | Key | Meaning |
 | --- | --- |
 | `version` | `result/1` |
-| `study`, `scene` | the files the run was made from |
+| `study`, `scene` | the files the run was made from: their file names, without directories (no path of the machine) |
 | `refinements` | uniform refinements beyond the coarse mesh |
 | `times` | output times in s, strictly increasing (the `time` array) |
 | `written` | time indices written so far; an index `t < written` is complete and readable alone |

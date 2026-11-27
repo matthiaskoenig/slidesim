@@ -487,9 +487,10 @@ fn coarse_cell_contains_fine_centroids() {
 /// The tests `parallel_on_*_processes` run on several processes: the paths a single process does
 /// not take (the distributed mesh, its partition, reductions over processes, the readability check
 /// of process 0).
-const PARALLEL_TESTS: [&str; 20] = [
+const PARALLEL_TESTS: [&str; 21] = [
     "mpi_world_has_the_expected_size",
     "gathered_vertex_values_follow_canonical_order",
+    "vertex_values_follow_the_canonical_mesh",
     "gathered_element_values_are_sorted_by_id",
     "polygons_scene_loads",
     "from_tagged_matches_load_of_the_same_mesh",
@@ -1099,4 +1100,28 @@ fn gathered_element_values_are_sorted_by_id() {
     };
     let e = mesh.gather_element_values(ids, short, 2).unwrap_err();
     assert!(e.to_string().contains("width 2"), "{e}");
+    // A width of its own on the last process (on several): an error on every process.
+    if p.comm().size() > 1 {
+        let last = p.comm().rank() == p.comm().size() - 1;
+        let narrow: Vec<f64> = ids.iter().map(|&id| id as f64).collect();
+        let (values, width) = if last { (&narrow, 1) } else { (&values, 2) };
+        let e = mesh.gather_element_values(ids, values, width).unwrap_err();
+        assert!(e.is_collective(), "{e}");
+        assert!(e.to_string().contains("widths from 1 to 2"), "{e}");
+    }
+}
+
+/// Vertex values are gathered after the canonical mesh, which makes their order: before it, a
+/// gather is an error on every process.
+#[test]
+fn vertex_values_follow_the_canonical_mesh() {
+    let p = Petsc::init(&[]).unwrap();
+    let mesh = Mesh::load(&p, &scene("unit_square.msh"), 0).unwrap();
+    let values = vec![1.0; mesh.finest().depth_stratum(0).unwrap().len()];
+    let e = mesh.gather_vertex_values(&values).unwrap_err();
+    assert!(e.is_collective(), "{e}");
+    assert!(e.to_string().contains("after Mesh::canonical"), "{e}");
+    mesh.canonical().unwrap();
+    let gathered = mesh.gather_vertex_values(&values).unwrap();
+    assert_eq!(gathered.is_some(), p.comm().rank() == 0);
 }
