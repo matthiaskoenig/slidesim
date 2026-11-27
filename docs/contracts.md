@@ -67,7 +67,7 @@ central vein and a portal vein at every corner. All lengths in um.
 | Key | Meaning |
 | --- | --- |
 | `lobule_radius_um` | circumradius of the hexagonal lobule, > 0 (default 300) |
-| `rings` | rings of neighbouring lobules around the central one (default 0: one lobule) |
+| `rings` | rings of neighbouring lobules around the central one, at most 4 (default 0: one lobule; 4: 61 lobules) |
 | `jitter` | largest displacement of a vein as a fraction of `lobule_radius_um`, `0 <= jitter <= 0.25` (default 0) |
 | `seed` | seed of the displacements (default 0) |
 | `centre` | the central vein: `radius_um` (> 0, default 30) and `tag`, the edge tag of its wall |

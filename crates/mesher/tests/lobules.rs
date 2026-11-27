@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use contracts::{HoleSpec, LobuleSize, LobuleSpec, ZonationSpec};
-use mesher::{Domain, Lobules, MesherError, generate, triangulate};
+use mesher::{Domain, Lobules, MesherError, generate};
 use petsc::Petsc;
 
 type P = [f64; 2];
@@ -147,8 +147,18 @@ fn holes_overlap_is_an_error() {
     let mut s = spec(0, 0.0, 0);
     s.corner.radius_um = 160.0;
     match Lobules::new(&s) {
-        Err(MesherError::HolesOverlap { a, b }) => {
+        Err(e @ MesherError::HolesOverlap { .. }) => {
+            let MesherError::HolesOverlap { a, a_at, b, b_at } = &e else {
+                unreachable!()
+            };
             assert_eq!((a.as_str(), b.as_str()), ("corner", "corner"));
+            // Both at the corners, 300 um from the vein and from each other.
+            let l = lobules(0, 0.0, 0);
+            for at in [a_at, b_at] {
+                assert!(l.corners().contains(at), "{at:?}");
+            }
+            assert!((dist(*a_at, *b_at) - 300.0).abs() < 1e-9, "{e}");
+            assert!(e.to_string().contains("um"), "{e}");
         }
         other => panic!("expected HolesOverlap, got {other:?}"),
     }
@@ -161,10 +171,11 @@ fn hole_reaching_the_border_is_an_error() {
     s.centre.radius_um = 259.9;
     s.corner.radius_um = 1.0;
     match Lobules::new(&s) {
-        Err(MesherError::HolesOverlap { a, b }) => {
-            assert_eq!((a.as_str(), b.as_str()), ("centre", "outer"));
+        Err(MesherError::HoleReachesBorder { hole, at, border }) => {
+            assert_eq!((hole.as_str(), border.as_str()), ("centre", "outer"));
+            assert_eq!(at, [0.0, 0.0]);
         }
-        other => panic!("expected HolesOverlap, got {other:?}"),
+        other => panic!("expected HoleReachesBorder, got {other:?}"),
     }
     s.centre.radius_um = 259.7;
     assert!(Lobules::new(&s).is_ok());
@@ -282,13 +293,19 @@ fn largest_jitter_is_robust() {
     }
 }
 
-/// The domains of the largest jitter triangulate: the shared vertices of the rings and chains
-/// match, nothing overlaps.
+/// Where an outer edge meets a corner wall (a right angle between a straight edge and a
+/// polygonized arc) there is no gap: the size there is the wall size, not a cap by the distance
+/// to the next arc segments.
 #[test]
-fn jittered_lobules_triangulate() {
-    for seed in 0..3 {
-        let l = lobules(1, 0.25, seed);
-        triangulate(l.domain(), &l.size()).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+fn junctions_are_no_gaps() {
+    for jitter in [0.0, 0.25] {
+        let l = lobules(1, jitter, 1);
+        let size = l.size();
+        for points in chains(l.domain(), "outer") {
+            for x in [points[0], points[points.len() - 1]] {
+                assert_relative("size at a junction", size.at(x), 5.0, 1e-12);
+            }
+        }
     }
 }
 
@@ -299,7 +316,7 @@ fn lobule_meshes() {
         let start = Instant::now();
         let l = lobules(rings, jitter, 1);
         let geometry = start.elapsed();
-        let (mesh, quality) = generate(&petsc, l.domain(), &l.size()).unwrap();
+        let (mesh, quality) = generate(&petsc, l.domain(), l.size()).unwrap();
         eprintln!(
             "rings {rings} jitter {jitter}: geometry {geometry:?}, total {:?}, {quality:?}",
             start.elapsed()
@@ -315,12 +332,133 @@ fn lobule_meshes() {
     assert!(low >= 0.4 && high <= 2.0, "{quality:?}");
     let (again, _) = run(0, 0.0);
     assert_eq!(mesh, again);
-    // Larger and jittered: measured (Mmg gives a smallest angle a little below 20 degrees at
-    // some corner walls), with regression bounds.
-    for (rings, jitter) in [(1, 0.0), (1, 0.25)] {
-        let (_, quality) = run(rings, jitter);
-        let [low, high] = quality.edge_ratio.unwrap();
-        assert!(quality.min_angle_deg >= 18.0, "{quality:?}");
-        assert!(low >= 0.4 && high <= 2.0, "{quality:?}");
+}
+
+/// One case of the quality sweep: the rings, the jitter and seed, the wall and interior sizes,
+/// the centre and corner radii.
+type Case = (u32, f64, u64, [f64; 2], [f64; 2]);
+
+/// Meshes every case and asserts the mesher's quality bounds on each: a smallest angle of 20
+/// degrees, a SICN of 0.4 and edge ratios within [0.4, 2.0] against the size field.
+fn assert_quality_sweep(cases: &[Case]) {
+    let petsc = Petsc::init(&[]).unwrap();
+    let mut failures = Vec::new();
+    for &(rings, jitter, seed, [wall, interior], [centre, corner]) in cases {
+        let mut s = spec(rings, jitter, seed);
+        s.size = LobuleSize {
+            wall_um: wall,
+            interior_um: interior,
+        };
+        s.centre.radius_um = centre;
+        s.corner.radius_um = corner;
+        let start = Instant::now();
+        let l = Lobules::new(&s).unwrap();
+        let (_, q) = generate(&petsc, l.domain(), l.size()).unwrap();
+        let [low, high] = q.edge_ratio.unwrap();
+        let line = format!(
+            "rings {rings} jitter {jitter} seed {seed} wall {wall} interior {interior} centre \
+             {centre} corner {corner}: {} triangles, min angle {:.2}, min SICN {:.3}, edge \
+             ratio [{low:.3}, {high:.3}], {:.2?}",
+            q.triangles,
+            q.min_angle_deg,
+            q.min_sicn,
+            start.elapsed()
+        );
+        eprintln!("SWEEP {line}");
+        if !(q.min_angle_deg >= 20.0 && q.min_sicn >= 0.4 && low >= 0.4 && high <= 2.0) {
+            failures.push(line);
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "below the bounds:\n{}",
+        failures.join("\n")
+    );
+}
+
+const SIZES: [[f64; 2]; 4] = [[2.0, 20.0], [5.0, 20.0], [10.0, 20.0], [20.0, 20.0]];
+const RADII: [f64; 2] = [30.0, 25.0];
+/// Jitter 0, and the largest jitter at three seeds.
+const JITTERS: [(f64, u64); 4] = [(0.0, 0), (0.25, 1), (0.25, 2), (0.25, 3)];
+
+#[test]
+fn quality_sweep_rings_0() {
+    let cases: Vec<Case> = SIZES
+        .iter()
+        .flat_map(|&size| JITTERS.map(|(jitter, seed)| (0, jitter, seed, size, RADII)))
+        .collect();
+    assert_quality_sweep(&cases);
+}
+
+/// The contract's limits of the radii: `centre + corner` and `2 corner` just below
+/// `(1 - 2 jitter) R / 2` (150 um without jitter, 75 um at 0.25), and small radii.
+#[test]
+fn quality_sweep_radius_limits() {
+    let size = [5.0, 20.0];
+    let mut cases: Vec<Case> = [
+        [74.9, 74.9],
+        [148.9, 1.0],
+        [1.0, 74.9],
+        [1.0, 1.0],
+        [0.25, 0.25],
+    ]
+    .map(|radii| (0, 0.0, 0, size, radii))
+    .to_vec();
+    for seed in [1, 2] {
+        for radii in [[37.4, 37.4], [73.9, 1.0], [1.0, 37.4], [1.0, 1.0]] {
+            cases.push((0, 0.25, seed, size, radii));
+        }
+    }
+    assert_quality_sweep(&cases);
+}
+
+#[test]
+fn quality_sweep_rings_1() {
+    let cases: Vec<Case> = [(0.0, 0), (0.1, 1), (0.25, 1), (0.25, 2)]
+        .map(|(jitter, seed)| (1, jitter, seed, [5.0, 20.0], RADII))
+        .to_vec();
+    assert_quality_sweep(&cases);
+}
+
+/// The rest of the sweep: rings 1 at the other sizes, rings 2 at all sizes, rings 3 and 4 (the
+/// contract's largest) at the default size. Minutes in a debug build; run in release.
+#[test]
+#[ignore = "large: rings 2 to 4, about 30 meshes"]
+fn quality_sweep_heavy() {
+    let mut cases: Vec<Case> = Vec::new();
+    for size in [[2.0, 20.0], [10.0, 20.0], [20.0, 20.0]] {
+        for (jitter, seed) in [(0.0, 0), (0.25, 1)] {
+            cases.push((1, jitter, seed, size, RADII));
+        }
+    }
+    for size in SIZES {
+        for (jitter, seed) in [(0.0, 0), (0.25, 1), (0.25, 2)] {
+            cases.push((2, jitter, seed, size, RADII));
+        }
+    }
+    for rings in [3, 4] {
+        for (jitter, seed) in [(0.0, 0), (0.25, 1)] {
+            cases.push((rings, jitter, seed, [5.0, 20.0], RADII));
+        }
+    }
+    assert_quality_sweep(&cases);
+}
+
+/// Each hole wall gets the size of its polygon's segments where the wall size is coarser.
+#[test]
+fn small_hole_walls_are_resolved() {
+    let mut s = spec(0, 0.0, 0);
+    s.corner.radius_um = 1.0;
+    let l = Lobules::new(&s).unwrap();
+    let size = l.size();
+    let segment = std::f64::consts::TAU * 1.0 / 12.0;
+    let [c, v] = [l.corners()[0], l.veins()[0]];
+    assert_relative("corner wall", size.at([c[0] + 1.0, c[1]]), segment, 1e-12);
+    assert_relative("centre wall", size.at([v[0] + 30.0, v[1]]), 5.0, 1e-12);
+    // The walls' segments: 12 of 2 pi / 12 um on a full corner circle, 38 on the centre's.
+    let corner_wall: f64 = chains(l.domain(), "corner")
+        .iter()
+        .flat_map(|p| p.windows(2).map(|w| dist(w[0], w[1])))
+        .fold(0.0, f64::max);
+    assert!(corner_wall <= segment, "{corner_wall}");
 }

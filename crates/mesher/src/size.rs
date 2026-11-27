@@ -1,6 +1,9 @@
 //! The size field: the edge length as a function of the distance to the nearest wall, capped by
 //! the width of narrow gaps.
 
+use std::cmp::{Ordering, Reverse};
+use std::collections::BinaryHeap;
+
 use contracts::SizeField;
 use rstar::primitives::{GeomWithData, Line};
 use rstar::{PointDistance, RTree};
@@ -22,64 +25,29 @@ const GRADING: f64 = 0.3;
 /// which bounds the element count whatever the input.
 const FLOOR: f64 = 0.25;
 
-/// The edge length in um at a point: `min` up to the distance `dist_min` from the nearest
-/// segment of a wall chain, linear up to `max` at `dist_max`, `max` beyond (gmsh's Threshold
-/// field); without walls, `max` everywhere. The distance comes from an R-tree of the wall
-/// segments.
-///
-/// The field is capped by the local width of the domain: at a point of a ring or chain whose
-/// nearest other segment across (not touching it, at an end or a T-junction; not collinear with
-/// it; not along it) is at the distance `w`, the size is at most `0.4 w` (but not below `min / 4`), growing by 0.3 per um
-/// away from it. Narrow necks of tissue and chains close to each other so get elements which fit
-/// between their frozen boundaries.
+/// A boundary point and the nearest point of another segment are no gap if the boundary joins
+/// them within `PATH` times their distance. Two sides of a gap are joined only the long way
+/// round (around the end of a neck, or not at all); a corner of the boundary joins them directly.
+/// At a corner of angle `t` between two polylines, a point and its foot on the other side are
+/// joined by `cot(t / 2)` times their distance (1 for a right angle, the polygonized arc of a
+/// hole meeting a straight border), so corners of 53 degrees or wider make no gap; for a
+/// sharper corner between polylines the cap keeps two element layers across the wedge.
+const PATH: f64 = 2.0;
+
+/// One threshold field: `min` up to the distance `dist_min` from the nearest segment of a wall
+/// chain, linear up to `max` at `dist_max`, `max` beyond (gmsh's Threshold field); without
+/// walls, `max` everywhere. The distance comes from an R-tree of the wall segments.
 #[derive(Clone, Debug)]
-pub struct Size {
+struct Threshold {
     min: f64,
     max: f64,
     dist_min: f64,
     dist_max: f64,
     walls: Option<RTree<Line<[f64; 2]>>>,
-    /// The boundary points where the cap is below the field, with the cap.
-    gaps: Option<RTree<GeomWithData<[f64; 2], f64>>>,
-    /// The smallest cap.
-    gap_min: f64,
 }
 
-fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
-    [a[0] - b[0], a[1] - b[1]]
-}
-
-fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
-    a[0] * b[0] + a[1] * b[1]
-}
-
-fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (b[0] - a[0]).hypot(b[1] - a[1])
-}
-
-/// Every segment of the rings (closed) and chains of `domain`, zero-length ones left out.
-fn segments(domain: &Domain) -> Vec<[[f64; 2]; 2]> {
-    let mut out = Vec::new();
-    for (_, rings) in &domain.areas {
-        for ring in rings {
-            let n = ring.len();
-            out.extend((0..n).map(|i| [ring[i], ring[(i + 1) % n]]));
-        }
-    }
-    for (_, points) in &domain.edges {
-        out.extend(points.windows(2).map(|w| [w[0], w[1]]));
-    }
-    out.retain(|s| s[0] != s[1]);
-    out
-}
-
-impl Size {
-    /// The size field `spec` with the distance to the chains of the edge tags `spec.walls` of
-    /// `domain`, capped by the widths of the gaps of `domain`.
-    ///
-    /// Errors if a wall is no edge tag of the domain, or the sizes and distances are not finite,
-    /// positive and ordered (`min <= max`, `dist_min < dist_max`).
-    pub fn new(spec: &SizeField, domain: &Domain) -> Result<Size, MesherError> {
+impl Threshold {
+    fn new(spec: &SizeField, domain: &Domain) -> Result<Threshold, MesherError> {
         let finite = [spec.min_um, spec.max_um, spec.dist_min_um, spec.dist_max_um]
             .iter()
             .all(|v| v.is_finite());
@@ -116,12 +84,201 @@ impl Size {
                 }
             }
         }
-        let mut size = Size {
+        Ok(Threshold {
             min: spec.min_um,
             max: spec.max_um,
             dist_min: spec.dist_min_um,
             dist_max: spec.dist_max_um,
             walls: (!walls.is_empty()).then(|| RTree::bulk_load(walls)),
+        })
+    }
+
+    fn at(&self, x: [f64; 2]) -> f64 {
+        let Some(walls) = &self.walls else {
+            return self.max;
+        };
+        let d = walls
+            .nearest_neighbor(x)
+            .map_or(f64::INFINITY, |s| s.distance_2(&x).sqrt());
+        if d <= self.dist_min {
+            self.min
+        } else if d >= self.dist_max {
+            self.max
+        } else {
+            self.min + (self.max - self.min) * (d - self.dist_min) / (self.dist_max - self.dist_min)
+        }
+    }
+}
+
+/// The edge length in um at a point: the smallest of one or more threshold fields, each `min` up
+/// to the distance `dist_min` from the nearest segment of its wall chains, linear up to `max` at
+/// `dist_max`, `max` beyond (gmsh's Threshold fields under a Min field); without walls, `max`
+/// everywhere.
+///
+/// The field is capped by the local width of the domain: at a point of a ring or chain whose
+/// nearest other segment across (not touching it, at an end or a T-junction; not collinear with
+/// it; not along it; not joined to the point along the boundary within twice the distance, see
+/// [`PATH`]) is at the distance `w`, the size is at most `0.4 w` (but not below `min / 4`),
+/// growing by 0.3 per um away from it. Narrow necks of tissue and chains close to each other so
+/// get elements which fit between their frozen boundaries.
+#[derive(Clone, Debug)]
+pub struct Size {
+    fields: Vec<Threshold>,
+    /// The smallest `min` of the fields.
+    min: f64,
+    /// The largest `max` of the fields.
+    max: f64,
+    /// The boundary points where the cap is below the field, with the cap.
+    gaps: Option<RTree<GeomWithData<[f64; 2], f64>>>,
+    /// The smallest cap.
+    gap_min: f64,
+}
+
+fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (b[0] - a[0]).hypot(b[1] - a[1])
+}
+
+/// Every segment of the rings (closed) and chains of `domain`, zero-length ones left out.
+fn segments(domain: &Domain) -> Vec<[[f64; 2]; 2]> {
+    let mut out = Vec::new();
+    for (_, rings) in &domain.areas {
+        for ring in rings {
+            let n = ring.len();
+            out.extend((0..n).map(|i| [ring[i], ring[(i + 1) % n]]));
+        }
+    }
+    for (_, points) in &domain.edges {
+        out.extend(points.windows(2).map(|w| [w[0], w[1]]));
+    }
+    out.retain(|s| s[0] != s[1]);
+    out
+}
+
+/// A distance as a key of a min-heap, with the vertex as the tie break.
+#[derive(PartialEq)]
+struct Key(f64, usize);
+
+impl Eq for Key {}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Key {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0).then(self.1.cmp(&other.1))
+    }
+}
+
+/// The segments as a graph: the vertices (shared by exactly equal coordinates), the end
+/// vertices of each segment and the neighbours of each vertex with the segment lengths, and the
+/// shortest paths along it from a vertex up to a length.
+struct Boundary {
+    ends: Vec<[usize; 2]>,
+    neighbours: Vec<Vec<(usize, f64)>>,
+    /// The distances of the last walk, infinite where it did not reach, and the vertices it
+    /// reached (to reset them).
+    distances: Vec<f64>,
+    reached: Vec<usize>,
+}
+
+impl Boundary {
+    fn new(segments: &[[[f64; 2]; 2]]) -> Boundary {
+        let order = |a: &[f64; 2], b: &[f64; 2]| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1]));
+        let mut points: Vec<[f64; 2]> = segments.iter().flatten().copied().collect();
+        points.sort_by(order);
+        points.dedup_by(|a, b| order(a, b) == Ordering::Equal);
+        let vertex = |p: &[f64; 2]| points.binary_search_by(|q| order(q, p)).unwrap();
+        let ends: Vec<[usize; 2]> = segments.iter().map(|s| s.each_ref().map(vertex)).collect();
+        let mut neighbours = vec![Vec::new(); points.len()];
+        for (s, &[a, b]) in segments.iter().zip(&ends) {
+            let length = distance(s[0], s[1]);
+            neighbours[a].push((b, length));
+            neighbours[b].push((a, length));
+        }
+        Boundary {
+            ends,
+            neighbours,
+            distances: vec![f64::INFINITY; points.len()],
+            reached: Vec::new(),
+        }
+    }
+
+    /// The lengths of the shortest paths along the boundary from `from`, up to `limit`
+    /// (infinite beyond).
+    fn walk(&mut self, from: usize, limit: f64) -> Vec<(usize, f64)> {
+        for &v in &self.reached {
+            self.distances[v] = f64::INFINITY;
+        }
+        self.reached.clear();
+        let mut heap = BinaryHeap::new();
+        self.distances[from] = 0.0;
+        self.reached.push(from);
+        heap.push(Reverse(Key(0.0, from)));
+        let mut out = Vec::new();
+        while let Some(Reverse(Key(d, v))) = heap.pop() {
+            if d > self.distances[v] {
+                continue;
+            }
+            out.push((v, d));
+            for &(w, length) in &self.neighbours[v] {
+                let e = d + length;
+                if e <= limit && e < self.distances[w] {
+                    if self.distances[w].is_infinite() {
+                        self.reached.push(w);
+                    }
+                    self.distances[w] = e;
+                    heap.push(Reverse(Key(e, w)));
+                }
+            }
+        }
+        out.sort_unstable_by_key(|&(v, _)| v);
+        out
+    }
+}
+
+/// The shortest path from the vertex of a walk to `v`, if the walk reached it.
+fn reached(walk: &[(usize, f64)], v: usize) -> f64 {
+    walk.binary_search_by_key(&v, |&(w, _)| w)
+        .map_or(f64::INFINITY, |i| walk[i].1)
+}
+
+impl Size {
+    /// The size field `spec` with the distance to the chains of the edge tags `spec.walls` of
+    /// `domain`, capped by the widths of the gaps of `domain`.
+    ///
+    /// Errors if a wall is no edge tag of the domain, or the sizes and distances are not finite,
+    /// positive and ordered (`min <= max`, `dist_min < dist_max`).
+    pub fn new(spec: &SizeField, domain: &Domain) -> Result<Size, MesherError> {
+        Size::min_of(std::slice::from_ref(spec), domain)
+    }
+
+    /// The smallest of the size fields `specs` at each point (each with the distance to its own
+    /// walls), capped by the widths of the gaps of `domain`: walls of different sizes.
+    ///
+    /// Errors for no fields, and as [`Size::new`] for each field.
+    pub fn min_of(specs: &[SizeField], domain: &Domain) -> Result<Size, MesherError> {
+        if specs.is_empty() {
+            return Err(MesherError::SizeField("no size field".to_string()));
+        }
+        let fields = specs
+            .iter()
+            .map(|spec| Threshold::new(spec, domain))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut size = Size {
+            min: fields.iter().map(|f| f.min).fold(f64::INFINITY, f64::min),
+            max: fields.iter().map(|f| f.max).fold(0.0, f64::max),
+            fields,
             gaps: None,
             gap_min: f64::INFINITY,
         };
@@ -143,6 +300,10 @@ impl Size {
                 .map(|(i, s)| GeomWithData::new(Line::new(s[0], s[1]), i))
                 .collect(),
         );
+        let mut boundary = Boundary::new(&segments);
+        // The farthest any gap reaches (where the cap meets the largest size), and the farthest a
+        // path along the boundary needs to be followed.
+        let limit = PATH * self.max / FEATURE;
         let orient = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
             let coord = |p: [f64; 2]| robust::Coord { x: p[0], y: p[1] };
             robust::orient2d(coord(a), coord(b), coord(c))
@@ -153,6 +314,8 @@ impl Size {
             let length = distance(a, b);
             let direction = sub(b, a);
             let n = (2.0 * length / self.min).ceil().max(1.0) as usize;
+            // The paths along the boundary from the ends of this segment, walked when needed.
+            let mut walks: Option<[Vec<(usize, f64)>; 2]> = None;
             for k in 0..=n {
                 let t = k as f64 / n as f64;
                 let x = [a[0] + t * direction[0], a[1] + t * direction[1]];
@@ -186,14 +349,31 @@ impl Size {
                     }
                     // Across, not along: the way to the other segment makes more than 45 degrees
                     // with this one (the next segments of a polygonized curve lie along it).
-                    let across = sub(q.geom().nearest_point(&x), x);
+                    let y = q.geom().nearest_point(&x);
+                    let across = sub(y, x);
                     if dot(across, direction).abs() > std::f64::consts::FRAC_1_SQRT_2 * d * length {
                         continue;
                     }
                     let cap = (FEATURE * d).max(floor);
-                    if cap < field {
-                        gaps.push(GeomWithData::new(x, cap));
+                    if cap >= field {
+                        break;
                     }
+                    // Not joined to `x` along the boundary within `PATH d` (a corner, no gap).
+                    let [from_a, from_b] = walks
+                        .get_or_insert_with(|| boundary.ends[i].map(|v| boundary.walk(v, limit)));
+                    let path = boundary.ends[q.data]
+                        .iter()
+                        .zip([c, e])
+                        .map(|(&v, p)| {
+                            let along = (distance(x, a) + reached(from_a, v))
+                                .min(distance(x, b) + reached(from_b, v));
+                            along + distance(p, y)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    if path <= PATH * d {
+                        continue;
+                    }
+                    gaps.push(GeomWithData::new(x, cap));
                     break;
                 }
             }
@@ -203,19 +383,10 @@ impl Size {
 
     /// The size field without the cap.
     fn field(&self, x: [f64; 2]) -> f64 {
-        let Some(walls) = &self.walls else {
-            return self.max;
-        };
-        let d = walls
-            .nearest_neighbor(x)
-            .map_or(f64::INFINITY, |s| s.distance_2(&x).sqrt());
-        if d <= self.dist_min {
-            self.min
-        } else if d >= self.dist_max {
-            self.max
-        } else {
-            self.min + (self.max - self.min) * (d - self.dist_min) / (self.dist_max - self.dist_min)
-        }
+        self.fields
+            .iter()
+            .map(|f| f.at(x))
+            .fold(f64::INFINITY, f64::min)
     }
 
     /// The edge length at `x`.

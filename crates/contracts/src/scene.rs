@@ -127,8 +127,9 @@ pub struct LobuleSpec {
     #[serde(default = "default_lobule_radius")]
     #[schemars(extend("exclusiveMinimum" = 0))]
     pub lobule_radius_um: f64,
-    /// Rings of neighbouring lobules around the central one (0: a single lobule).
+    /// Rings of neighbouring lobules around the central one (0: a single lobule), at most 4.
     #[serde(default)]
+    #[schemars(range(max = MAX_LOBULE_RINGS))]
     pub rings: u32,
     /// Largest displacement of a vein as a fraction of `lobule_radius_um`, `0 <= jitter <= 0.25`.
     #[serde(default)]
@@ -154,6 +155,9 @@ pub struct LobuleSpec {
     /// The zonation raster generated over the domain; no default for the map id.
     pub zonation: ZonationSpec,
 }
+
+/// The most rings of neighbouring lobules (61 lobules), which bounds the size of the mesh.
+pub const MAX_LOBULE_RINGS: u32 = 4;
 
 fn default_lobule_radius() -> f64 {
     300.0
@@ -336,6 +340,12 @@ impl LobuleSpec {
         let r = self.lobule_radius_um;
         if !(r.is_finite() && r > 0.0) {
             return Err(invalid(format!("lobule_radius_um must be > 0, got {r}")));
+        }
+        if self.rings > MAX_LOBULE_RINGS {
+            return Err(invalid(format!(
+                "rings must be at most {MAX_LOBULE_RINGS}, got {}",
+                self.rings
+            )));
         }
         if !(self.jitter.is_finite() && (0.0..=0.25).contains(&self.jitter)) {
             return Err(invalid(format!(

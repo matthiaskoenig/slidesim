@@ -223,6 +223,7 @@ fn schemas_match_load() {
         "polygons-bad-value.geojson",
         "scene-lobules-bad-jitter.json",
         "scene-lobules-bad-radius.json",
+        "scene-lobules-bad-rings.json",
     ] {
         let schema = if f.starts_with("polygons") {
             contracts::schema_polygons()
@@ -741,6 +742,7 @@ fn lobule_parameters_out_of_range() {
     for (file, key) in [
         ("scene-lobules-bad-radius.json", "lobule_radius_um"),
         ("scene-lobules-bad-jitter.json", "jitter"),
+        ("scene-lobules-bad-rings.json", "rings"),
         ("scene-lobules-bad-veins-touch.json", "centre.radius_um"),
         ("scene-lobules-bad-corner.json", "corner.radius_um"),
         ("scene-lobules-bad-size.json", "size.wall_um"),

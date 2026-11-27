@@ -4,7 +4,8 @@
 //! and the edge chains of a [`Domain`], with the boundary already split to the [`Size`], and
 //! keeps the triangles inside the areas; [`adapt`] remeshes it with Mmg through PETSc's
 //! `DMAdaptMetric` to the isotropic metric `1 / h^2` of the size field, the boundary and the
-//! interfaces frozen; [`generate`] does both and measures the [`Quality`]. The result is a
+//! interfaces frozen; [`generate`] does both, improves the elements which Mmg leaves near the
+//! quality bounds, and measures the [`Quality`]. The result is a
 //! [`TaggedMesh`]: vertices, triangles with one area tag each and the tagged edges, which
 //! [`TaggedMesh::to_dm`] turns into a DMPlex with one label per tag.
 //!
@@ -18,6 +19,7 @@
 
 mod adapt;
 mod domain;
+mod improve;
 mod lobules;
 mod quality;
 mod size;
@@ -56,10 +58,28 @@ pub enum MesherError {
     /// midpoint of the segment between two input vertices.
     #[error("the edge {tag:?} at ({}, {}) um is not on a boundary of the areas", at[0], at[1])]
     EdgeOffBoundary { tag: String, at: [f64; 2] },
-    /// Two holes overlap or touch (the walls of tags `a` and `b`), or a hole reaches the outer
-    /// border (`b` its tag).
-    #[error("the holes of {a:?} and {b:?} overlap")]
-    HolesOverlap { a: String, b: String },
+    /// Two holes overlap or touch: the walls of tags `a` and `b`, the holes centred at `a_at`
+    /// and `b_at`.
+    #[error(
+        "the holes of {a:?} at ({}, {}) um and of {b:?} at ({}, {}) um overlap",
+        a_at[0], a_at[1], b_at[0], b_at[1]
+    )]
+    HolesOverlap {
+        a: String,
+        a_at: [f64; 2],
+        b: String,
+        b_at: [f64; 2],
+    },
+    /// A hole (the wall of tag `hole`, centred at `at`) reaches the outer border (tag `border`).
+    #[error(
+        "the hole of {hole:?} at ({}, {}) um reaches the outer border {border:?}",
+        at[0], at[1]
+    )]
+    HoleReachesBorder {
+        hole: String,
+        at: [f64; 2],
+        border: String,
+    },
     /// A [`LobuleSpec`](contracts::LobuleSpec) which gives no lobules: a radius which is not
     /// finite and positive, a jitter out of range, tags which are not distinct, ...
     #[error("lobules: {0}")]
@@ -92,8 +112,12 @@ pub enum MesherError {
     Petsc(#[from] petsc::Error),
 }
 
-/// [`triangulate`], [`adapt`] (on `PETSC_COMM_SELF`) and the [`Quality`] of the result against
-/// `size`. Calls no collective on a larger communicator: run it on one process.
+/// [`triangulate`], [`adapt`] (on `PETSC_COMM_SELF`), a local improvement of the elements which
+/// Mmg leaves near the quality bounds (smoothing, edge collapses and flips of free vertices and
+/// edges, each applied only if it improves the worst of the elements it changes, so the worst
+/// element never gets worse; the boundary, the interfaces and the tagged edges stay) and the
+/// [`Quality`] of the result against `size`. Calls no collective on a larger communicator: run
+/// it on one process.
 ///
 /// Guaranteed for any input it accepts: every triangle has the area tag of the polygon it lies
 /// in, the triangles of an area cover its polygons exactly (the boundary and the interfaces keep
@@ -110,7 +134,8 @@ pub fn generate(
     size: &Size,
 ) -> Result<(TaggedMesh, Quality), MesherError> {
     let input = triangulate(domain, size)?;
-    let mesh = adapt(petsc, &input, size)?;
+    let mut mesh = adapt(petsc, &input, size)?;
+    improve::improve(&mut mesh, size);
     let quality = mesh.quality(Some(size))?;
     Ok((mesh, quality))
 }

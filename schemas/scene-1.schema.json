@@ -197,8 +197,9 @@
             },
             "rings": {
               "default": 0,
-              "description": "Rings of neighbouring lobules around the central one (0: a single lobule).",
+              "description": "Rings of neighbouring lobules around the central one (0: a single lobule), at most 4.",
               "format": "uint32",
+              "maximum": 4,
               "minimum": 0,
               "type": "integer"
             },

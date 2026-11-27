@@ -17,8 +17,8 @@ pub use polygons::{AreaPolygon, EdgeChain, POLYGONS_VERSION, Polygons, schema_po
 pub use reserved::{RESERVED_TAGS, check_tag_name};
 pub use result::{RESULT_VERSION, RasterMeta, ResultField, ResultMeta, ResultTag, schema_result};
 pub use scene::{
-    HoleSpec, LengthUnit, LobuleSize, LobuleSpec, MapSpec, MeshSource, SCENE_VERSION, Scene,
-    SizeField, Units, ZonationSpec, schema_scene,
+    HoleSpec, LengthUnit, LobuleSize, LobuleSpec, MAX_LOBULE_RINGS, MapSpec, MeshSource,
+    SCENE_VERSION, Scene, SizeField, Units, ZonationSpec, schema_scene,
 };
 pub use study::{
     BoundarySpec, CellParameter, CellSolverKind, CellsSpec, Coefficient, Condition, Direction,

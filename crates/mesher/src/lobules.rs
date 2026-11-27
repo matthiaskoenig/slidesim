@@ -19,8 +19,9 @@
 //! bit, and the domain is one area: the outer ring and the holes inside the tissue.
 
 use std::f64::consts::TAU;
+use std::sync::OnceLock;
 
-use contracts::{AreaPolygon, EdgeChain, LobuleSpec, Polygons, SizeField};
+use contracts::{AreaPolygon, EdgeChain, HoleSpec, LobuleSpec, Polygons, SizeField};
 use rstar::RTree;
 use rstar::primitives::{GeomWithData, Line};
 use spade::{DelaunayTriangulation, Point2, Triangulation};
@@ -102,13 +103,29 @@ fn arc(c: P, r: f64, start: f64, sweep: f64, n: usize) -> Vec<P> {
         .collect()
 }
 
+/// The size field of the wall of `hole`: [`LobuleSpec::size_field`] with the size at the wall
+/// `min(wall_um, 2 pi r / 12)`, which bounds the segments of the hole's polygon (`max(12,
+/// ceil(2 pi r / wall_um))` vertices), up to twice that from the wall: the field and the polygon
+/// agree for any radius, and a small hole gets a fine zone of its own size only.
+fn wall_field(spec: &LobuleSpec, hole: &HoleSpec) -> SizeField {
+    let min = spec.size.wall_um.min(TAU * hole.radius_um / 12.0);
+    SizeField {
+        min_um: min,
+        dist_min_um: 2.0 * min,
+        walls: vec![hole.tag.clone()],
+        ..spec.size_field()
+    }
+}
+
 /// Ideal lobules: the veins, the corners, the tagged domain and its size field.
 #[derive(Clone, Debug)]
 pub struct Lobules {
     veins: Vec<P>,
     corners: Vec<P>,
     domain: Domain,
-    size_field: SizeField,
+    /// The size fields of the hole walls, and the size field they make (built when needed).
+    size_fields: Vec<SizeField>,
+    size: OnceLock<Size>,
     bounds: [P; 2],
     centre_radius: f64,
     corner_radius: f64,
@@ -123,9 +140,9 @@ impl Lobules {
     /// Errors ([`MesherError::InvalidLobules`]) for a radius which is not finite and positive, a
     /// jitter outside `[0, 0.25]` or tags which are not distinct; [`MesherError::InvalidTag`] for
     /// a reserved or empty tag; [`MesherError::SizeField`] for sizes which are not finite with
-    /// `0 < wall_um <= interior_um`; [`MesherError::HolesOverlap`] if two holes overlap or touch
-    /// (the tags of both), or a hole reaches the outer border (the hole's tag and the outer tag),
-    /// which the contract's bounds on the radii rule out.
+    /// `0 < wall_um <= interior_um`; [`MesherError::HolesOverlap`] if two holes overlap or touch,
+    /// [`MesherError::HoleReachesBorder`] if a hole reaches the outer border (with the tags and
+    /// centres of the holes), which the contract's bounds on the radii rule out.
     pub fn new(spec: &LobuleSpec) -> Result<Lobules, MesherError> {
         let radius = spec.lobule_radius_um;
         let (rc, rk) = (spec.centre.radius_um, spec.corner.radius_um);
@@ -286,7 +303,9 @@ impl Lobules {
             if let Some(j) = other {
                 return Err(MesherError::HolesOverlap {
                     a: tag.to_string(),
+                    a_at: c,
                     b: holes[j].2.to_string(),
+                    b_at: holes[j].0,
                 });
             }
         }
@@ -319,9 +338,10 @@ impl Lobules {
                 .map(|g| g.data)
                 .any(|s| corner_hole(i).is_none_or(|h| h != ring[s] && h != ring[(s + 1) % k]));
             if reaches {
-                return Err(MesherError::HolesOverlap {
-                    a: tag.to_string(),
-                    b: spec.outer_tag.clone(),
+                return Err(MesherError::HoleReachesBorder {
+                    hole: tag.to_string(),
+                    at: c,
+                    border: spec.outer_tag.clone(),
                 });
             }
         }
@@ -407,7 +427,10 @@ impl Lobules {
             veins,
             corners,
             domain,
-            size_field: spec.size_field(),
+            size_fields: [&spec.centre, &spec.corner]
+                .map(|h| wall_field(spec, h))
+                .to_vec(),
+            size: OnceLock::new(),
             bounds,
             centre_radius: rc,
             corner_radius: rk,
@@ -430,11 +453,15 @@ impl Lobules {
         &self.domain
     }
 
-    /// The size field of the domain ([`LobuleSpec::size_field`]), built on each call: it measures
-    /// the gaps of the domain, which only the process which meshes needs.
-    pub fn size(&self) -> Size {
-        Size::new(&self.size_field, &self.domain)
-            .expect("Lobules::new checks the sizes, and the domain has both walls")
+    /// The size field of the domain: [`LobuleSpec::size_field`], but each hole wall with the
+    /// size of its polygon's segments where that is finer than `wall_um` (see [`wall_field`]).
+    /// Built on the first call (it measures the gaps of the domain, which only the process which
+    /// meshes needs), then kept.
+    pub fn size(&self) -> &Size {
+        self.size.get_or_init(|| {
+            Size::min_of(&self.size_fields, &self.domain)
+                .expect("Lobules::new checks the sizes, and the domain has both walls")
+        })
     }
 
     /// The bounding box `[min, max]` of the domain in um.

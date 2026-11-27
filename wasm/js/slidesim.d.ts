@@ -6,7 +6,7 @@
 export interface LobuleParams {
   /** Circumradius of the hexagonal lobule in um, > 0 (default 300). */
   lobuleRadiusUm?: number;
-  /** Rings of neighbouring lobules, an integer >= 0 (default 0). */
+  /** Rings of neighbouring lobules, an integer within 0 and 4 (default 0). */
   rings?: number;
   /** Vein displacement as a fraction of the radius, 0 <= jitter <= 0.25 (default 0). */
   jitter?: number;
