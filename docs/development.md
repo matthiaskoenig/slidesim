@@ -124,10 +124,12 @@ arrays agree bitwise, the fields within 1e-5 of their maximum and the cell value
 `1e-4 |y| + 1e-8` (measured: about 1e-14 relative; the math functions of mathlib and of the C
 library differ in the last bits). `rule_outputs_match_native` does the same for the targets of
 assignment rules which read a state (`necrosis_trigger` of the SPT model, its threshold lowered
-so that it moves within the hour), evaluated by the kernel's `sbmlsim_kernel_assign`. The others
-check the lobule meshed in wasm against the mesher's bounds and twice the same, the refusals of
-the engine path and of a file scene, and a cap of the memory (an error naming it, the host lives
-on). `mesher_wall_times` (ignored) prints the time of the mesher in wasm.
+so that it moves within the hour), evaluated by the kernel's `sbmlsim_kernel_assign`.
+`cell_failure_matches_native` makes a cell fail (a pole in the SPT model's import rate): the error
+names the same element, centroid and time as the native one. The others check the lobule meshed in
+wasm against the mesher's bounds and twice the same, the refusals of the engine path and of a file
+scene, and a cap of the memory (an error naming it, the host lives on). `mesher_wall_times`
+(ignored) prints the time of the mesher in wasm.
 
 The JavaScript glue `wasm/js/slidesim.mjs` implements the live API
 ([Contracts](contracts.md#live-api)) over the exports of `slidesim.wasm`: WASI preview 1 over

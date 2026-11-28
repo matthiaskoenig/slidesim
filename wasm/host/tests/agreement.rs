@@ -245,6 +245,76 @@ fn rule_outputs_match_native() {
     assert_agreement(&native, &wasm);
 }
 
+/// A cell model which fails (SPT with a negative `SIM_Km_S`, a pole of its import rate) is the
+/// error of the browser build as of the native build: the same element, centroid and message
+/// of the batched path (the controls of the kernel read as those of its QFunction), the time
+/// the cell reached within 1e-9 relative (mathlib and the C library differ in the last bits); on
+/// the native mesh (the mesher's meshes of the targets differ).
+#[test]
+fn cell_failure_matches_native() {
+    let a = Artifacts::load();
+    let dir = fresh_dir("cell_failure_matches_native");
+    let mut study = read_json(&lobules().join("spt_1h.study.json"));
+    study["scene"] = json!(lobules().join("scene.json"));
+    study["cells"]["model"] = json!(root().join("testdata/models/spt_liver_cell.xml"));
+    study["time"] = json!({"end": 60.0, "dt": 15.0, "adaptive": false, "outputs": [0.0, 60.0]});
+    let parameters = study["cells"]["parameters"].as_array_mut().unwrap();
+    parameters.push(json!({"id": "SIM_Km_S", "value": -1.0}));
+    let path = dir.join("failing.study.json");
+    std::fs::write(&path, study.to_string()).unwrap();
+    let scene = lobules().join("scene.json");
+    a.native(&[
+        Path::new("mesh"),
+        &scene,
+        Path::new("--out"),
+        &dir.join("mesh"),
+    ]);
+    let output = Command::new(&a.slidesim_native)
+        .arg("run")
+        .arg(&path)
+        .arg("--out")
+        .arg(dir.join("native"))
+        .env("HWLOC_COMPONENTS", "-gl")
+        .output()
+        .expect("the native slidesim runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    let native = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("error: "))
+        .unwrap_or_else(|| panic!("no error: {stderr}"));
+    let inputs = json!({
+        "scene": read_json(&scene),
+        "study": study,
+        "mesh": read_json(&dir.join("mesh/mesh.json")),
+    });
+    let wasm = format!("{:#}", a.run_wasm(&inputs, None).unwrap_err());
+    eprintln!("native: {native}\nwasm: {wasm}");
+    // `element <id> at (<x>, <y>) um: the cell model failed from t = 0 s to t = 15 s at t =
+    // <reached> s: its rejected steps ...`, from `element` on.
+    let parts = |message: &str| {
+        let message = &message[message.find("element ").expect("an element")..];
+        let (head, tail) = message
+            .split_once(" s: its rejected")
+            .expect("a failed cell");
+        let (head, reached) = head.rsplit_once("at t = ").expect("the time reached");
+        (
+            head.to_string(),
+            reached.parse::<f64>().unwrap(),
+            tail.to_string(),
+        )
+    };
+    let (native_head, native_t, native_tail) = parts(native);
+    let (wasm_head, wasm_t, wasm_tail) = parts(&wasm);
+    assert_eq!(wasm_head, native_head);
+    assert!(native_head.contains("the cell model failed from t = 0 s to t = 15 s"));
+    assert!(
+        (wasm_t - native_t).abs() <= 1e-9 * native_t,
+        "{wasm_t} against {native_t}"
+    );
+    assert_eq!(wasm_tail, native_tail);
+}
+
 /// A kernel which cannot evaluate rules (a `kernel.json` without `assigned_ids`, as before
 /// `sbmlsim_kernel_assign`) is refused for an output which is the target of a rule (SPT
 /// `protein`), naming it, instead of giving a value which does not follow the cell.
