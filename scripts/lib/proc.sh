@@ -22,6 +22,17 @@
 #    still takes its simulations down: timeout gets TERM, passes it to the command, and the
 #    command gets TERM when timeout ends. The command runs in the background of the script,
 #    which waits for it, so that the traps of 2 run at once on a signal.
+#
+# A parent which dies before its child has set the signal of its parent's death (before the
+# prctl of setpriv) would leave the child without it: the relay of 1, the script and timeout of
+# 3 therefore start through PROC_GUARD, which, with the signal set, ends the child if its parent
+# is no longer the one which started it (for the relay: the parent its shell started with).
+
+# `PROC_GUARD <pid> <cmd...>` (the script of `bash -c`, after `setpriv --pdeathsig`): <cmd...> in
+# place of the shell if its parent is still <pid>, else the status of a TERM. A parent which
+# dies after the check sends the signal of its death.
+# shellcheck disable=SC2016 # expanded by the shell of the guard
+PROC_GUARD='[[ $PPID == "$1" ]] || exit 143; shift; exec "$@"'
 
 if [[ $(ps -o sid= -p $$ | tr -d ' ') != "$$" ]]; then
     # The relay of 1: this process, the PID the caller knows, in the caller's group (perhaps with
@@ -33,7 +44,9 @@ if [[ $(ps -o sid= -p $$ | tr -d ' ') != "$$" ]]; then
     # foreground group, which Ctrl-C reaches, and a wrapper which waits for the script (`bash -c
     # "script; next"`) would wait out a Ctrl-C. The script runs by this bash, so it needs no exec
     # bit (`bash script.sh`).
-    exec setpriv --pdeathsig TERM setsid --fork --wait setpriv --pdeathsig TERM "$BASH" "$0" "$@"
+    exec setpriv --pdeathsig TERM "$BASH" -c "$PROC_GUARD" proc-guard "$PPID" \
+        setsid --fork --wait \
+        setpriv --pdeathsig TERM "$BASH" -c "$PROC_GUARD" proc-guard "$$" "$BASH" "$0" "$@"
 fi
 
 PROC_PGID=$$
@@ -41,17 +54,17 @@ PROC_GRACE=${PROC_GRACE:-5}
 PROC_CPUS=${PROC_CPUS:-0-9}
 
 # The processes to take down: those of the group and every descendant of this shell (timeout
-# makes a group of its own, mpiexec one per rank), but this shell and the subshell this runs in.
+# makes a group of its own, mpiexec one per rank), but this shell, and the subshell this runs in
+# (of `$(proc_victims)`) with its pipeline, which have ended when the list is used.
 proc_victims() {
-    { pgrep -g "$PROC_PGID"
-      ps -eo pid=,ppid= | awk -v root="$$" '{ parent[$1] = $2 }
-          END { for (p in parent) { q = p; n = 0
-                    while (q in parent && q != root && q > 1 && n++ < 64) q = parent[q]
-                    if (q == root) print p } }'
-    } | sort -un | while read -r pid; do
-        [[ $pid != "$$" && $pid != "$BASHPID" ]] && echo "$pid"
-    done
-    return 0
+    ps -eo pid=,ppid=,pgid= | awk -v root="$$" -v self="$BASHPID" -v group="$PROC_PGID" '
+        BEGIN { if (self == root) self = -1 }
+        { parent[$1] = $2; pgid[$1] = $3 }
+        END { for (p in parent) {
+                  if (p == root || p == self) continue
+                  q = p; n = 0
+                  while (q in parent && q != root && q != self && q > 1 && n++ < 64) q = parent[q]
+                  if (q != self && (q == root || pgid[p] == group)) print p } }'
 }
 
 proc_cleanup() {
@@ -88,9 +101,12 @@ trap 'exit 129' HUP
 # command runs in the background and the script waits for it: a shell runs its traps only
 # between commands, and `wait` is the one a signal interrupts.
 run_sim() {
-    local limit=$1
+    # This shell, the parent of the command (expanded here: the words of a background command
+    # are expanded in its child).
+    local limit=$1 parent=$BASHPID
     shift
-    setpriv --pdeathsig TERM timeout --kill-after=10s "$limit" \
+    setpriv --pdeathsig TERM "$BASH" -c "$PROC_GUARD" proc-guard "$parent" \
+        timeout --kill-after=10s "$limit" \
         setpriv --pdeathsig TERM taskset -c "$PROC_CPUS" nice -n 10 "$@" &
     wait "$!"
 }
