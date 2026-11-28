@@ -23,26 +23,9 @@ fn c_cache() {
     unsafe { std::env::set_var("SBMLSIM_C_CACHE", dir) };
 }
 
-/// `text`, a `summary.json`, without its wall times: `phases`, the last key, and the `seconds` of
-/// the cells.
-fn without_timings(text: &str) -> String {
-    let at = text.find(",\n  \"phases\": {").expect("phases last");
-    let mut kept = Vec::new();
-    let mut lines = text[..at].lines();
-    while let Some(line) = lines.next() {
-        if line.trim_start().starts_with("\"seconds\": {") {
-            // Up to the end of the object.
-            lines.find(|l| l.trim_start().starts_with('}'));
-            continue;
-        }
-        kept.push(line);
-    }
-    kept.join("\n")
-}
-
 /// `summary.json` of `simulation` as `slidesim run` writes it, without its wall times.
 fn summary_without_timings(simulation: &Simulation) -> String {
-    without_timings(&serde_json::to_string_pretty(simulation.summary()).unwrap())
+    test_support::without_timings(&serde_json::to_string_pretty(simulation.summary()).unwrap())
 }
 
 /// The simulation of `cells_toy/spt` shortened to 4 output times, the last at the end:
@@ -103,19 +86,36 @@ fn next_output_visits_every_output() {
 }
 
 /// A study whose first output time is after the start: the first `next_output` steps to it.
+/// `write_vtu` writes the output time the simulation is at, and refuses any other.
 #[test]
 fn first_output_after_the_start_steps() {
     let mut inputs = Inputs::load(&studies("tissue_oxygen/study.json")).unwrap();
     inputs.study.time.outputs = vec![1.0, 2.0];
     inputs.study.time.end = 2.0;
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("first_output_after_the_start_steps");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    let refused = |simulation: &Simulation, index: usize| {
+        let e = simulation.write_vtu(&out, index).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains(&format!("the simulation is not at the output time {index}")),
+            "{e}"
+        );
+    };
     let petsc = Petsc::init(&[]).unwrap();
     let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     assert_eq!(simulation.time(), 0.0);
     assert!(simulation.cell_values().is_none());
+    refused(&simulation, 0);
     assert_eq!(simulation.next_output().unwrap(), Some(0));
     assert_eq!(simulation.time(), 1.0);
+    simulation.write_vtu(&out, 0).unwrap();
+    assert!(out.join("oxygen_0.vtu").exists());
+    refused(&simulation, 1);
     assert_eq!(simulation.next_output().unwrap(), Some(1));
     assert_eq!(simulation.time(), 2.0);
+    refused(&simulation, 0);
     assert_eq!(simulation.next_output().unwrap(), None);
     assert_eq!(simulation.time(), 2.0);
 }

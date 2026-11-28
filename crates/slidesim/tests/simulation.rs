@@ -16,23 +16,6 @@ fn c_cache() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("sbmlsim-c-cache")
 }
 
-/// `text`, a `summary.json`, without its wall times: `phases`, the last key, and the `seconds` of
-/// the cells.
-fn without_timings(text: &str) -> String {
-    let at = text.find(",\n  \"phases\": {").expect("phases last");
-    let mut kept = Vec::new();
-    let mut lines = text[..at].lines();
-    while let Some(line) = lines.next() {
-        if line.trim_start().starts_with("\"seconds\": {") {
-            // Up to the end of the object.
-            lines.find(|l| l.trim_start().starts_with('}'));
-            continue;
-        }
-        kept.push(line);
-    }
-    kept.join("\n")
-}
-
 #[test]
 fn simulation_matches_cli() {
     let cache = c_cache();
@@ -66,5 +49,8 @@ fn simulation_matches_cli() {
     let mut simulation = Simulation::new(&petsc, inputs, Instant::now(), &mut |_| {}).unwrap();
     while simulation.next_output().unwrap().is_some() {}
     let library = serde_json::to_string_pretty(simulation.summary()).unwrap() + "\n";
-    assert_eq!(without_timings(&library), without_timings(&cli));
+    assert_eq!(
+        test_support::without_timings(&library),
+        test_support::without_timings(&cli)
+    );
 }

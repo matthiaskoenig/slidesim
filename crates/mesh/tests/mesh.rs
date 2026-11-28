@@ -685,9 +685,19 @@ fn compare_with_one_process(ranks: usize) {
     if std::env::var_os(test_support::MPI_RANKS).is_some() {
         return;
     }
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("mesh-reference-{ranks}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    /// The directory of the outcomes, removed when the test ends, also when it fails.
+    struct Reference(PathBuf);
+    impl Drop for Reference {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let reference = Reference(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("mesh-reference-{ranks}-{}", std::process::id())),
+    );
+    let dir = &reference.0;
+    std::fs::create_dir_all(dir).unwrap();
     {
         let p = Petsc::init(&[]).unwrap();
         let outcomes = [
@@ -705,7 +715,6 @@ fn compare_with_one_process(ranks: usize) {
         &PARTITION_TESTS,
         &[(REFERENCE, dir.to_str().unwrap())],
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Compares `outcome` (on process 0) with the outcome `key` of one process, if this is a run of
