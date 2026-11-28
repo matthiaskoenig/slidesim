@@ -53,9 +53,10 @@ int petsc_sys_mpi_alltoall_int(const int *sends, int *receives, MPI_Comm comm)
 {
   return MPI_Alltoall(sends, 1, MPI_INT, receives, 1, MPI_INT, comm);
 }
-int petsc_sys_mpi_alltoallv_bytes(const void *sends, const int *send_counts, const int *send_offsets,
-                                  void *receives, const int *receive_counts,
-                                  const int *receive_offsets, MPI_Comm comm)
+int petsc_sys_mpi_alltoallv_bytes(const void *sends, const int *send_counts,
+                                  const int *send_offsets, void *receives,
+                                  const int *receive_counts, const int *receive_offsets,
+                                  MPI_Comm comm)
 {
 #if defined(PETSC_HAVE_MPIUNI)
   (void)comm;

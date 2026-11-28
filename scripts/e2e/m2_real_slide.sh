@@ -151,9 +151,12 @@ run() {
     log "slidesim $name, $level refinements, $NP processes"
     local start=$SECONDS
     # shellcheck disable=SC2086 # MPIEXEC_FLAGS is a list of flags
-    run_sim "$LIMIT" mpiexec -n "$NP" --bind-to none $MPIEXEC_FLAGS "$ROOT/target/release/slidesim" run "$study" \
-        --out "$dir" >"$dir/run.log" 2>&1 ||
-        { echo "run $name failed (status $?, 124: over $LIMIT)" >&2; tail -20 "$dir/run.log" >&2; exit 1; }
+    run_sim "$LIMIT" mpiexec -n "$NP" --bind-to none $MPIEXEC_FLAGS \
+        "$ROOT/target/release/slidesim" run "$study" --out "$dir" >"$dir/run.log" 2>&1 || {
+        echo "run $name failed (status $?, 124: over $LIMIT)" >&2
+        tail -20 "$dir/run.log" >&2
+        exit 1
+    }
     echo "$((SECONDS - start))" >"$dir/seconds"
     check_flows "$dir"
     log "  $((SECONDS - start)) s; tag flows $(jq -c .perfusion.tag_flows "$dir/summary.json")"

@@ -64,9 +64,13 @@ for np in $NPS; do
     dir=$OUT/$(basename "$study" .study.json)_np$np
     mkdir -p "$dir"
     # shellcheck disable=SC2086 # MPIEXEC_FLAGS is a list of flags
-    run_sim "$LIMIT" mpiexec -n "$np" --bind-to none $MPIEXEC_FLAGS "$SLIDESIM" run "$study" --out "$dir" \
-        -- -log_view ":$dir/log_view.txt" >"$dir/run.log" 2>&1 ||
-        { echo "run np$np failed (status $?, 124: over $LIMIT)" >&2; tail -20 "$dir/run.log" >&2; exit 1; }
+    run_sim "$LIMIT" mpiexec -n "$np" --bind-to none $MPIEXEC_FLAGS \
+        "$SLIDESIM" run "$study" --out "$dir" -- -log_view ":$dir/log_view.txt" \
+        >"$dir/run.log" 2>&1 || {
+        echo "run np$np failed (status $?, 124: over $LIMIT)" >&2
+        tail -20 "$dir/run.log" >&2
+        exit 1
+    }
     steps=$(awk '$1 == "TSStep" { n += $2 } END { print n + 0 }' "$dir/log_view.txt")
     jq -r --arg np "$np" --argjson steps "$steps" '.phases as $p
         | [$np, $steps, $p.transport, $p.transport / $steps, $p.setup, $p.pressure, $p.output]
