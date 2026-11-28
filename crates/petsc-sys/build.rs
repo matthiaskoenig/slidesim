@@ -20,10 +20,15 @@
 //! `lib/petsc/conf/petscvariables` (`PTSCOTCH_INCLUDE`, `PTSCOTCH_LIB`; `petscvariables.rs`):
 //! PT-Scotch may live outside `PETSC_DIR`.
 //!
-//! wasm32-wasip1 is not supported yet. It will link the static archives of `deps/install/wasi`
-//! (`pkg-config --static`) plus the wasi-libc emulation libraries listed in
-//! `spike/petsc-wasm/PATCHES.md`, take the sysroot from wasi-sdk instead of MPI include flags,
-//! and pass `-fvisibility=default` to bindgen (see `spike/petsc-wasm/diffusion/build.rs`).
+//! wasm32-wasip1 (`deps/install/wasi/env.sh`, see `scripts/wasm/build.sh`) links the static
+//! archives of PETSc and the libraries it needs (`pkg-config --static`: f2cblaslapack, Mmg, the
+//! wasi-libc emulation libraries listed in `scripts/deps/patches/README.md`), MPI is PETSc's
+//! MPIUNI (one process, its headers in PETSc's), and the shim and the bindings are compiled for
+//! the target with wasi-sdk's clang and sysroot ([`wasi_sdk::wasi_c_flags`]); bindgen also gets
+//! `-fvisibility=default`: clang defaults to hidden visibility for wasm, bindgen skips hidden
+//! declarations, and PETSc's headers carry no visibility attribute. MPIUNI defines the MPI
+//! functions as macros, which bindgen cannot translate: every MPI call of the Rust code goes
+//! through a function of the shim, on every target.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -108,6 +113,19 @@ fn link_package(package: &Package) {
     }
 }
 
+/// Links PETSc for wasm32-wasip1: the `-L` and `-l` flags of `pkg-config --static`, the static
+/// archives and the libraries they need, which wasi-sdk's wasm-ld finds
+/// (`scripts/wasm/build.sh` gives it the library path of the sysroot for the emulation libraries).
+fn link_wasi(petsc_dir: &Path) {
+    let pc_path = format!("{}/lib/pkgconfig", petsc_dir.display());
+    let petsc = run(
+        "pkg-config",
+        &["--static", "--libs", "PETSc"],
+        &[("PKG_CONFIG_PATH", pc_path)],
+    );
+    link_line(&petsc);
+}
+
 /// Include directories of PETSc and MPI.
 fn include_dirs_native(petsc_dir: &Path) -> Vec<String> {
     let mut dirs = vec![format!("{}/include", petsc_dir.display())];
@@ -122,9 +140,17 @@ fn include_dirs_native(petsc_dir: &Path) -> Vec<String> {
 
 /// `shim.c`: values PETSc defines as macros which bindgen cannot translate, and the calls into
 /// PETSc's external packages.
-fn compile_shim(include_dirs: &[String]) {
+fn compile_shim(include_dirs: &[String], wasi_sdk: Option<&Path>) {
     println!("cargo:rerun-if-changed=shim.c");
     let mut build = cc::Build::new();
+    if let Some(sdk) = wasi_sdk {
+        build
+            .compiler(wasi_sdk::clang(sdk))
+            .archiver(wasi_sdk::archiver(sdk));
+        for flag in wasi_sdk::wasi_c_flags(sdk) {
+            build.flag(flag);
+        }
+    }
     build
         .file("shim.c")
         .includes(include_dirs)
@@ -137,27 +163,29 @@ fn compile_shim(include_dirs: &[String]) {
     build.compile("petsc_sys_shim");
 }
 
-fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String]) {
+fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String], wasm: bool) {
     // SAFETY: the build script is single threaded; clang-sys reads it when loading libclang.
     unsafe { env::set_var("LIBCLANG_PATH", sdk.join("lib")) };
     let clang = sdk.join("bin/clang");
     let resource_dir = run(clang.to_str().unwrap(), &["-print-resource-dir"], &[]);
-    let mut clang_args = vec![
-        format!("-resource-dir={}", resource_dir.trim()),
-        // wasi-sdk's libclang defaults to target wasm32-wasip1 and the wasi sysroot (bindgen only
-        // passes --target when cross compiling).
-        format!("--target={target}"),
-        "--sysroot=/".to_string(),
-    ];
+    let mut clang_args = vec![format!("-resource-dir={}", resource_dir.trim())];
+    if wasm {
+        clang_args.extend(wasi_sdk::wasi_c_flags(sdk));
+        // PETSc's headers have no visibility attribute, and bindgen skips hidden declarations.
+        clang_args.push("-fvisibility=default".to_string());
+    } else {
+        // wasi-sdk's libclang defaults to target wasm32-wasip1 and the wasi sysroot (bindgen
+        // only passes --target when cross compiling).
+        clang_args.extend([format!("--target={target}"), "--sysroot=/".to_string()]);
+    }
     clang_args.extend(include_dirs.iter().map(|d| format!("-I{d}")));
 
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(&clang_args)
-        // The PETSc API: everything declared in PETSc's headers (`petsc*.h`), plus the MPI
-        // functions used directly and the shim.
+        // The PETSc API: everything declared in PETSc's headers (`petsc*.h`), plus the shim, by
+        // which every MPI call goes.
         .allowlist_file(r".*/petsc[^/]*\.h")
-        .allowlist_function("MPI_(Comm_rank|Comm_size|Allreduce|Bcast|Barrier|Abort)")
         .allowlist_function("petsc_sys_.*")
         .prepend_enum_name(false)
         .layout_tests(false)
@@ -177,9 +205,11 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
 
     let target = env::var("TARGET").unwrap();
+    let wasm = target == wasi_sdk::WASI_TARGET;
     assert!(
-        !target.starts_with("wasm32"),
-        "petsc-sys: target {target} is not supported yet (see build.rs)"
+        wasm || !target.starts_with("wasm32"),
+        "petsc-sys: target {target} is not supported; of wasm targets {} is (see build.rs)",
+        wasi_sdk::WASI_TARGET
     );
     let petsc_dir = PathBuf::from(
         env::var("PETSC_DIR").expect("PETSC_DIR unset: source deps/install/<config>/env.sh"),
@@ -187,12 +217,18 @@ fn main() {
     let sdk = wasi_sdk::locate(env::var_os(wasi_sdk::VAR), env::var_os("HOME"))
         .unwrap_or_else(|e| panic!("{e}"));
 
-    link_native(&petsc_dir);
-    let mut include_dirs = include_dirs_native(&petsc_dir);
-    if let Some(ptscotch) = ptscotch(&petsc_dir) {
-        link_package(&ptscotch);
-        include_dirs.extend(ptscotch.include.include_dirs);
-    }
-    compile_shim(&include_dirs);
-    generate_bindings(&target, &sdk, &include_dirs);
+    let include_dirs = if wasm {
+        link_wasi(&petsc_dir);
+        vec![format!("{}/include", petsc_dir.display())]
+    } else {
+        link_native(&petsc_dir);
+        let mut include_dirs = include_dirs_native(&petsc_dir);
+        if let Some(ptscotch) = ptscotch(&petsc_dir) {
+            link_package(&ptscotch);
+            include_dirs.extend(ptscotch.include.include_dirs);
+        }
+        include_dirs
+    };
+    compile_shim(&include_dirs, wasm.then_some(sdk.as_path()));
+    generate_bindings(&target, &sdk, &include_dirs, wasm);
 }

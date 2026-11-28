@@ -13,6 +13,12 @@
 //!   QFunction of the model (sbmlsim-core's QFunction target, a Rosenbrock integrator per
 //!   point), the fast path, ready for GPUs. [`Cells`] is the path the spec chooses
 //!   ([`contracts::CellsSpec::solver`]).
+//! - Both need native code: the C target compiles the model with a C compiler at the start of a
+//!   run. They are the feature `native` (on by default). Without it, in the browser build of
+//!   slidesim (wasm32-wasip1, `crates/slidesim-wasm`), the cells run on the batched kernel of
+//!   sbmlsim-core (`kernel/1`, [`KernelLayout`]: the model and RODAS4 in a WebAssembly module
+//!   which the host compiles and links), `KernelCells`, for `"solver": "batched"`; `"engine"`
+//!   is refused ([`CellsError::EngineNeedsNative`]).
 //!
 //! Units: time in s (the model's time unit is `CellsSpec::time_unit_s` s), concentrations in
 //! the model's units (mM for the fields of slidesim), lengths in um. The model keeps its own
@@ -20,13 +26,27 @@
 //!
 //! Processes: each process holds the cells of its coarse elements. Errors one process finds
 //! (a map without value in a cell's tissue, a cell model which fails) are errors on every
-//! process, the same on each ([`CellsError::Element`] names the element by its global number
-//! on the coarse level and its centroid), so that no process waits for another which left a
-//! collective call. A cell's step control is its own: it depends on no other cell and not on
-//! the number of processes.
+//! process, the same on each ([`CellsError::Element`] names the element by its element id,
+//! the same on any number of processes, and its centroid), so that no process waits for
+//! another which left a collective call. A cell's step control is its own: it depends on no
+//! other cell and not on the number of processes. With [`CellsSpec::balance`] the processes
+//! share the work of each advance by the step attempts of their cells in the advance before:
+//! a process advances some cells of others and sends some of its own, whose results come back,
+//! the same as where they were (`balance`). The first cell which fails is the first in the
+//! order of the processes and their cells, wherever it was advanced.
 
+// Without native code the cells run on the kernel the host binds to slidesim's imports
+// (`slidesim_kernel`): a wasm module only, which elsewhere fails at the link.
+#[cfg(all(not(feature = "native"), not(target_family = "wasm")))]
+compile_error!("cells without the feature `native` is the browser build: build it for wasm");
+
+#[cfg(feature = "native")]
+mod balance;
+#[cfg(feature = "native")]
 mod batched;
+#[cfg(feature = "native")]
 mod engine;
+mod kernel;
 mod model;
 mod parameters;
 
@@ -35,8 +55,13 @@ use contracts::{CellSolverKind, CellsSpec};
 use petsc::Comm;
 use petsc::sys::PetscInt;
 
+#[cfg(feature = "native")]
 pub use batched::BatchedCells;
+#[cfg(feature = "native")]
 pub use engine::EngineCells;
+#[cfg(not(feature = "native"))]
+pub use kernel::KernelCells;
+pub use kernel::KernelLayout;
 pub use model::CellModel;
 pub use parameters::CellSetup;
 
@@ -84,15 +109,21 @@ pub trait CellSolver {
 #[derive(Debug)]
 pub enum Cells {
     /// [`CellSolverKind::Engine`].
+    #[cfg(feature = "native")]
     Engine(Box<EngineCells>),
     /// [`CellSolverKind::Batched`].
+    #[cfg(feature = "native")]
     Batched(Box<BatchedCells>),
+    /// [`CellSolverKind::Batched`] without native code: on the batched kernel of sbmlsim-core.
+    #[cfg(not(feature = "native"))]
+    Kernel(Box<KernelCells>),
 }
 
 impl Cells {
     /// The cells of `setup` with the model `model`, compiled and checked for `spec`
     /// ([`CellModel::new`]), on the path of `spec`: [`EngineCells::with_model`] or
     /// [`BatchedCells::with_model`] (on `ceed`). Collective.
+    #[cfg(feature = "native")]
     pub fn new(
         setup: &CellSetup,
         spec: &CellsSpec,
@@ -109,10 +140,35 @@ impl Cells {
         })
     }
 
+    /// The cells of `setup` with the model `model`, the kernel checked for `spec`
+    /// ([`CellModel::from_kernel`]), on the batched kernel (`KernelCells::with_model`); `ceed`
+    /// is not used. Collective.
+    ///
+    /// Errors: [`CellsError::EngineNeedsNative`] for the engine path, and those of
+    /// `KernelCells::with_model`.
+    #[cfg(not(feature = "native"))]
+    pub fn new(
+        setup: &CellSetup,
+        spec: &CellsSpec,
+        model: &CellModel,
+        _ceed: &Ceed,
+    ) -> Result<Cells> {
+        match spec.solver {
+            CellSolverKind::Engine => Err(CellsError::EngineNeedsNative),
+            CellSolverKind::Batched => Ok(Cells::Kernel(Box::new(KernelCells::with_model(
+                setup, spec, model,
+            )?))),
+        }
+    }
+
     fn solver(&self) -> &dyn CellSolver {
         match self {
+            #[cfg(feature = "native")]
             Cells::Engine(cells) => cells.as_ref(),
+            #[cfg(feature = "native")]
             Cells::Batched(cells) => cells.as_ref(),
+            #[cfg(not(feature = "native"))]
+            Cells::Kernel(cells) => cells.as_ref(),
         }
     }
 }
@@ -132,8 +188,12 @@ impl CellSolver for Cells {
 
     fn advance(&mut self, t0: f64, t1: f64, blood: &mut [f64]) -> Result<CellStats> {
         match self {
+            #[cfg(feature = "native")]
             Cells::Engine(cells) => cells.advance(t0, t1, blood),
+            #[cfg(feature = "native")]
             Cells::Batched(cells) => cells.advance(t0, t1, blood),
+            #[cfg(not(feature = "native"))]
+            Cells::Kernel(cells) => cells.advance(t0, t1, blood),
         }
     }
 
@@ -150,6 +210,33 @@ impl CellSolver for Cells {
     }
 }
 
+/// The smallest step of a cell on the batched paths, in the time unit of its model: a cell which
+/// needs a smaller one fails.
+pub(crate) const H_MIN: f64 = 1e-10;
+
+/// The most step attempts of a cell in one advance on the batched paths: a cell which has not
+/// reached the end of the advance after as many fails.
+pub(crate) const MAX_ATTEMPTS: u32 = 1_000_000;
+
+/// The message of a cell of a batched path which did not reach `t1` (s) from `t0` in
+/// [`MAX_ATTEMPTS`] step attempts, at `reached` (s).
+pub(crate) fn unfinished_message(t0: f64, t1: f64, reached: f64) -> String {
+    format!(
+        "the cell model did not reach t = {t1} s from t = {t0} s in {MAX_ATTEMPTS} step attempts \
+         (it is at t = {reached} s)"
+    )
+}
+
+/// The message of a cell of a batched path which failed from `t0` to `t1` (s) at `reached`.
+pub(crate) fn failed_message(t0: f64, t1: f64, reached: f64) -> String {
+    format!(
+        "the cell model failed from t = {t0} s to t = {t1} s at t = {reached} s: its rejected \
+         steps (an error above the tolerances, values which are not finite or a singular \
+         Jacobian) made its step smaller than {H_MIN} (in the time unit of the model), or too \
+         small to advance the time"
+    )
+}
+
 /// A value of the cells which [`CellSolver::outputs`] writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputValue {
@@ -159,14 +246,16 @@ pub struct OutputValue {
     pub compartment: Option<String>,
 }
 
-/// The work of one [`CellSolver::advance`] on this process.
+/// The work of one [`CellSolver::advance`] on this process: of the cells it advanced (with
+/// [`CellsSpec::balance`], some of other processes and not all of its own).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CellStats {
     /// The steps of the integrators of the cells, summed.
     pub steps: u64,
     /// The rejected step attempts (failed error tests and nonlinear solves), summed.
     pub rejected: u64,
-    /// The wall time of advancing the cells (s).
+    /// The wall time of the integration of the cells (s), without sending cells and results to
+    /// and from other processes.
     pub seconds: f64,
 }
 
@@ -195,6 +284,10 @@ pub enum CellsError {
     /// The model cannot be translated, compiled or loaded. The same on every process.
     #[error("cell model: {message}")]
     Model { message: String },
+    /// The engine path in a build without native code (the browser build, which runs the
+    /// batched path on the kernel of sbmlsim-core).
+    #[error(r#"cells.solver "engine" needs native code; the browser build runs "batched""#)]
+    EngineNeedsNative,
     /// A model the batched path does not integrate: `feature` names what it has. The same on
     /// every process.
     #[error(
@@ -202,11 +295,12 @@ pub enum CellsError {
          does (\"solver\": \"engine\")"
     )]
     Unsupported { feature: String },
-    /// A failure at one element: `cell` is its global number on the coarse level of the mesh,
-    /// `centroid` its centroid (um). The same on every process.
-    #[error("element {cell} at ({}, {}) um: {message}", .centroid[0], .centroid[1])]
+    /// A failure at one element: `element` is its element id (`mesh::Mesh::element_ids`, the
+    /// same on any number of processes), `centroid` its centroid (um). The same on every
+    /// process.
+    #[error("element {element} at ({}, {}) um: {message}", .centroid[0], .centroid[1])]
     Element {
-        cell: i64,
+        element: u64,
         centroid: [f64; 2],
         message: String,
     },
@@ -229,19 +323,39 @@ pub type Result<T, E = CellsError> = std::result::Result<T, E>;
 /// [`CellsError::Element`] and a [`CellsError::Unsupported`] as they are, any other error as
 /// its message in a [`CellsError::Model`] or [`CellsError::Invalid`]). Collective.
 pub(crate) fn agree<T>(comm: &Comm, local: Result<T>) -> Result<T> {
-    let rank = PetscInt::try_from(comm.rank()).expect("a rank is a PETSc integer");
-    // The lowest rank with an error, as the maximum of its negation.
-    let key = comm.max_int(if local.is_err() { -rank } else { PetscInt::MIN })?;
-    if key == PetscInt::MIN {
+    agree_first(comm, local, position(comm.rank(), 0))
+}
+
+/// As [`agree`], the error of the process whose error has the smallest `key` (the
+/// [`position`] of the cell which failed, on the process whose cell it is), on every process.
+/// Collective.
+pub(crate) fn agree_first<T>(comm: &Comm, local: Result<T>, key: u64) -> Result<T> {
+    debug_assert!(key < 1 << f64::MANTISSA_DIGITS, "{key} is exact as a float");
+    // The smallest key with an error, as the maximum of its negation (exact as a float).
+    let mine = if local.is_err() {
+        -(key as f64)
+    } else {
+        f64::NEG_INFINITY
+    };
+    let best = comm.max_real(mine)?;
+    if best == f64::NEG_INFINITY {
         return local;
     }
-    let root = usize::try_from(-key).expect("a rank");
+    let rank = PetscInt::try_from(comm.rank()).expect("a rank is a PETSc integer");
+    let root = comm.max_int(if mine == best { rank } else { -1 })?;
+    let root = usize::try_from(root).expect("a rank");
     let mut bytes = match &local {
         Err(e) if comm.rank() == root => encode(e),
         _ => Vec::new(),
     };
     comm.broadcast_bytes(root, &mut bytes)?;
     Err(decode(&bytes))
+}
+
+/// The key of [`agree_first`] of the cell `index` of the process `rank`: the processes in the
+/// order of their ranks, the cells of each in their order.
+pub(crate) fn position(rank: usize, index: usize) -> u64 {
+    ((rank as u64) << 32) | index as u64
 }
 
 /// The error of a failed advance of the cells, kept: after it, the cells are not advanced again,
@@ -279,12 +393,12 @@ fn encode(e: &CellsError) -> Vec<u8> {
     let mut bytes = Vec::new();
     match e {
         CellsError::Element {
-            cell,
+            element,
             centroid,
             message,
         } => {
             bytes.push(ELEMENT);
-            bytes.extend(cell.to_le_bytes());
+            bytes.extend(element.to_le_bytes());
             bytes.extend(centroid[0].to_le_bytes());
             bytes.extend(centroid[1].to_le_bytes());
             bytes.extend(message.as_bytes());
@@ -315,7 +429,7 @@ fn decode(bytes: &[u8]) -> CellsError {
     let f64_at = |i: usize| f64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
     match bytes.first() {
         Some(&ELEMENT) => CellsError::Element {
-            cell: i64::from_le_bytes(bytes[1..9].try_into().expect("8 bytes")),
+            element: u64::from_le_bytes(bytes[1..9].try_into().expect("8 bytes")),
             centroid: [f64_at(9), f64_at(17)],
             message: text(&bytes[25..]),
         },
@@ -337,17 +451,17 @@ mod tests {
     #[test]
     fn errors_round_trip() {
         let element = CellsError::Element {
-            cell: -3,
+            element: (7 << 40) | 3,
             centroid: [1.5, -2.25],
             message: "it failed: é".into(),
         };
         match decode(&encode(&element)) {
             CellsError::Element {
-                cell,
+                element,
                 centroid,
                 message,
             } => {
-                assert_eq!(cell, -3);
+                assert_eq!(element, (7 << 40) | 3);
                 assert_eq!(centroid, [1.5, -2.25]);
                 assert_eq!(message, "it failed: é");
             }
@@ -356,15 +470,17 @@ mod tests {
         let model = CellsError::Model {
             message: "no compiler".into(),
         };
-        assert!(
-            matches!(decode(&encode(&model)), CellsError::Model { message } if message == "no compiler")
-        );
+        let CellsError::Model { message } = decode(&encode(&model)) else {
+            panic!("not a model error");
+        };
+        assert_eq!(message, "no compiler");
         let unsupported = CellsError::Unsupported {
             feature: "a model with events".into(),
         };
-        assert!(
-            matches!(decode(&encode(&unsupported)), CellsError::Unsupported { feature } if feature == "a model with events")
-        );
+        let CellsError::Unsupported { feature } = decode(&encode(&unsupported)) else {
+            panic!("not an unsupported feature");
+        };
+        assert_eq!(feature, "a model with events");
         let other = CellsError::Invalid("lengths".into());
         assert_eq!(decode(&encode(&other)).to_string(), "cells: lengths");
     }

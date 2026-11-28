@@ -1,0 +1,15 @@
+--- a/src/common/tools.c
++++ b/src/common/tools.c
+@@ -859,6 +859,12 @@
+   if ( sysctlbyname("hw.memsize",&mem,&size,NULL,0) == -1)
+     return 0;
+ 
++#elif defined(__wasm32__)
++  /* WebAssembly (wasm32-wasip1, in wasmtime or a browser) has no physical memory to ask for:
++   * the most an instance can have is its 32 bit address space (65536 pages of 64 KiB). The
++   * limit is half of it (MMG5_MEMPERCENT), 2 GiB, unless MMG*_IPARAM_mem sets one. */
++  mem = SIZE_MAX;
++
+ #elif defined(__unix__) || defined(__unix) || defined(unix)
+   mem = sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE);
+ 

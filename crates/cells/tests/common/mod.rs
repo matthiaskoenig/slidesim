@@ -8,8 +8,8 @@ use std::sync::Once;
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
 use contracts::{
-    CellParameter, CellSolverKind, CellsSpec, Coefficient, LengthUnit, MeshFormat, MeshRef,
-    SCENE_VERSION, Scene, SpeciesLink, Table, Units, VolumeLink,
+    CellParameter, CellSolverKind, CellsSpec, Coefficient, LengthUnit, MeshSource, SCENE_VERSION,
+    Scene, SpeciesLink, Table, Units, VolumeLink,
 };
 use mesh::Mesh;
 use pde::Discretization;
@@ -44,8 +44,7 @@ pub fn mesh(p: &Petsc, file: &str, refinements: u32) -> Mesh {
         units: Units {
             length: LengthUnit::Um,
         },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
+        mesh: MeshSource::Gmsh {
             path: testdata(&format!("meshes/{file}")),
         },
         maps: Vec::new(),
@@ -92,6 +91,7 @@ pub fn linear_spec(parameters: Vec<CellParameter>) -> CellsSpec {
         rtol: 1e-8,
         atol: 1e-12,
         outputs: vec!["uptake_rate".to_string()],
+        balance: true,
     }
 }
 
@@ -128,5 +128,26 @@ pub fn spt_spec(solver: CellSolverKind) -> CellsSpec {
         rtol: 1e-6,
         atol: 1e-9,
         outputs: vec!["protein".to_string()],
+        balance: true,
     }
+}
+
+/// `linear_uptake.xml` with an oscillator of the angular frequency `w` (1/s, default 1):
+/// `x' = w y`, `y' = -w x` from `x = 1`, `y = 0`. The tolerances set the steps per period, so the
+/// step attempts of a cell over an interval grow in proportion to `w`: the parameter `w` sets the
+/// work of a cell.
+pub fn oscillator_model() -> String {
+    let math =
+        |body: &str| format!(r#"<math xmlns="http://www.w3.org/1998/Math/MathML">{body}</math>"#);
+    let rules = format!(
+        r#"<listOfRules><rateRule variable="x">{}</rateRule><rateRule variable="y">{}</rateRule>"#,
+        math("<apply><times/><ci> w </ci><ci> y </ci></apply>"),
+        math("<apply><minus/><apply><times/><ci> w </ci><ci> x </ci></apply></apply>"),
+    );
+    model("linear_uptake.xml")
+        .replace("<listOfRules>", &rules)
+        .replace(
+            "</listOfParameters>",
+            r#"<parameter id="w" value="1" constant="true"/><parameter id="x" value="1" constant="false"/><parameter id="y" value="0" constant="false"/></listOfParameters>"#,
+        )
 }

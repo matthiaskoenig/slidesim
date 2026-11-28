@@ -1,19 +1,41 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["spike"]
+exclude = ["wasm", "crates/slidesim-wasm"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-bindgen = "0.73.2"
+# Without the default `prettyplease` formatter (the bindings are formatted by rustfmt, bindgen's
+# default formatter anyway): bindgen 0.73 accepts syn 2 or 3, and a resolution which gives it
+# syn 3 next to prettyplease 0.2 (syn 2) does not compile. `runtime` loads libclang at run time,
+# as the default features do.
+bindgen = { version = "0.73.2", default-features = false, features = ["logging", "runtime"] }
 cc = "1.2.41"
 ceed-sys = { path = "crates/ceed-sys" }
 petsc-sys = { path = "crates/petsc-sys" }
-# sbmlsim-core's C target and engine from `develop` (0.31.0 plus pull request #119, the attempts of
-# the QFunction per application) until a release contains #119: the cell models as native code.
-sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
-sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
-sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "85bfa545db7459ff16cbd9baab293ae26a95c0c0" }
+# The mesher: exact predicates, the R-tree of the size field and the constrained Delaunay
+# triangulation. spade is pinned exactly: the generated meshes are to stay the same, and they
+# depend on how spade breaks ties when it inserts vertices and constraints (cocircular points,
+# its flips), which a patch release may change.
+robust = "1.2.0"
+rstar = "0.14.0"
+spade = "=2.15.1"
+# sbmlsim-core's C target and engine: the cell models as native code. The release 0.41.0, the
+# revision of the browser build too (SBMLSIM_CORE_KERNEL_REV of deps/versions.env).
+sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
+sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
+sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
+
+# The mesher's geometry in debug builds (the tests): unoptimized, spade and rstar make the
+# triangulation of a large domain about 50 times slower.
+[profile.dev.package.spade]
+opt-level = 3
+
+[profile.dev.package.rstar]
+opt-level = 3
+
+[profile.dev.package.robust]
+opt-level = 3

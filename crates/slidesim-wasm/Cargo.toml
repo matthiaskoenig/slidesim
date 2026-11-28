@@ -1,0 +1,30 @@
+[package]
+name = "slidesim-wasm"
+description = "slidesim in wasm32-wasip1: a reactor exporting a C ABI over its memory, the cells on the batched kernel of sbmlsim-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Built for wasm32-wasip1 only (scripts/wasm/build.sh), so not a member of the native workspace:
+# a workspace of its own, with its own lock.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+cells = { path = "../cells", default-features = false }
+contracts = { path = "../contracts" }
+mesh = { path = "../mesh" }
+mesher = { path = "../mesher" }
+petsc = { path = "../petsc" }
+serde = "1"
+serde_json = "1"
+simulation = { path = "../simulation", default-features = false }
+
+[profile.release]
+# One codegen unit and LTO: a smaller module.
+codegen-units = 1
+lto = true

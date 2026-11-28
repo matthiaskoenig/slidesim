@@ -9,7 +9,10 @@ publish = false
 [dependencies]
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Floats read correctly rounded (`float_roundtrip`; Cargo turns the feature on for every reader of
+# JSON in a build): a value written as JSON and read back has the same bits, so that a mesh.json
+# gives the mesh it was written from, and the browser build reads the inputs as natively.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 
 [dev-dependencies]

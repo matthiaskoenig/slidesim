@@ -1,15 +1,19 @@
 //! `slidesim`: spatial simulations of diffusing fields on tissue meshes.
 //!
 //! `slidesim run <study.json> --out <dir> [-- <petsc options>]` runs a `study/1` end to end (see
-//! [`run`]; with cell models coupled to the fields, [`coupled`]), on one process or under
-//! `mpiexec`.
+//! [`run`], over the library `simulation`), on one process or under `mpiexec`. `slidesim mesh
+//! <scene.json> --out <dir>` writes the mesh of a `scene/1` and its quality ([`mesh_command`]),
+//! on one process.
 //!
 //! Exit code 0 on success. Otherwise 1, with the error (and its causes) on stderr. On several
 //! processes an error ends every process (`MPI_Abort`, exit code 1), since the others may wait
 //! for the failing one in a collective call forever; each failing process prints its error
 //! prefixed with its rank. So does a panic (a bug): `[rank <k>] panic: <message> (at <location>)`.
+//! An error which every process meets at the same point ([`simulation::OnEveryProcess`], as an
+//! error of the mesher on process 0, which reaches the others) ends each process alone: each
+//! prints it prefixed with its rank and exits with 1, without `MPI_Abort`.
 
-mod coupled;
+mod mesh_command;
 mod run;
 
 use std::path::PathBuf;
@@ -38,6 +42,37 @@ enum Command {
         after_help = RUN_HELP
     )]
     Run(RunArgs),
+    /// Write the mesh of a scene/1 and its quality.
+    #[command(
+        override_usage = "slidesim mesh <SCENE> --out <DIR>",
+        after_help = MESH_HELP
+    )]
+    Mesh(MeshArgs),
+}
+
+const MESH_HELP: &str = "\
+Output files in DIR:
+  mesh.json     the mesh: vertices (um), triangles, the index of the area tag of each
+                triangle, the tagged edges with the index of their tag, and the tags (name,
+                value, dim: 2 for areas, 1 for edges)
+  mesh.vtu      for ParaView: one cell array per area tag, named after it, with the value of
+                the tag in its triangles and NaN elsewhere
+  quality.json  the numbers of triangles and vertices, the smallest angle (min_angle_deg), the
+                smallest and mean SICN, and for a generated mesh the smallest and largest ratio
+                of an edge length to the size field (edge_ratio)
+The quality is also printed in one line.
+
+A gmsh mesh is read and converted; tagged polygons and lobules are meshed (the mesh a run
+makes of the scene, before the refinements of the study). Runs on one process.";
+
+#[derive(Debug, Args)]
+struct MeshArgs {
+    /// The scene/1 file.
+    scene: PathBuf,
+    /// The output directory, created if missing. mesh.json, mesh.vtu and quality.json in it are
+    /// overwritten.
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
 }
 
 const RUN_HELP: &str = "\
@@ -68,8 +103,12 @@ Output files in DIR:
                           pressure (the flow), transport, exchange, cells and output
   pressure.vtu            with perfusion: the pressure, point data 'pressure.Pa'
   velocity.vtu            with perfusion: the Darcy velocity (um/s), the point vector 'velocity'
+  result.zarr             the store result/1 for viewers (Zarr v3, zstd): the finest mesh, and
+                          per output time every field at its vertices and the values of the
+                          cells; written by process 0 as the output times are reached (its
+                          attributes 'written' and 'complete' tell how far)
 Files <field id>_<index>.vtu, cells_<index>.vtu, pressure.vtu and velocity.vtu of an earlier run
-in DIR are removed first; other files stay.
+in DIR are removed first, result.zarr whole; other files stay.
 
 The cell model of a study with cells is compiled with $CC (or cc) at the start of the run, and
 cached in $SBMLSIM_C_CACHE (default: $XDG_CACHE_HOME/sbmlsim/c or ~/.cache/sbmlsim/c).
@@ -110,6 +149,35 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Run(args) => run_command(&args, started),
+        Command::Mesh(args) => mesh(&args),
+    }
+}
+
+fn mesh(args: &MeshArgs) -> ExitCode {
+    let petsc = match Petsc::init(&[]) {
+        Ok(petsc) => petsc,
+        Err(e) => {
+            eprintln!("error: cannot initialize PETSc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let comm = petsc.comm();
+    if comm.size() > 1 {
+        // Each process finds this alone, and ends.
+        if comm.rank() == 0 {
+            eprintln!(
+                "error: slidesim mesh runs on one process, not on {}",
+                comm.size()
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    match mesh_command::mesh(&petsc, &args.scene, &args.out) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {}", simulation::causes(&e));
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -131,28 +199,15 @@ fn run_command(args: &RunArgs, started: Instant) -> ExitCode {
         Err(e) => {
             let comm = petsc.comm();
             if comm.size() > 1 {
-                eprintln!("[rank {}] error: {}", comm.rank(), causes(&e));
+                eprintln!("[rank {}] error: {}", comm.rank(), simulation::causes(&e));
+                if e.downcast_ref::<simulation::OnEveryProcess>().is_some() {
+                    // Every process has it: none waits for another.
+                    return ExitCode::FAILURE;
+                }
                 petsc.abort_world(1);
             }
-            eprintln!("error: {}", causes(&e));
+            eprintln!("error: {}", simulation::causes(&e));
             ExitCode::FAILURE
         }
     }
-}
-
-/// The error and its causes, `error: cause: cause`, without a cause whose text the ones before
-/// already show (errors which print their source in their own message).
-fn causes(e: &anyhow::Error) -> String {
-    let mut text = String::new();
-    for cause in e.chain() {
-        let cause = cause.to_string();
-        if text.contains(&cause) {
-            continue;
-        }
-        if !text.is_empty() {
-            text.push_str(": ");
-        }
-        text.push_str(&cause);
-    }
-    text
 }

@@ -1,0 +1,15 @@
+--- a/cmake/modules/macros.cmake
++++ b/cmake/modules/macros.cmake
+@@ -136,12 +136,6 @@
+   ADD_LIBRARY ( ${target_name} ${target_type} ${sources} )
+   ADD_LIBRARY ( Mmg::${target_name} ALIAS ${target_name} )
+ 
+-  IF ( ${CMAKE_C_COMPILER_ID} STREQUAL "Clang" AND DEFINED CMAKE_C_COMPILER_VERSION )
+-    IF ( ${CMAKE_C_COMPILER_VERSION} VERSION_GREATER 10 )
+-      target_compile_options(${target_name} PRIVATE "-fcommon")
+-    ENDIF()
+-  ENDIF()
+-
+   IF (NOT WIN32 OR MINGW)
+     ADD_DEPENDENCIES(${target_name} GenerateGitHashMmg)
+   ENDIF()

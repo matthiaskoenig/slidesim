@@ -16,6 +16,17 @@ are not part of CI.
 - **[M3: performance](2026-11-m3-performance.md)**: profiles of the transport and the changes
   that made a step 29 times faster, the setup and output phases, and the coupled 24 h baseline of
   cells and fields on both paths.
+- **[M4: meshing real slides](2026-11-m4-meshing.md)**: slidesim's mesher on slideviz's tagged
+  polygons of real slides against slideviz's gmsh meshes (passing, after a cap of the size at
+  short boundary segments; slideviz retires its gmsh step), and three real fields as example
+  scenes.
+- **[M4: transport solves](2026-11-m4-performance.md)**: the linear solves of the transport
+  with 5.8 times fewer flops on the generated lobule (coarse solve, initial guess, the linear
+  tolerance `solver.linear_rtol` of the studies), measured on small problems.
+- **[M4: split step of the coupled SPT runs](2026-11-m4-split-step.md)**: the Strang
+  splitting of cells and transport at split steps from 120 to 10 s against a reference at 5 s,
+  on the generated lobule and the 7 lobules: first order, 30 s the largest split step within
+  1 % of the uptake and 0.01 of the necrosis, at 1.7 times the cost of 60 s.
 - **[Cells on dosed slides (deferred)](m3-dosed-slides.md)**: the SPT cell model for 24 h on
   dosed slides, the simulated necrosis against the measured one; deferred to later, larger
   hardware, not part of milestone 3.

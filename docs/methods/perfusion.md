@@ -29,11 +29,11 @@ K = k_{\text{across}}\, I + w\, (k_{\text{along}} - k_{\text{across}})\, \mathbf
 \qquad w = \frac{|\mathbf{g}|^2}{|\mathbf{g}|^2 + g_0^2}
 \]
 
-\(K\) is symmetric positive definite whenever \(k_{\text{along}}, k_{\text{across}} > 0\), which is checked.
-The gradient of a map is taken by central differences on the raster and then sampled bilinearly,
-continuous across pixel borders. The literature finds the in-plane permeability of the lobule
-close to isotropic ([perfusion parameters](../parameters/m2-perfusion-mouse.md)); strong radial
-anisotropy is a sensitivity case (`radial10` of the
+\(K\) is symmetric positive definite whenever \(k_{\text{along}}, k_{\text{across}} > 0\), which is
+checked. The gradient of a map is taken by central differences on the raster and then sampled
+bilinearly, continuous across pixel borders. The literature finds the in-plane permeability of the
+lobule close to isotropic ([perfusion parameters](../parameters/m2-perfusion-mouse.md)); strong
+radial anisotropy is a sensitivity case (`radial10` of the
 [milestone 2 results](../results/2026-11-m2-real-slide.md#studies)).
 
 **Pressure islands.** A connected part of the mesh which no pressure tag reaches (a piece of

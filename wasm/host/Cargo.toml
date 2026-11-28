@@ -1,0 +1,26 @@
+[package]
+name = "slidesim-host"
+description = "A wasmtime host of slidesim.wasm with the batched kernel of sbmlsim-core, and its agreement with the native build"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Not a member of the native workspace of slidesim: its own, with its own lock (built and tested
+# after scripts/wasm/build.sh, which writes the artifacts it runs).
+[workspace]
+
+[dependencies]
+anyhow = "1"
+# Floats read correctly rounded (float_roundtrip): the inputs pass `run` bit for bit, a mesh.json
+# included, for every consumer of the library, not only for the tests (where zarrs turns it on).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+wasmtime = "=50.0.1"
+wasmtime-wasi = "=50.0.1"
+
+[dev-dependencies]
+zarrs = { version = "0.23.14", default-features = false, features = ["filesystem", "zstd"] }
+
+# Cranelift compiles slidesim.wasm (some 16 MB) in every test: unoptimized, that takes minutes.
+[profile.dev.package."*"]
+opt-level = 3

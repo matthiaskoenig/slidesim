@@ -15,9 +15,13 @@
 #    figures into FIGURES. The figures take the H&E slide of SLIDEVIZ_DATA and the runs of the
 #    studies at their refinements; the velocity distribution and the cases figure all four studies.
 #
+# Every slidesim run goes through `run_sim` of scripts/lib/proc.sh: confined to the CPUs PROC_CPUS
+# (0-9) at nice 10, with a wall-clock limit, and taken down with the script however it ends.
+#
 # Nothing is written into SLIDEVIZ_DATA. Settings (environment variables, defaults in brackets):
 #   SLIDEVIZ_DATA        slides with their sidecars and predictions/ (required)
-#   SLIDEVIZ_REPO        the slideviz checkout [~/git/slideviz]
+#   SLIDEVIZ_REPO        the slideviz checkout [~/git/slideviz]; one with the gmsh mesher
+#                        build_mesh.py, retired in slideviz a5d287b (e.g. 98b30a7)
 #   SLIDE                slide stem without the stain [mouse_apap_000mg_m1]
 #   ANIMAL               prefix of the prediction files [SLIDE without "mouse_apap_"]
 #   LUMEN, NECROSIS      prediction files [SLIDEVIZ_DATA/predictions/ANIMAL_{lumen,necrosis}.npz]
@@ -27,7 +31,9 @@
 #   OUT                  output folder [target/e2e/m2_real_slide]
 #   STUDIES              studies to run, may be empty [baseline calibrated whole_blood radial10]
 #   BASELINE_REFINEMENTS extra refinement levels of the baseline, may be empty [0 1]
-#   NP                   MPI processes [4]
+#   NP                   MPI processes, at most 4 [4]
+#   LIMIT                wall-clock limit of each slidesim run, a `timeout` duration [2h]
+#   PROC_CPUS            the CPUs of the runs and the build, for taskset [0-9]
 #   MPIEXEC_FLAGS        extra mpiexec flags, e.g. --oversubscribe []
 #   PETSC_ENV            env.sh of the PETSc/libCEED install [deps/install/native-opt/env.sh]
 #   STEPS                steps to run, of: scene runs analysis [scene runs analysis]
@@ -35,6 +41,8 @@
 #                        for the results document
 #   WINDOW_CENTRES       further window centres (row col ...) for the window search [14000 12000]
 #   PIXI                 pixi for the mesh environment of slideviz [~/.pixi/bin/pixi]
+# shellcheck source=scripts/lib/proc.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/proc.sh"
 set -euo pipefail
 shopt -s nullglob
 
@@ -53,6 +61,7 @@ OUT=$(realpath -m "${OUT:-$ROOT/target/e2e/m2_real_slide}")
 STUDIES=${STUDIES-baseline calibrated whole_blood radial10}
 BASELINE_REFINEMENTS=${BASELINE_REFINEMENTS-0 1}
 NP=${NP:-4}
+LIMIT=${LIMIT:-2h}
 MPIEXEC_FLAGS=${MPIEXEC_FLAGS:-}
 PETSC_ENV=${PETSC_ENV:-$ROOT/deps/install/native-opt/env.sh}
 STEPS=${STEPS:-scene runs analysis}
@@ -142,8 +151,12 @@ run() {
     log "slidesim $name, $level refinements, $NP processes"
     local start=$SECONDS
     # shellcheck disable=SC2086 # MPIEXEC_FLAGS is a list of flags
-    mpiexec -n "$NP" $MPIEXEC_FLAGS "$ROOT/target/release/slidesim" run "$study" --out "$dir" \
-        >"$dir/run.log" 2>&1 || { tail -20 "$dir/run.log" >&2; exit 1; }
+    run_sim "$LIMIT" mpiexec -n "$NP" --bind-to none $MPIEXEC_FLAGS \
+        "$ROOT/target/release/slidesim" run "$study" --out "$dir" >"$dir/run.log" 2>&1 || {
+        echo "run $name failed (status $?, 124: over $LIMIT)" >&2
+        tail -20 "$dir/run.log" >&2
+        exit 1
+    }
     echo "$((SECONDS - start))" >"$dir/seconds"
     check_flows "$dir"
     log "  $((SECONDS - start)) s; tag flows $(jq -c .perfusion.tag_flows "$dir/summary.json")"
@@ -153,7 +166,7 @@ runs() {
     [[ -f $OUT/scene/scene.json ]] || { echo "no scene in $OUT/scene; run the scene step" >&2; exit 1; }
     # shellcheck source=/dev/null
     source "$PETSC_ENV"
-    (cd "$ROOT" && cargo build --quiet --release -p slidesim)
+    (cd "$ROOT" && taskset -c "$PROC_CPUS" nice -n 10 cargo build --quiet --release -j 10 -p slidesim)
     local name level
     for name in $STUDIES; do
         level=$(jq .mesh.refinements "$ROOT/testdata/studies/m2_real_slide/$name.study.json")

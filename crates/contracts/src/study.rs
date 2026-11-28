@@ -33,6 +33,35 @@ pub struct Study {
     pub mesh: MeshOptions,
     #[serde(default)]
     pub solver: SolverOptions,
+    /// What the result store holds besides the mesh values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultOptions>,
+}
+
+/// Options of the result store `result/1`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResultOptions {
+    /// Also write the fields as a raster pyramid (`raster/<field>/<level>`), the frame of a slide
+    /// image a viewer overlays the results on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raster: Option<RasterOptions>,
+}
+
+/// The raster pyramid of the fields (`result.raster`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RasterOptions {
+    /// Pixel size of level 0 in um, must be > 0.
+    #[schemars(extend("exclusiveMinimum" = 0))]
+    pub um_per_px: f64,
+    /// Coordinates in um of the corner of pixel (0, 0) of level 0; default: the lower corner of
+    /// the mesh's bounding box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_um: Option<[f64; 2]>,
+    /// Number of levels, at least 1; level k+1 halves level k.
+    #[schemars(range(min = 1))]
+    pub levels: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -83,6 +112,14 @@ fn is_one(c: &Coefficient) -> bool {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A coefficient: a constant (a JSON number) or a piecewise linear function of the values of a
@@ -276,7 +313,7 @@ pub fn check_maps(study: &Study, scene: &Scene) -> Result<(), ContractError> {
         named.extend(p.k_across.maps());
         named.push(&p.direction.map);
     }
-    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    let available: Vec<String> = scene.map_ids().into_iter().map(String::from).collect();
     match named.iter().find(|m| !available.iter().any(|a| a == *m)) {
         Some(m) => Err(ContractError::UnknownMap {
             map: m.to_string(),
@@ -341,6 +378,14 @@ pub struct CellsSpec {
     /// start against the compiled model); default none.
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// Spread the work of the cells evenly over the processes, default true: before each step
+    /// of the cells, cells move from processes of more work to processes of less, by their step
+    /// attempts in the step before (the mesh partition stays). A cell takes the same steps
+    /// wherever it is advanced, so the results are the same either way, bit for bit. The
+    /// engine path does not move the cells of a model with events, discontinuities or
+    /// algebraic rules (its integrator keeps state from one step to the next).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub balance: bool,
 }
 
 /// A model species exchanged with a field.
@@ -405,7 +450,7 @@ pub fn check_cells(study: &Study, scene: &Scene) -> Result<(), ContractError> {
             )));
         }
     }
-    let available: Vec<String> = scene.maps.iter().map(|m| m.id.clone()).collect();
+    let available: Vec<String> = scene.map_ids().into_iter().map(String::from).collect();
     for p in &cells.parameters {
         let mut named: Vec<&str> = p.value.maps().into_iter().collect();
         if let Some(r) = &p.replace {
@@ -513,8 +558,10 @@ pub struct TimeSpec {
     /// Use adaptive time stepping.
     #[serde(default)]
     pub adaptive: bool,
-    /// Output times in s, sorted and within [0, end].
-    #[serde(default)]
+    /// Output times in s: at least one, strictly increasing, the first >= 0 and the last equal
+    /// to `end`. Output index 0 is the state at the first output time (the initial state when it
+    /// is 0).
+    #[schemars(length(min = 1), extend("uniqueItems" = true), inner(range(min = 0)))]
     pub outputs: Vec<f64>,
 }
 
@@ -526,12 +573,63 @@ pub struct MeshOptions {
     pub refinements: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+/// The default of [`SolverOptions::linear_rtol`]: the setting at which runs on different numbers
+/// of processes agree within about 1e-10.
+pub const DEFAULT_LINEAR_RTOL: f64 = 1e-10;
+
+fn default_linear_rtol() -> f64 {
+    DEFAULT_LINEAR_RTOL
+}
+
+fn is_default_linear_rtol(rtol: &f64) -> bool {
+    *rtol == DEFAULT_LINEAR_RTOL
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SolverOptions {
+    /// Relative tolerance of the linear solves of the transport (the residual of each solve
+    /// reduced by it), in (0, 1), default 1e-10. With fixed steps the time integration has no
+    /// error estimate to derive it from: the study sets it. `-ksp_rtol` in `petsc_options`
+    /// overrides it.
+    #[serde(
+        default = "default_linear_rtol",
+        skip_serializing_if = "is_default_linear_rtol"
+    )]
+    #[schemars(extend("exclusiveMinimum" = 0, "exclusiveMaximum" = 1))]
+    pub linear_rtol: f64,
     /// PETSc options string, e.g. `-ksp_type cg -pc_type jacobi`.
     #[serde(default)]
     pub petsc_options: String,
+}
+
+impl Default for SolverOptions {
+    fn default() -> SolverOptions {
+        SolverOptions {
+            linear_rtol: DEFAULT_LINEAR_RTOL,
+            petsc_options: String::new(),
+        }
+    }
+}
+
+impl SolverOptions {
+    /// The default options with the PETSc options `petsc_options`.
+    pub fn with_petsc_options(petsc_options: impl Into<String>) -> SolverOptions {
+        SolverOptions {
+            petsc_options: petsc_options.into(),
+            ..SolverOptions::default()
+        }
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        let rtol = self.linear_rtol;
+        if !(rtol > 0.0 && rtol < 1.0) {
+            return Err(invalid(format!(
+                "solver.linear_rtol must be in (0, 1), got {rtol}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn invalid(msg: String) -> ContractError {
@@ -590,7 +688,31 @@ impl Study {
         if let Some(c) = &self.cells {
             c.validate()?;
         }
+        self.solver.validate()?;
+        if let Some(r) = self.result.as_ref().and_then(|r| r.raster.as_ref()) {
+            r.validate()?;
+        }
         self.time.validate()
+    }
+}
+
+impl RasterOptions {
+    fn validate(&self) -> Result<(), ContractError> {
+        finite("result.raster.um_per_px", self.um_per_px)?;
+        if self.um_per_px <= 0.0 {
+            return Err(invalid(format!(
+                "result.raster.um_per_px must be > 0, got {}",
+                self.um_per_px
+            )));
+        }
+        if self.levels < 1 {
+            return Err(invalid("result.raster.levels must be >= 1".into()));
+        }
+        if let Some([x, y]) = self.origin_um {
+            finite("result.raster.origin_um", x)?;
+            finite("result.raster.origin_um", y)?;
+        }
+        Ok(())
     }
 }
 
@@ -701,7 +823,10 @@ impl Perfusion {
 }
 
 impl TimeSpec {
-    fn validate(&self) -> Result<(), ContractError> {
+    /// Checks the times, as [`Study::load`] does: `end` and `dt` > 0, and `outputs` at least one
+    /// time, strictly increasing from >= 0 to `end`. Public for a study changed in code after it
+    /// was loaded.
+    pub fn validate(&self) -> Result<(), ContractError> {
         finite("time.end", self.end)?;
         finite("time.dt", self.dt)?;
         if self.end <= 0.0 {
@@ -710,12 +835,28 @@ impl TimeSpec {
         if self.dt <= 0.0 {
             return Err(invalid(format!("time.dt must be > 0, got {}", self.dt)));
         }
-        let ok = self.outputs.iter().all(|t| (0.0..=self.end).contains(t))
-            && self.outputs.windows(2).all(|w| w[0] <= w[1]);
-        if !ok {
+        let (Some(&first), Some(&last)) = (self.outputs.first(), self.outputs.last()) else {
             return Err(invalid(
-                "time.outputs must be sorted and within [0, end]".into(),
+                "time.outputs must not be empty: the output times, the last at time.end".into(),
             ));
+        };
+        for &t in &self.outputs {
+            finite("time.outputs", t)?;
+        }
+        if first < 0.0 {
+            return Err(invalid(format!("time.outputs must be >= 0, got {first}")));
+        }
+        if let Some(w) = self.outputs.windows(2).find(|w| w[0] >= w[1]) {
+            return Err(invalid(format!(
+                "time.outputs must be strictly increasing, got {} after {}",
+                w[1], w[0]
+            )));
+        }
+        if last != self.end {
+            return Err(invalid(format!(
+                "time.outputs must end at time.end {}, got {last}",
+                self.end
+            )));
         }
         Ok(())
     }
@@ -732,6 +873,62 @@ mod tests {
     fn study() -> Study {
         let text = include_str!("../../../testdata/contracts/study-minimal.json");
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn raster_options_are_checked() {
+        let with = |raster: serde_json::Value| {
+            let mut s = study();
+            s.result =
+                Some(serde_json::from_value(serde_json::json!({ "raster": raster })).unwrap());
+            s.validate()
+        };
+        with(serde_json::json!({"um_per_px": 2.0, "levels": 3})).unwrap();
+        with(serde_json::json!({"um_per_px": 2.0, "levels": 1, "origin_um": [-5.0, 1.0]})).unwrap();
+        for (raster, message) in [
+            (
+                serde_json::json!({"um_per_px": 0.0, "levels": 1}),
+                "result.raster.um_per_px must be > 0",
+            ),
+            (
+                serde_json::json!({"um_per_px": -1.0, "levels": 1}),
+                "result.raster.um_per_px must be > 0",
+            ),
+            (
+                serde_json::json!({"um_per_px": 1.0, "levels": 0}),
+                "result.raster.levels must be >= 1",
+            ),
+        ] {
+            let e = with(raster).unwrap_err().to_string();
+            assert!(e.contains(message), "{e}");
+        }
+        let mut s = study();
+        s.result = Some(ResultOptions {
+            raster: Some(RasterOptions {
+                um_per_px: f64::NAN,
+                origin_um: None,
+                levels: 1,
+            }),
+        });
+        assert!(
+            s.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result.raster.um_per_px")
+        );
+        s.result = Some(ResultOptions {
+            raster: Some(RasterOptions {
+                um_per_px: 1.0,
+                origin_um: Some([0.0, f64::INFINITY]),
+                levels: 1,
+            }),
+        });
+        assert!(
+            s.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("result.raster.origin_um")
+        );
     }
 
     #[test]

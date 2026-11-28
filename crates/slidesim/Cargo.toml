@@ -8,16 +8,13 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-cells = { path = "../cells" }
-ceed = { path = "../ceed" }
 clap = { version = "4", features = ["derive"] }
 contracts = { path = "../contracts" }
-maps = { path = "../maps" }
 mesh = { path = "../mesh" }
-pde = { path = "../pde" }
+mesher = { path = "../mesher" }
 petsc = { path = "../petsc" }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+simulation = { path = "../simulation" }
 
 [dev-dependencies]
 serde_json = "1"

@@ -15,8 +15,16 @@ mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json
 ```
 
 The same command runs on one process or on many under `mpiexec`: the mesh is partitioned over
-the processes (PT-Scotch), and every result agrees across process counts within 1e-10 relative
-(with fixed time steps). `slidesim run --help` describes the outputs.
+the processes (PT-Scotch). With fixed time steps and tight settings, the linear solves to 1e-12
+(`solver.linear_rtol`) and the cells to rtol 1e-12 and atol 1e-16 (rtol 1e-14 for a stiff model
+such as SPT, whose step control otherwise decides differently on inputs which differ in the last
+digits), every result agrees across 1, 2 and 3 processes within 1e-10 relative, as the tests
+check. At the default settings (linear solves to 1e-10, the cell tolerances of the study) runs
+agree within what the tolerances allow: on the generated lobule the fields of 1 and 2 processes
+differ by 5e-11, the cells by up to 1.4e-10, and a cell whose step control decides otherwise by
+its integration error (4e-10 at a cell rtol of 1e-8). The SPT examples solve the linear systems
+and the cells to 1e-6 for speed; how far their runs on different numbers of processes differ is
+not measured, but it is bounded by those errors. `slidesim run --help` describes the outputs.
 
 ## What a run does
 
@@ -24,18 +32,21 @@ the processes (PT-Scotch), and every result agrees across process counts within 
    checks the `cells` section against the study and the scene. With cells, it translates the
    model to C, compiles it and checks it against the study, all before anything is solved.
 2. Loads the mesh, distributed over the processes and refined `mesh.refinements` times, and
-   reads the maps over the cells of each process.
+   reads the maps over the cells of each process. Tagged polygons and lobules are meshed by
+   process 0 first ([Meshing](methods/meshing.md)), and the run prints the quality of the mesh
+   in one line; the zonation map of lobules is computed over the cells of each process.
 3. With `perfusion`: solves the steady Darcy flow once ([Perfusion](methods/perfusion.md)).
-4. Steps the fields to each output time of `time.outputs` in turn, then to `time.end`: each field
-   alone, or with `cells` all fields and the cells together by Strang splitting
-   ([Cell models](methods/cells.md)).
-5. At each output time (time 0 before any step) writes every field, and with cells the cells;
-   at the end, process 0 writes `summary.json`.
+4. Steps the fields to each output time of `time.outputs` in turn, the last of which is
+   `time.end`: each field alone, or with `cells` all fields and the cells together by Strang
+   splitting ([Cell models](methods/cells.md)).
+5. At each output time (time 0 before any step) writes every field, and with cells the cells,
+   as VTU files and into `result.zarr`; at the end, process 0 writes `summary.json`.
 
 ## Outputs
 
 `DIR` is created if missing. The files `<field id>_<index>.vtu`, `cells_<index>.vtu`,
-`pressure.vtu` and `velocity.vtu` of an earlier run in `DIR` are removed first; other files stay.
+`pressure.vtu` and `velocity.vtu` of an earlier run in `DIR` are removed first, and
+`result.zarr` whole; other files stay.
 
 | File | Content |
 | --- | --- |
@@ -44,6 +55,39 @@ the processes (PT-Scotch), and every result agrees across process counts within 
 | `pressure.vtu` | with perfusion: the pressure, point data `pressure.Pa` |
 | `velocity.vtu` | with perfusion: the point vectors `velocity` (the conservative velocity the fields are carried by) and `primal_velocity` (`-K grad p / mu`), um/s |
 | `summary.json` | per field and output time: norms, amounts and the mass balance; flows, cells and the time per phase |
+| `result.zarr` | the store [`result/1`](contracts.md#result1) for viewers (Zarr v3, zstd): the finest mesh, and per output time every field at its vertices and every value of the cells; with `result.raster` in the study also the fields as a raster pyramid |
+
+## result.zarr
+
+Process 0 writes the store as the run goes: the mesh, the output times and empty arrays before
+the first output time, then each output time as it is reached, one chunk per array, after which
+the root attribute `written` counts it; the last output time sets `complete`. A run which stops
+early leaves `complete` false and the output times below `written` readable. The mesh is the
+finest level in a form independent of the number of processes (the same arrays from 1, 2 or 3
+processes), its vertices numbered as the field values are stored. `study` and `scene` name the
+files by their file names. Reading it in Python:
+
+```python
+import zarr
+
+root = zarr.open_group("out/result.zarr", mode="r")
+meta = root.attrs.asdict()  # ResultMeta: times, written, fields, cell_values, tags
+vertices = root["mesh/vertices"][:]  # [V, 2], um
+triangles = root["mesh/triangles"][:]  # [N, 3]
+S = root["fields/S"][meta["written"] - 1]  # [V], mM, the last output time written
+```
+
+With `"result": {"raster": {"um_per_px": 10, "levels": 4}}` in the study (`origin_um` optional)
+the store also holds each field sampled on a pixel grid, `raster/<field>/<level>`: `[T, rows, cols]`
+f32 in chunks of 256 x 256, level 0 at `um_per_px` over the mesh's bounding box, row 0 at the
+smallest y, NaN outside the mesh, each further level the mean of 2 x 2 pixels of the one before.
+`meta["raster"]` has the pixel size, the origin and the shape of each level; see
+[`result/1`](contracts.md#result1). A viewer overlays it on a slide image of the tissue by the
+origin and the pixel size.
+
+```python
+level0 = root["raster/S/0"][meta["written"] - 1]  # [rows, cols], mM
+```
 
 ## summary.json
 
@@ -55,6 +99,7 @@ the processes (PT-Scotch), and every result agrees across process counts within 
         "exchange": ...,
         "boundary": {"<tag>": {
             "advective": ..., "diffusive": ..., "resupply": ...}}}]}},
+ "solver": {"linear_rtol": ...},
  "perfusion": {"tag_flows": {"<tag>": <um^2/s>},
                "pressure_islands": {"count": <n>, "area_um2": <um^2>}},
  "cells": {"count": <n>, "steps": <n>, "rejected": <n>,
@@ -86,6 +131,11 @@ the processes (PT-Scotch), and every result agrees across process counts within 
     `advection_defect` the non-conservation of the velocity (zero for the conservative velocity of
     milestone 3). `storage_rate` is the change of `total_mass` over the interval divided by its
     length, and the terms add up to it exactly, up to the residuals of the linear solves.
+
+`solver`
+:   The relative tolerance of the linear solves of the transport the run used: `linear_rtol`
+    of the study's `solver`, or `-ksp_rtol` of its PETSc options (the loosest of the fields, if
+    the options set one per field). The residuals of the mass balances scale with it.
 
 `perfusion`
 :   With perfusion: the flow through each pressure tag (`tag_flows`, um^2/s, positive into the
@@ -140,6 +190,74 @@ target/debug/slidesim run testdata/studies/cells_toy/spt.study.json --out out
 operator) or `engine` (one sbmlsim-core engine instance per cell, for every model sbmlsim-core
 handles).
 
+## Meshes
+
+`slidesim mesh` writes the mesh of a `scene/1` and its quality, without a run: the mesh a run
+makes of the scene before the refinements of the study. A gmsh mesh is read and converted,
+tagged polygons and lobules are meshed ([Meshing](methods/meshing.md)). It runs on one process
+(under `mpiexec` with more it is a usage error).
+
+```text
+slidesim mesh <SCENE> --out <DIR>
+```
+
+```bash
+target/debug/slidesim mesh testdata/studies/lobules/scene.json --out mesh
+```
+
+```text
+mesh: 5902 triangles, 3093 vertices, min angle 25.46 deg, SICN min 0.641 mean 0.960, edge length / size 0.51 to 1.58
+```
+
+`DIR` is created if missing; the three files in it are overwritten.
+
+| File | Content |
+| --- | --- |
+| `mesh.json` | the mesh: `vertices` (`[x, y]` in um), `triangles` (three vertex indices, counterclockwise), `triangle_tags` (the index of the area tag of each triangle), `edges` (the tagged edges, `[a, b]` with `a < b`, one entry per edge and tag), `edge_tags` (the index of the tag of each), and `tags` (`name`, `value` and `dim`: 2 for an area tag, 1 for an edge tag) |
+| `mesh.vtu` | for ParaView: one cell array per area tag, named after it, with the value of the tag in its triangles and NaN elsewhere |
+| `quality.json` | `triangles`, `vertices`, `min_angle_deg`, `min_sicn`, `mean_sicn`, and for a generated mesh `edge_ratio`: the smallest and largest ratio of an edge length to the size field (null for a gmsh mesh) |
+
+## In the browser
+
+The browser build runs a study in a page, a worker or Node: `wasm/js/slidesim.mjs`, the live API
+declared in `wasm/js/slidesim.d.ts` ([Contracts](contracts.md#live-api)), over `slidesim.wasm`
+and sbmlsim-core's `compiler.wasm` and `mathlib.wasm` (`scripts/wasm/build.sh`; its
+`compile.mjs` and `kernel.mjs` beside the glue in `sbmlsim-core/`). The scene's mesh is generated
+(`lobules`) or given as the `mesh.json` of `slidesim mesh`; the cells run on the batched path. The
+[lobule demo](demo.md) is a page built on it.
+
+```js
+import { createSimulation, lobuleScene } from "./slidesim.mjs";
+
+const scene = lobuleScene({ rings: 0 }, {
+  centre: "central_wall", corner: "portal_wall", outer: "field_cut",
+  area: "tissue", zonation: "zonation",
+});
+const sim = await createSimulation({
+  slidesim: await (await fetch("slidesim.wasm")).arrayBuffer(),
+  compiler: await (await fetch("compiler.wasm")).arrayBuffer(),
+  mathlib: await (await fetch("mathlib.wasm")).arrayBuffer(),
+  sbml: await (await fetch("spt_liver_cell.xml")).text(),
+  scene,
+  study, // a study/1 document, its tags those of the scene
+});
+console.log(sim.log()); // mesh: ... triangles, min angle ...
+do {
+  const S = sim.field("S"); // [V] at sim.time, on sim.mesh.vertices
+} while (sim.step() !== null);
+console.log(sim.summary().fields.S.total_mass);
+sim.free();
+```
+
+`createSimulation` resolves at output index 0 (time 0); each `step()` advances to the next output
+time and returns its index, `null` at the end. Errors of slidesim are thrown as an `Error` with
+its message, and the simulation goes on. A trap of the module (a panic, an allocation of Rust or
+libCEED past the memory) is an `Error` too, after which that simulation is unusable.
+`memory: { maximumPages }` caps the memory of a simulation; past it, the `Error` names the cap,
+whether it is an error (PETSc's allocation) or a trap. Compile `slidesim.wasm` once
+(`WebAssembly.compile`) and pass the module to create many simulations, capped or not. A step
+blocks its thread, so a page runs the simulation in a worker, as the demo does.
+
 ## PETSc options
 
 PETSc options follow `--` and go to PETSc's options database. The solvers of a field take the
@@ -157,5 +275,6 @@ target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out \
   -- -oxygen_ts_monitor
 ```
 
-Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol 1e-10`, and solvers
-which do not converge are errors), `solver.petsc_options` of the study, the options after `--`.
+Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol` of
+`solver.linear_rtol`, 1e-10 unless the study sets it, and solvers which do not converge are
+errors), `solver.petsc_options` of the study, the options after `--`.

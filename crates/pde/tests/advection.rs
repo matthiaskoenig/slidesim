@@ -20,7 +20,7 @@ use std::rc::Rc;
 use common::{PIXELS, Scratch, ceed, read_maps, unit_square};
 use contracts::{
     BoundarySpec, Coefficient, Condition, Direction, FieldSpec, Perfusion, PressureBoundary, Scene,
-    Study, TimeSpec,
+    SolverOptions, Study, TimeSpec,
 };
 use maps::Maps;
 use mesh::Mesh;
@@ -184,8 +184,15 @@ fn advection_errors(p: &Petsc, test: &str, peclet: f64, at: u32) -> Vec<f64> {
                 maps: &maps,
                 flow: Some(&flow),
             };
-            let mut problem =
-                Problem::new(&mesh, &field, &fixed(1.0, DT), &ceed(), ACCURATE, &inputs).unwrap();
+            let mut problem = Problem::new(
+                &mesh,
+                &field,
+                &fixed(1.0, DT),
+                &ceed(),
+                &SolverOptions::with_petsc_options(ACCURATE),
+                &inputs,
+            )
+            .unwrap();
             problem.set_initial_condition(phi).unwrap();
             let points = problem.discretization().quadrature_points().to_vec();
             let source: Vec<f64> = points.iter().map(|&x| manufactured_source(u, x)).collect();
@@ -256,8 +263,15 @@ fn front(p: &Petsc, test: &str) -> (Problem, Mesh) {
         maps: &maps,
         flow: Some(&flow),
     };
-    let mut problem =
-        Problem::new(&mesh, &field, &fixed(0.5, FRONT_DT), &ceed(), "", &inputs).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(0.5, FRONT_DT),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap();
     problem.step_to(0.5).unwrap();
     (problem, mesh)
 }
@@ -301,7 +315,15 @@ fn inflow_without_dirichlet_is_error() {
     };
     // A condition at the outflow does not count.
     let field = field(D, 0.0, 1.0, vec![dirichlet("right", 0.0)]);
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap_err();
     let PdeError::Inflow { tag, field: id } = &e else {
         panic!("expected an inflow error, got {e}");
     };
@@ -319,14 +341,30 @@ fn inflow_without_dirichlet_is_error() {
         boundaries: vec![flux],
         ..field
     };
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap_err();
     assert!(matches!(e, PdeError::Inflow { .. }), "{e}");
     // Without advection the flow does not matter.
     let field = FieldSpec {
         advection: false,
         ..field
     };
-    Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap();
+    Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap();
 }
 
 /// A tag whose net flow is rounding (here `top` and `bottom` of the flow along x, with the
@@ -363,7 +401,15 @@ fn rounding_flow_is_not_inflow() {
         flow: Some(&flow),
     };
     let field = field(D, 0.0, 1.0, vec![dirichlet("left", 1.0)]);
-    Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap();
+    Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -376,7 +422,15 @@ fn advection_without_flow_is_unsupported() {
         flow: None,
     };
     let field = field(D, 0.0, 1.0, vec![dirichlet("left", 1.0)]);
-    let e = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap_err();
+    let e = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap_err();
     assert!(matches!(e, PdeError::Unsupported(_)), "{e}");
     for word in ["advection", "'c'", "flow"] {
         assert!(e.to_string().contains(word), "{word}: {e}");
@@ -479,7 +533,7 @@ fn mass_balance_closes() {
         &field,
         &fixed(0.5, 1.0 / 32.0),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &inputs,
     )
     .unwrap();
@@ -556,7 +610,7 @@ fn mass_balance_of_a_uniform_flow() {
         &field,
         &fixed(0.25, 1.0 / 32.0),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &inputs,
     )
     .unwrap();
@@ -614,7 +668,15 @@ fn no_advection_defect_with_conservative_velocity() {
         flow: Some(&flow),
     };
     let field = &study.fields[0];
-    let mut problem = Problem::new(&mesh, field, &study.time, &ceed(), options, &inputs).unwrap();
+    let mut problem = Problem::new(
+        &mesh,
+        field,
+        &study.time,
+        &ceed(),
+        &SolverOptions::with_petsc_options(options),
+        &inputs,
+    )
+    .unwrap();
     for &t in &study.time.outputs[1..] {
         problem.step_to(t).unwrap();
         let balance = problem.mass_balance().unwrap();
@@ -670,7 +732,7 @@ fn no_advection_defect_at_a_point_contact() {
         &field,
         &fixed(1.0, dt),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &inputs,
     )
     .unwrap();
@@ -760,7 +822,7 @@ fn backflow_without_condition() {
         &field,
         &fixed(1.0, dt),
         &ceed(),
-        CONSERVATIVE,
+        &SolverOptions::with_petsc_options(CONSERVATIVE),
         &inputs,
     )
     .unwrap();
@@ -857,7 +919,15 @@ fn total_mass_weighs_the_porosity() {
         maps: &maps,
         flow: None,
     };
-    let problem = Problem::new(&mesh, &field, &fixed(1.0, 0.1), &ceed(), "", &inputs).unwrap();
+    let problem = Problem::new(
+        &mesh,
+        &field,
+        &fixed(1.0, 0.1),
+        &ceed(),
+        &SolverOptions::default(),
+        &inputs,
+    )
+    .unwrap();
     assert!((problem.total_mass().unwrap() - 0.5).abs() < 1e-12);
 }
 

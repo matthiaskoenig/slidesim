@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use ceed::{Ceed, DEFAULT_RESOURCE};
-use contracts::{LengthUnit, MapSpec, MeshFormat, MeshRef, SCENE_VERSION, Scene, Units};
+use contracts::{LengthUnit, MapSpec, MeshSource, SCENE_VERSION, Scene, Units};
 use maps::Maps;
 use mesh::Mesh;
 use petsc::Petsc;
@@ -42,8 +42,7 @@ pub fn fixture_mesh(p: &Petsc, file: &str, refinements: u32) -> Mesh {
         units: Units {
             length: LengthUnit::Um,
         },
-        mesh: MeshRef {
-            format: MeshFormat::Gmsh,
+        mesh: MeshSource::Gmsh {
             path: fixture(file),
         },
         maps: Vec::new(),

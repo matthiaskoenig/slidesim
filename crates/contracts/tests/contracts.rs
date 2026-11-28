@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use contracts::{Coefficient, Condition, Scene, Study, Table, check_maps};
+use contracts::{
+    Coefficient, Condition, MeshSource, Polygons, ResultMeta, Scene, Study, Table, check_maps,
+};
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,8 +40,9 @@ fn load_resolves_paths_against_file_directory() {
             .ends_with("testdata/contracts/scene-minimal.json")
     );
     let scene = Scene::load(data("scene-minimal.json")).unwrap();
-    assert!(scene.mesh.path.is_absolute());
-    assert!(scene.mesh.path.ends_with("testdata/contracts/mesh.msh"));
+    let path = scene.mesh.path().unwrap();
+    assert!(path.is_absolute());
+    assert!(path.ends_with("testdata/contracts/mesh.msh"));
 }
 
 #[test]
@@ -85,8 +88,75 @@ fn negative_diffusion() {
 fn bad_outputs() {
     assert_eq!(
         study_err("study-bad-outputs.json"),
-        "time.outputs must be sorted and within [0, end]"
+        "time.outputs must be strictly increasing, got 1 after 5"
     );
+}
+
+/// `time.outputs` is at least one time, strictly increasing from >= 0 to `time.end` (which keeps
+/// the times of `result/1` strictly increasing and the run ending at the last output): `load`
+/// refuses every other list, naming `time.outputs`, and the schema what it can express.
+#[test]
+fn outputs_increase_to_the_end() {
+    let text = std::fs::read_to_string(data("study-minimal.json")).unwrap();
+    let minimal: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let schema = jsonschema::validator_for(&contracts::schema_study()).unwrap();
+    let with = |outputs: serde_json::Value| {
+        let mut doc = minimal.clone();
+        doc["time"]["outputs"] = outputs;
+        doc
+    };
+    let load = |doc: &serde_json::Value| Study::from_value(doc.clone(), &data("study.json"));
+    for (outputs, message, schema_refuses) in [
+        (
+            serde_json::json!([]),
+            "time.outputs must not be empty: the output times, the last at time.end",
+            true,
+        ),
+        (
+            serde_json::json!([0.0, 5.0, 5.0, 10.0]),
+            "time.outputs must be strictly increasing, got 5 after 5",
+            true,
+        ),
+        (
+            serde_json::json!([0.0, 7.0, 5.0, 10.0]),
+            "time.outputs must be strictly increasing, got 5 after 7",
+            false,
+        ),
+        (
+            serde_json::json!([0.0, 5.0]),
+            "time.outputs must end at time.end 10, got 5",
+            false,
+        ),
+        (
+            serde_json::json!([0.0, 5.0, 12.0]),
+            "time.outputs must end at time.end 10, got 12",
+            false,
+        ),
+        (
+            serde_json::json!([-1.0, 10.0]),
+            "time.outputs must be >= 0, got -1",
+            true,
+        ),
+    ] {
+        let doc = with(outputs.clone());
+        assert_eq!(load(&doc).unwrap_err().to_string(), message, "{outputs}");
+        assert_eq!(
+            !schema.is_valid(&doc),
+            schema_refuses,
+            "schema on {outputs}"
+        );
+    }
+    // Required: a study without output times has nothing to show.
+    let mut doc = minimal.clone();
+    doc["time"].as_object_mut().unwrap().remove("outputs");
+    assert!(!schema.is_valid(&doc));
+    assert!(load(&doc).unwrap_err().to_string().contains("outputs"));
+    // One output time at the end, and a first time after 0, are fine.
+    for outputs in [serde_json::json!([10.0]), serde_json::json!([2.5, 10.0])] {
+        let doc = with(outputs.clone());
+        assert!(load(&doc).is_ok(), "{outputs}");
+        assert!(schema.is_valid(&doc), "{outputs}");
+    }
 }
 
 #[test]
@@ -157,7 +227,9 @@ fn schemas_are_current() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
     for (name, schema) in [
         ("scene-1.schema.json", contracts::schema_scene()),
+        ("polygons-1.schema.json", contracts::schema_polygons()),
         ("study-1.schema.json", contracts::schema_study()),
+        ("result-1.schema.json", contracts::schema_result()),
     ] {
         let text = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
         let on_disk: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
@@ -206,6 +278,27 @@ fn schemas_match_load() {
         "study-perfusion.json"
     ));
     assert!(schema_accepts(contracts::schema_scene(), "scene-maps.json"));
+    for f in ["scene-lobules.json", "scene-polygons.json"] {
+        assert!(schema_accepts(contracts::schema_scene(), f), "{f}");
+    }
+    assert!(schema_accepts(
+        contracts::schema_polygons(),
+        "polygons-minimal.geojson"
+    ));
+    for f in [
+        "polygons-bad-kind.geojson",
+        "polygons-bad-value.geojson",
+        "scene-lobules-bad-jitter.json",
+        "scene-lobules-bad-radius.json",
+        "scene-lobules-bad-rings.json",
+    ] {
+        let schema = if f.starts_with("polygons") {
+            contracts::schema_polygons()
+        } else {
+            contracts::schema_scene()
+        };
+        assert!(!schema_accepts(schema, f), "schema accepts {f}");
+    }
     // Strictly increasing table values and unique tags are checked by `load` only.
     for f in [
         "study-table-negative-diffusion.json",
@@ -278,7 +371,11 @@ fn example_studies_are_valid() {
             "{study}"
         );
         let scene = Scene::load(&loaded.scene).unwrap();
-        assert!(scene.mesh.path.is_file(), "{}", scene.mesh.path.display());
+        // The file of the mesh or the polygons; a lobule source has none.
+        if let Some(path) = scene.mesh.path() {
+            assert!(path.is_file(), "{}", path.display());
+        }
+        check_maps(&loaded, &scene).unwrap();
     }
 }
 
@@ -536,7 +633,8 @@ fn cells_json() -> serde_json::Value {
         "split_step": 1.0,
         "rtol": 1e-5,
         "atol": 1e-8,
-        "outputs": ["flux"]
+        "outputs": ["flux"],
+        "balance": false
     })
 }
 
@@ -564,6 +662,7 @@ fn cells_defaults() {
     assert_eq!(spec.areas, None);
     assert_eq!((spec.rtol, spec.atol), (1e-6, 1e-9));
     assert!(spec.outputs.is_empty());
+    assert!(spec.balance);
 }
 
 #[test]
@@ -615,4 +714,335 @@ fn cells_split_step_positive() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("time.dt") && e.contains("split_step"), "{e}");
+}
+
+#[test]
+fn lobules_scene_loads_with_defaults() {
+    let dir = std::env::temp_dir().join(format!("slidesim-lobules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("scene.json");
+    std::fs::write(
+        &file,
+        r#"{"version": "scene/1", "dimension": 2, "units": {"length": "um"},
+            "mesh": {"format": "lobules",
+                     "centre": {"tag": "c"}, "corner": {"tag": "p"},
+                     "outer_tag": "o", "area_tag": "a",
+                     "zonation": {"map": "zonation"}}}"#,
+    )
+    .unwrap();
+    let scene = Scene::load(&file).unwrap();
+    let MeshSource::Lobules(spec) = &scene.mesh else {
+        panic!("not lobules: {:?}", scene.mesh)
+    };
+    assert_eq!(spec.lobule_radius_um, 300.0);
+    assert_eq!(spec.rings, 0);
+    assert_eq!(spec.jitter, 0.0);
+    assert_eq!(spec.seed, 0);
+    assert_eq!(spec.centre.radius_um, 30.0);
+    assert_eq!(spec.corner.radius_um, 25.0);
+    assert_eq!(spec.size.wall_um, 5.0);
+    assert_eq!(spec.size.interior_um, 20.0);
+    assert_eq!(spec.zonation.um_per_px, 2.0);
+    assert_eq!(scene.map_ids(), ["zonation"]);
+    assert!(scene.mesh.path().is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn lobules_scene_full_round_trip() {
+    let scene = Scene::load(data("scene-lobules.json")).unwrap();
+    let text = std::fs::read_to_string(data("scene-lobules.json")).unwrap();
+    let original: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(serde_json::to_value(&scene).unwrap(), original);
+}
+
+#[test]
+fn lobule_size_field() {
+    let scene = Scene::load(data("scene-lobules.json")).unwrap();
+    let MeshSource::Lobules(spec) = &scene.mesh else {
+        panic!()
+    };
+    let f = spec.size_field();
+    assert_eq!(
+        (f.min_um, f.max_um, f.dist_min_um, f.dist_max_um),
+        (5.0, 20.0, 10.0, 200.0)
+    );
+    assert_eq!(f.walls, ["central_wall", "portal_wall"]);
+}
+
+#[test]
+fn polygons_scene_resolves_its_path() {
+    let scene = Scene::load(data("scene-polygons.json")).unwrap();
+    let MeshSource::Polygons { path, size } = &scene.mesh else {
+        panic!()
+    };
+    assert!(path.is_absolute());
+    assert!(path.ends_with("testdata/contracts/polygons-minimal.geojson"));
+    assert!(path.is_file());
+    assert_eq!(size.walls, ["central_wall"]);
+    assert!(scene.map_ids().is_empty());
+}
+
+#[test]
+fn gmsh_scenes_still_load() {
+    let mut n = 0;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                stack.push(p);
+            } else if name.starts_with("scene") && name.ends_with(".json") && !name.contains("bad")
+            {
+                let Ok(scene) = Scene::load(&p) else {
+                    panic!("{} does not load", p.display())
+                };
+                if let MeshSource::Gmsh { path } = &scene.mesh {
+                    assert!(path.is_absolute());
+                    n += 1;
+                }
+            }
+        }
+    }
+    assert!(n >= 3, "only {n} gmsh scenes found");
+}
+
+#[test]
+fn lobule_parameters_out_of_range() {
+    for (file, key) in [
+        ("scene-lobules-bad-radius.json", "lobule_radius_um"),
+        ("scene-lobules-bad-jitter.json", "jitter"),
+        ("scene-lobules-bad-rings.json", "rings"),
+        ("scene-lobules-bad-veins-touch.json", "centre.radius_um"),
+        ("scene-lobules-bad-corner.json", "corner.radius_um"),
+        ("scene-lobules-bad-size.json", "size.wall_um"),
+        ("scene-lobules-bad-map-clash.json", "zonation.map"),
+        ("scene-lobules-bad-tags.json", "area_tag"),
+    ] {
+        let e = Scene::load(data(file)).unwrap_err();
+        assert!(matches!(e, contracts::ContractError::Invalid(_)), "{file}");
+        assert!(e.to_string().contains(key), "{file}: {e}");
+    }
+}
+
+#[test]
+fn size_field_rules() {
+    let base = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(data("scene-polygons.json")).unwrap(),
+    )
+    .unwrap();
+    let load = |key: &str, v: f64| {
+        let mut d = base.clone();
+        d["mesh"]["size"][key] = serde_json::json!(v);
+        Scene::from_value(d, &data("scene-polygons.json"))
+    };
+    for (key, v) in [
+        ("min_um", 30.0),
+        ("min_um", -1.0),
+        ("max_um", 1.0),
+        ("dist_min_um", 200.0),
+        ("dist_min_um", -1.0),
+        ("dist_max_um", 10.0),
+    ] {
+        let e = load(key, v).unwrap_err().to_string();
+        assert!(e.contains("size."), "{key}={v}: {e}");
+        assert!(e.contains(key), "{key}={v}: {e}");
+    }
+    assert!(load("dist_min_um", 0.0).is_ok());
+}
+
+fn polygons_err(name: &str) -> String {
+    Polygons::load(data(name)).unwrap_err().to_string()
+}
+
+#[test]
+fn polygons_load() {
+    let p = Polygons::load(data("polygons-minimal.geojson")).unwrap();
+    assert_eq!(p.areas.len(), 2);
+    assert_eq!(p.edges.len(), 3);
+    assert_eq!((p.areas[0].tag.as_str(), p.areas[0].value), ("tissue", 1));
+    assert_eq!(p.areas[0].rings.len(), 1);
+    assert_eq!((p.areas[1].tag.as_str(), p.areas[1].value), ("necrotic", 2));
+    assert_eq!(p.areas[1].rings.len(), 2);
+    assert_eq!(p.edges[0].tag, "central_wall");
+    assert_eq!(p.edges[0].points[1], [20.0, 10.0]);
+    assert!(p.edges.iter().all(|e| e.value == 1));
+}
+
+#[test]
+fn polygons_refuse_bad_kinds() {
+    assert!(polygons_err("polygons-bad-kind.geojson").contains("volume"));
+    let e = polygons_err("polygons-bad-linestring-area.geojson");
+    assert!(e.contains("tissue") && e.contains("LineString"), "{e}");
+    let e = polygons_err("polygons-bad-tag-both.geojson");
+    assert!(
+        e.contains("tissue") && e.contains("area and as an edge"),
+        "{e}"
+    );
+    let e = polygons_err("polygons-bad-value.geojson");
+    assert!(e.contains("value"), "{e}");
+}
+
+/// A vein radius may be left out (its default) but not `null`: `Scene::load` refuses it as the
+/// schema does.
+#[test]
+fn null_hole_radius_is_refused() {
+    let text = std::fs::read_to_string(data("scene-lobules.json")).unwrap();
+    let lobules: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let schema = jsonschema::validator_for(&contracts::schema_scene()).unwrap();
+    for hole in ["centre", "corner"] {
+        let mut doc = lobules.clone();
+        doc["mesh"][hole]["radius_um"] = serde_json::Value::Null;
+        assert!(!schema.is_valid(&doc), "{hole}");
+        let e = Scene::from_value(doc.clone(), &data("scene.json")).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("radius_um must be a number, got null"),
+            "{hole}: {e}"
+        );
+        doc["mesh"][hole]
+            .as_object_mut()
+            .unwrap()
+            .remove("radius_um");
+        assert!(schema.is_valid(&doc), "{hole}");
+        assert!(
+            Scene::from_value(doc, &data("scene.json")).is_ok(),
+            "{hole}"
+        );
+    }
+}
+
+#[test]
+fn schema_carries_the_hole_radius_defaults() {
+    let schema = contracts::schema_scene();
+    let variants = schema["$defs"]["MeshSource"]["oneOf"].as_array().unwrap();
+    let lobules = variants
+        .iter()
+        .find(|v| v["properties"].get("centre").is_some())
+        .expect("lobules variant")["properties"]
+        .clone();
+    for (hole, default) in [("centre", 30.0), ("corner", 25.0)] {
+        let node = &lobules[hole];
+        let radius = &node["properties"]["radius_um"];
+        assert_eq!(radius["default"], serde_json::json!(default), "{hole}");
+        assert_eq!(radius["exclusiveMinimum"], serde_json::json!(0), "{hole}");
+        assert_eq!(node["required"], serde_json::json!(["tag"]), "{hole}");
+    }
+}
+
+fn result_meta(name: &str) -> Result<ResultMeta, String> {
+    let text = std::fs::read_to_string(data(name)).unwrap();
+    let meta: ResultMeta = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    meta.check().map_err(|e| e.to_string())?;
+    Ok(meta)
+}
+
+#[test]
+fn result_meta_round_trip() {
+    for name in ["result-meta-minimal.json", "result-meta-raster.json"] {
+        let meta = result_meta(name).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(&meta).unwrap(), original, "{name}");
+    }
+    let raster = result_meta("result-meta-raster.json")
+        .unwrap()
+        .raster
+        .unwrap();
+    assert_eq!(raster.levels, 3);
+    assert_eq!(raster.shapes[1], [130, 150]);
+}
+
+#[test]
+fn result_meta_rejects() {
+    for (name, word) in [
+        ("unknown-field", "extra"),
+        ("version", "result/2"),
+        ("written", "written"),
+        ("complete", "complete"),
+        ("times", "times"),
+        ("duplicate-field", "glucose"),
+        ("levels", "levels"),
+        ("shapes", "shapes"),
+        ("um-per-px", "um_per_px"),
+        ("tag-dim", "dim"),
+        ("duplicate-tag", "tissue"),
+        ("duplicate-cell-value", "protein"),
+        ("shape-zero", "shapes"),
+    ] {
+        let e = result_meta(&format!("result-meta-bad-{name}.json")).unwrap_err();
+        assert!(e.contains(word), "{name}: {e}");
+    }
+}
+
+#[test]
+fn result_schema_rejects_what_it_can_express() {
+    // Rules JSON Schema cannot state (uniqueness by key, cross-field rules) are only in `check`.
+    for name in ["unknown-field", "version", "levels", "um-per-px", "tag-dim"] {
+        let file = format!("result-meta-bad-{name}.json");
+        assert!(!schema_accepts(contracts::schema_result(), &file), "{name}");
+    }
+    for file in ["result-meta-minimal.json", "result-meta-raster.json"] {
+        assert!(schema_accepts(contracts::schema_result(), file), "{file}");
+    }
+}
+
+#[test]
+fn reserved_tag_names_are_refused() {
+    for name in ["depth", "_boundary_", "_regions_", "pde_floating"] {
+        assert!(contracts::RESERVED_TAGS.contains(&name), "{name}");
+    }
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(data(name)).unwrap()).unwrap()
+    };
+    for reserved in contracts::RESERVED_TAGS {
+        let mut p = read("polygons-minimal.geojson");
+        p["features"][0]["properties"]["tag"] = serde_json::json!(reserved);
+        let e = Polygons::from_value(p, &data("polygons-minimal.geojson"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(reserved) && e.contains("reserved"), "{e}");
+        let mut s = read("scene-lobules.json");
+        s["mesh"]["area_tag"] = serde_json::json!(reserved);
+        let e = Scene::from_value(s, &data("scene-lobules.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("area_tag") && e.contains("reserved"), "{e}");
+    }
+}
+
+/// `solver.linear_rtol`: 1e-10 by default, a number in (0, 1) otherwise; 0 and 1 are refused,
+/// naming the key. The default is not written back.
+#[test]
+fn linear_rtol_default_and_bounds() {
+    let study = Study::load(data("study-minimal.json")).unwrap();
+    assert_eq!(study.solver.linear_rtol, 1e-10);
+    assert_eq!(contracts::SolverOptions::default().linear_rtol, 1e-10);
+    assert!(
+        serde_json::to_value(&study.solver).unwrap()["linear_rtol"].is_null(),
+        "{:?}",
+        study.solver
+    );
+
+    let mut value = json("study-minimal.json");
+    value["solver"]["linear_rtol"] = serde_json::json!(1e-6);
+    let study = Study::from_value(value, &data("study-minimal.json")).unwrap();
+    assert_eq!(study.solver.linear_rtol, 1e-6);
+    assert_eq!(study.solver.petsc_options, "-ksp_type cg");
+    assert_eq!(
+        serde_json::to_value(&study.solver).unwrap()["linear_rtol"],
+        serde_json::json!(1e-6)
+    );
+
+    for rtol in [0.0, 1.0, -1e-6, 2.0] {
+        let mut value = json("study-minimal.json");
+        value["solver"]["linear_rtol"] = serde_json::json!(rtol);
+        let e = Study::from_value(value, &data("study-minimal.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("solver.linear_rtol"), "{rtol}: {e}");
+        assert!(e.contains("(0, 1)"), "{rtol}: {e}");
+    }
 }

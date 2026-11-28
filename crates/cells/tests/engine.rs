@@ -15,7 +15,8 @@ use std::sync::Arc;
 use ceed::Ceed;
 use cells::{BatchedCells, CellSetup, CellSolver, CellsError, EngineCells};
 use common::{
-    c_cache, ceed, finest, linear_spec, mesh, model, parameter, spt_spec, table, testdata,
+    c_cache, ceed, finest, linear_spec, mesh, model, oscillator_model, parameter, spt_spec, table,
+    testdata,
 };
 use contracts::{
     CellParameter, CellSolverKind, CellsSpec, Coefficient, MapSpec, Replace, Scene, SpeciesLink,
@@ -158,7 +159,6 @@ fn parameters_are_area_means() {
     assert!(total > 0);
     let means = child_means(&mesh, &fine, |x| x[0]);
     let centroids = centroids(&mesh, &ceed);
-    let numbering = mesh.levels()[0].cell_numbering().unwrap();
     assert_eq!(setup.parameters.len(), setup.cells.len());
     for (i, &c) in setup.cells.iter().enumerate() {
         let k = value(&setup, i, "k");
@@ -173,7 +173,7 @@ fn parameters_are_area_means() {
         assert!((value(&setup, i, "Vext") - porosity).abs() <= 1e-12);
         assert!((value(&setup, i, "Vli") - (1.0 - porosity)).abs() <= 1e-12);
         assert_eq!(setup.parameters[i].len(), 3, "{:?}", setup.parameters[i]);
-        assert_eq!(setup.global[i], i64::from(numbering[c]));
+        assert_eq!(setup.elements[i], mesh.element_ids()[c]);
         for axis in 0..2 {
             assert!((setup.centroids[i][axis] - centroids[c][axis]).abs() <= 1e-12);
         }
@@ -263,13 +263,17 @@ fn no_value_in_tissue_is_an_error() {
         "k",
         table("hole", &[[0.0, 0.0], [1.0, 1.0]]),
     )]);
+    let elements = p
+        .comm()
+        .sum_int(mesh.element_ids().len().try_into().unwrap())
+        .unwrap();
     match CellSetup::new(&fine, &mesh, &spec, &maps, &porosity) {
         Err(CellsError::Element {
-            cell,
+            element,
             centroid,
             message,
         }) => {
-            assert!(cell >= 0);
+            assert!(element < u64::try_from(elements).unwrap());
             let distance = (centroid[0] - 0.5).hypot(centroid[1] - 0.5);
             assert!(distance < 0.1 + 0.25, "{centroid:?}");
             assert!(message.contains("map 'hole'"), "{message}");
@@ -426,7 +430,7 @@ fn engine_cells_match_stepper() {
     assert!(setup.cells.len() >= n);
     setup.cells.truncate(n);
     setup.parameters.truncate(n);
-    setup.global.truncate(n);
+    setup.elements.truncate(n);
     setup.centroids.truncate(n);
     let sbml = model("spt_liver_cell.xml");
     let mut cells = EngineCells::new(&setup, &spec, &sbml).unwrap();
@@ -538,7 +542,10 @@ fn engine_cells_match_stepper() {
 }
 
 /// A cell model which fails on one process (a decay rate whose growth overflows) stops every
-/// process with the same error, naming the element; the cells are not advanced after it.
+/// process with the same error, naming the element; the cells are not advanced after it. The
+/// last cell of that process fails too: the error names the first, also where the balance of
+/// the work has another process advance the last (on 3 processes, the last of 359 cells goes to
+/// the first process, of 357).
 #[test]
 fn failure_on_one_process_stops_all() {
     c_cache();
@@ -564,26 +571,33 @@ fn failure_on_one_process_stops_all() {
     .unwrap();
     let failing = comm.size() - 1;
     if comm.rank() == failing {
-        for (id, value) in &mut setup.parameters[0] {
-            if id == "d" {
-                *value = -1e6;
+        let last = setup.parameters.len() - 1;
+        for i in [0, last] {
+            for (id, value) in &mut setup.parameters[i] {
+                if id == "d" {
+                    *value = -1e6;
+                }
             }
         }
     }
     let element = comm
         .max_int(if comm.rank() == failing {
-            setup.global[0].try_into().unwrap()
+            setup.elements[0].try_into().unwrap()
         } else {
             -1
         })
         .unwrap();
-    let element = i64::from(element);
+    let element = u64::try_from(element).unwrap();
     let mut cells = EngineCells::new(&setup, &spec, &model("linear_uptake.xml")).unwrap();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(0.0, 600.0, &mut blood) {
-        Err(CellsError::Element { cell, message, .. }) => {
+        Err(CellsError::Element {
+            element: id,
+            message,
+            ..
+        }) => {
             println!("{message}");
-            assert_eq!(cell, element, "{message}");
+            assert_eq!(id, element, "{message}");
             assert!(message.contains("600"), "{message}");
         }
         other => panic!("expected an error naming the element, got {other:?}"),
@@ -592,7 +606,7 @@ fn failure_on_one_process_stops_all() {
     let states = cells.states().to_vec();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(600.0, 1200.0, &mut blood) {
-        Err(CellsError::Element { cell, .. }) => assert_eq!(cell, element),
+        Err(CellsError::Element { element: id, .. }) => assert_eq!(id, element),
         other => panic!("expected the error again, got {other:?}"),
     }
     assert_eq!(cells.states(), states.as_slice());
@@ -667,6 +681,83 @@ fn cells_outlive_the_mesh() {
     let mut blood = vec![1.0; n];
     batched.advance(0.0, 600.0, &mut blood).unwrap();
     assert!(blood.iter().all(|b| b.is_finite() && *b < 1.0), "{blood:?}");
+}
+
+/// On 2 and 3 processes, the cells of the engine path advance alike with and without the
+/// balance of their work (`cells.balance`): the oscillator model on every coarse element of
+/// `lobule_toy`, its frequency a function of the centroid and 4 times higher on process 0, 3
+/// advances of 10 s: the states, the outputs and the blood of every cell bit for bit equal, and
+/// the steps and rejected steps of every advance, summed over the processes. The balance moved
+/// work: the steps of a process differ in some advance.
+#[test]
+fn balanced_cells_match_unbalanced() {
+    for ranks in [2, 3] {
+        test_support::parallel(ranks, &["balanced_cells_match_unbalanced"]);
+    }
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let sbml = oscillator_model();
+    let run = |balance: bool| {
+        let spec = CellsSpec {
+            areas: None,
+            balance,
+            ..linear_spec(vec![
+                parameter("k", Coefficient::Constant(0.1)),
+                parameter("w", Coefficient::Constant(1.0)),
+            ])
+        };
+        let mut setup = CellSetup::new(
+            &fine,
+            &mesh,
+            &spec,
+            &Maps::default(),
+            &Coefficient::Constant(0.2),
+        )
+        .unwrap();
+        let factor = if comm.rank() == 0 { 4.0 } else { 1.0 };
+        for (cell, [x, y]) in setup.parameters.iter_mut().zip(&setup.centroids) {
+            let w = factor * (0.5 + 0.4 * (0.01 * x + 0.02 * y).sin());
+            cell.iter_mut().find(|(id, _)| id == "w").unwrap().1 = w;
+        }
+        let mut cells = EngineCells::new(&setup, &spec, &sbml).unwrap();
+        let mut blood: Vec<f64> = setup
+            .centroids
+            .iter()
+            .map(|[x, _]| 1.0 + 0.001 * x)
+            .collect();
+        let local: Vec<(u64, u64)> = (0..3)
+            .map(|k| {
+                let (t0, t1) = (10.0 * k as f64, 10.0 * (k + 1) as f64);
+                let stats = cells.advance(t0, t1, &mut blood).unwrap();
+                (stats.steps, stats.rejected)
+            })
+            .collect();
+        let mut outputs = Vec::new();
+        cells.outputs(&mut outputs);
+        (local, cells.states().to_vec(), outputs, blood)
+    };
+    let (off, on) = (run(false), run(true));
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&off.1), bits(&on.1));
+    assert_eq!(bits(&off.2), bits(&on.2));
+    assert_eq!(bits(&off.3), bits(&on.3));
+    let sum = |x: u64| comm.sum_int(x.try_into().unwrap()).unwrap();
+    for (a, b) in off.0.iter().zip(&on.0) {
+        assert_eq!((sum(a.0), sum(a.1)), (sum(b.0), sum(b.1)));
+    }
+    let moved = off.0.iter().zip(&on.0).any(|(a, b)| a != b);
+    let moved = comm.max_int(moved.into()).unwrap() > 0;
+    println!(
+        "{} processes: work moved {moved}, {:?} against {:?}",
+        comm.size(),
+        on.0,
+        off.0
+    );
+    assert_eq!(moved, comm.size() > 1);
 }
 
 #[test]

@@ -13,9 +13,10 @@
 //! Only `-L` and `-l` of the pkg-config link line are used: `ceed.pc` carries the compile flag
 //! `-fopenmp-simd` among its link flags (`Libs.private`), which must not reach the linker.
 //!
-//! wasm32-wasip1 is not supported yet. It will link the static archive of `deps/install/wasi`
-//! (`pkg-config --static`), take the sysroot from wasi-sdk, and needs no `-fvisibility=default`
-//! (libCEED's headers carry visibility attributes; see `spike/petsc-wasm/diffusion/build.rs`).
+//! wasm32-wasip1 (`deps/install/wasi/env.sh`) links the static archive of libCEED
+//! (`pkg-config --static`), and bindgen parses the headers for that target with wasi-sdk's
+//! sysroot ([`wasi_sdk::wasi_c_flags`]) and `-fvisibility=default`, as petsc-sys does (libCEED's
+//! headers carry visibility attributes, so it is not needed, but harmless).
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -49,9 +50,15 @@ fn pkg_config(ceed_dir: &Path, args: &[&str]) -> String {
     run("pkg-config", &all, &[("PKG_CONFIG_PATH", pc_path)])
 }
 
-/// Links libCEED (shared library): the `-L` and `-l` flags of its link line.
-fn link_native(ceed_dir: &Path) {
-    for tok in pkg_config(ceed_dir, &["--libs"]).split_whitespace() {
+/// Links libCEED: the `-L` and `-l` flags of its link line, of the static archive (and what it
+/// needs) for wasm, else of the shared library.
+fn link(ceed_dir: &Path, wasm: bool) {
+    let args: &[&str] = if wasm {
+        &["--static", "--libs"]
+    } else {
+        &["--libs"]
+    };
+    for tok in pkg_config(ceed_dir, args).split_whitespace() {
         if let Some(dir) = tok.strip_prefix("-L") {
             println!("cargo:rustc-link-search=native={dir}");
         } else if let Some(lib) = tok.strip_prefix("-l") {
@@ -69,18 +76,20 @@ fn include_dirs_native(ceed_dir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String]) {
+fn generate_bindings(target: &str, sdk: &Path, include_dirs: &[String], wasm: bool) {
     // SAFETY: the build script is single threaded; clang-sys reads it when loading libclang.
     unsafe { env::set_var("LIBCLANG_PATH", sdk.join("lib")) };
     let clang = sdk.join("bin/clang");
     let resource_dir = run(clang.to_str().unwrap(), &["-print-resource-dir"], &[]);
-    let mut clang_args = vec![
-        format!("-resource-dir={}", resource_dir.trim()),
-        // wasi-sdk's libclang defaults to target wasm32-wasip1 and the wasi sysroot (bindgen only
-        // passes --target when cross compiling).
-        format!("--target={target}"),
-        "--sysroot=/".to_string(),
-    ];
+    let mut clang_args = vec![format!("-resource-dir={}", resource_dir.trim())];
+    if wasm {
+        clang_args.extend(wasi_sdk::wasi_c_flags(sdk));
+        clang_args.push("-fvisibility=default".to_string());
+    } else {
+        // wasi-sdk's libclang defaults to target wasm32-wasip1 and the wasi sysroot (bindgen
+        // only passes --target when cross compiling).
+        clang_args.extend([format!("--target={target}"), "--sysroot=/".to_string()]);
+    }
     clang_args.extend(include_dirs.iter().map(|d| format!("-I{d}")));
 
     let bindings = bindgen::Builder::default()
@@ -107,9 +116,11 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
 
     let target = env::var("TARGET").unwrap();
+    let wasm = target == wasi_sdk::WASI_TARGET;
     assert!(
-        !target.starts_with("wasm32"),
-        "ceed-sys: target {target} is not supported yet (see build.rs)"
+        wasm || !target.starts_with("wasm32"),
+        "ceed-sys: target {target} is not supported; of wasm targets {} is (see build.rs)",
+        wasi_sdk::WASI_TARGET
     );
     let ceed_dir = PathBuf::from(
         env::var("CEED_DIR").expect("CEED_DIR unset: source deps/install/<config>/env.sh"),
@@ -117,7 +128,7 @@ fn main() {
     let sdk = wasi_sdk::locate(env::var_os(wasi_sdk::VAR), env::var_os("HOME"))
         .unwrap_or_else(|e| panic!("{e}"));
 
-    link_native(&ceed_dir);
+    link(&ceed_dir, wasm);
     let include_dirs = include_dirs_native(&ceed_dir);
     // `DEP_CEED_INCLUDE` for the build scripts of dependents compiling C against libCEED (for
     // example QFunction sources).
@@ -126,5 +137,5 @@ fn main() {
         "cargo:include={}",
         joined.to_str().expect("utf-8 include directories")
     );
-    generate_bindings(&target, &sdk, &include_dirs);
+    generate_bindings(&target, &sdk, &include_dirs, wasm);
 }

@@ -39,6 +39,23 @@ pub fn ranks() -> usize {
     std::env::var(MPI_RANKS).map_or(1, |n| n.parse().expect("number of processes"))
 }
 
+/// `text`, a `summary.json`, without its wall times: `phases`, the last key, and the `seconds` of
+/// the cells.
+pub fn without_timings(text: &str) -> String {
+    let at = text.find(",\n  \"phases\": {").expect("phases last");
+    let mut kept = Vec::new();
+    let mut lines = text[..at].lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with("\"seconds\": {") {
+            // Up to the end of the object.
+            lines.find(|l| l.trim_start().starts_with('}'));
+            continue;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
 /// Runs each of `tests` of the current test binary under `mpiexec -n ranks`, one run per test,
 /// and panics unless every process of every run passes. Does nothing inside such a run, and is
 /// skipped (with a message) if there is no `mpiexec`.

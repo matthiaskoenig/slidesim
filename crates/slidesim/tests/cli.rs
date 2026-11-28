@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use common::{cells_by_centroid, points_by_position, relative_difference, vtu_array};
+use common::{cells_by_centroid, points_by_position, relative_difference, variant, vtu_array};
 use serde_json::Value;
 use test_support::{Mpiexec, Run, run_with_timeout};
 
@@ -56,6 +56,12 @@ fn slidesim(args: &[String]) -> Run {
     slidesim_with_env(args, &[])
 }
 
+/// Whether the stderr of an `mpiexec` run tells of `MPI_Abort` (Open MPI writes `MPI_ABORT was
+/// invoked`, MPICH `application called MPI_Abort`).
+fn aborted(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("mpi_abort")
+}
+
 /// The C compiler cache of the tests: in the target directory, not the user's cache.
 fn c_cache() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("sbmlsim-c-cache")
@@ -73,6 +79,11 @@ fn slidesim_with_env(args: &[String], env: &[(&str, &Path)]) -> Run {
 
 /// `slidesim` on `ranks` processes, or `None` without `mpiexec`.
 fn slidesim_parallel(ranks: usize, args: &[String]) -> Option<Run> {
+    slidesim_parallel_with_env(ranks, args, &[])
+}
+
+/// [`slidesim_parallel`] with the environment variables `env` (name, value).
+fn slidesim_parallel_with_env(ranks: usize, args: &[String], env: &[(&str, &Path)]) -> Option<Run> {
     let Some(mpiexec) = Mpiexec::find() else {
         eprintln!("skipped: no mpiexec");
         return None;
@@ -80,7 +91,8 @@ fn slidesim_parallel(ranks: usize, args: &[String]) -> Option<Run> {
     let mut cmd = mpiexec.command(ranks, env!("CARGO_BIN_EXE_slidesim"));
     cmd.args(args)
         .env_remove("LD_LIBRARY_PATH")
-        .env("SBMLSIM_C_CACHE", c_cache());
+        .env("SBMLSIM_C_CACHE", c_cache())
+        .envs(env.iter().copied());
     Some(finished(run_with_timeout(cmd, TIMEOUT)))
 }
 
@@ -425,6 +437,33 @@ fn island_reports_pressure_islands() {
     }
 }
 
+/// `summary.json` reports the tolerance of the linear solves of the transport: 1e-10 by default,
+/// `solver.linear_rtol` of the study, and `-ksp_rtol` of its PETSc options over it.
+#[test]
+fn summary_reports_linear_rtol() {
+    let dir = scratch("summary_reports_linear_rtol");
+    for (name, solver, expected) in [
+        ("default", serde_json::json!({}), 1e-10),
+        ("loose", serde_json::json!({"linear_rtol": 1e-6}), 1e-6),
+        (
+            "overridden",
+            serde_json::json!({"linear_rtol": 1e-6, "petsc_options": "-ksp_rtol 1e-8"}),
+            1e-8,
+        ),
+    ] {
+        let study = variant(&lobule_study(), &dir, name, |doc| doc["solver"] = solver);
+        let out = dir.join(name);
+        assert_success(&slidesim(&args(&study, &out, &[])));
+        let summary = summary_json(&out);
+        assert_eq!(
+            summary["solver"]["linear_rtol"].as_f64(),
+            Some(expected),
+            "{name}: {}",
+            summary["solver"]
+        );
+    }
+}
+
 /// The phases of a run in `summary.json`, the wall time of process 0 in each: together the time
 /// of the run until it writes the summary. (Not until the process ends: it then still destroys
 /// its objects and finalizes PETSc and MPI, about 0.1 s, which no phase can hold, and which would
@@ -653,6 +692,55 @@ fn unknown_tag_fails_cleanly() {
     }
 }
 
+/// Errors which every process meets end a run on two processes without `MPI_Abort`: each
+/// process prints the error and exits with 1. A study naming a map its scene lacks (the checks
+/// before anything is made) and a map which no process can read (agreed between the processes).
+#[test]
+fn errors_on_every_process_end_without_abort() {
+    let dir = scratch("errors_on_every_process_end_without_abort");
+    let toy = lobule_study().parent().unwrap().to_path_buf();
+    let mut scene: Value =
+        serde_json::from_str(&std::fs::read_to_string(toy.join("scene.json")).unwrap()).unwrap();
+    let mesh = std::path::absolute(toy.join(scene["mesh"]["path"].as_str().unwrap())).unwrap();
+    scene["mesh"]["path"] = Value::from(mesh.display().to_string());
+    // A map store without arrays: the scene names it, reading it fails.
+    std::fs::create_dir_all(dir.join("broken.zarr")).unwrap();
+    scene["maps"][0]["path"] = Value::from(dir.join("broken.zarr").display().to_string());
+    std::fs::write(dir.join("scene.json"), scene.to_string()).unwrap();
+    let study = |name: &str, edit: &dyn Fn(&mut Value)| {
+        let mut doc: Value =
+            serde_json::from_str(&std::fs::read_to_string(lobule_study()).unwrap()).unwrap();
+        doc["scene"] = Value::from(dir.join("scene.json").display().to_string());
+        edit(&mut doc);
+        let path = dir.join(name);
+        std::fs::write(&path, doc.to_string()).unwrap();
+        path
+    };
+    let unknown = study("unknown_map.json", &|doc| {
+        doc["perfusion"]["direction"]["map"] = Value::from("nope");
+    });
+    let unreadable = study("unreadable_map.json", &|_| {});
+    for (path, expected) in [
+        (unknown, "invalid study: "),
+        (unreadable, "cannot read the maps: "),
+    ] {
+        let Some(run) = slidesim_parallel(2, &args(&path, &dir.join("out"), &[])) else {
+            return;
+        };
+        assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+        for rank in 0..2 {
+            let prefix = format!("[rank {rank}] error: {expected}");
+            assert!(
+                run.stderr.lines().any(|l| l.starts_with(&prefix)),
+                "no '{prefix}': {}",
+                run.stderr
+            );
+        }
+        assert!(!aborted(&run.stderr), "{}", run.stderr);
+        assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    }
+}
+
 #[test]
 fn abort_keeps_the_monitor_output() {
     // Process 0 alone fails, at the end (it writes summary.json, here a directory): it ends every
@@ -857,15 +945,16 @@ fn cells_parallel_matches_one() {
     let dir = scratch("cells_parallel_matches_one");
     for solver in ["engine", "batched"] {
         let study = with_solver(&cells_study(), solver, &dir);
-        if !cells_parallel_matches_one_on(&study, &dir.join(solver)) {
+        if !cells_parallel_matches_one_on(&study, &dir.join(solver), 0.0) {
             return;
         }
     }
 }
 
 /// [`cells_parallel_matches_one`] of `study`, with the outputs in `dir`; `false` without
-/// `mpiexec`.
-fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
+/// `mpiexec`. The steps and the rejected steps of the cells may differ from those of one process
+/// by `steps_tolerance` times the steps (0: the same counts).
+fn cells_parallel_matches_one_on(study: &Path, dir: &Path, steps_tolerance: f64) -> bool {
     let serial = dir.join("serial");
     assert_success(&slidesim(&args(study, &serial, &[])));
     let last = 3;
@@ -891,8 +980,17 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
             &balances(&serial, "substrate"),
             &balances(&parallel, "substrate"),
         );
-        for key in ["count", "steps", "rejected"] {
-            assert_eq!(one["cells"][key], many["cells"][key], "{key}");
+        assert_eq!(one["cells"]["count"], many["cells"]["count"]);
+        let steps = one["cells"]["steps"].as_u64().unwrap() as f64;
+        for key in ["steps", "rejected"] {
+            let (a, b) = (
+                one["cells"][key].as_u64().unwrap(),
+                many["cells"][key].as_u64().unwrap(),
+            );
+            assert!(
+                a.abs_diff(b) as f64 <= steps_tolerance * steps,
+                "{key}: {a} against {b} of {steps} steps"
+            );
         }
         // The fields, point by point.
         let path = |out: &Path| out.join(format!("substrate_{last}.vtu"));
@@ -912,15 +1010,19 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
         );
         assert_eq!(a.len(), b.len());
         let mut cells = 0.0_f64;
+        let mut columns = Vec::new();
         for k in 0..cell_values.len() {
             assert!(a.iter().zip(&b).all(|(x, y)| x.0 == y.0));
             let column = |c: &[([i64; 2], Vec<f64>)]| c.iter().map(|x| x.1[k]).collect::<Vec<_>>();
-            cells = cells.max(relative_difference(&column(&a), &column(&b)));
+            let difference = relative_difference(&column(&a), &column(&b));
+            columns.push(format!("{} {difference:e}", cell_values[k]));
+            cells = cells.max(difference);
         }
         eprintln!(
             "{}: relative differences, {ranks} processes against 1: integrals {largest:e}, \
-             mass_balance {balance:e}, field {fields:e}, cells {cells:e}",
-            study.display()
+             mass_balance {balance:e}, field {fields:e}, cells {cells:e} ({})",
+            study.display(),
+            columns.join(", ")
         );
         assert!(largest < 1e-10, "{largest:e}");
         assert!(balance < 1e-10, "{balance:e}");
@@ -928,6 +1030,48 @@ fn cells_parallel_matches_one_on(study: &Path, dir: &Path) -> bool {
         assert!(cells < 1e-10, "{cells:e}");
     }
     true
+}
+
+/// On 3 processes with an empty cache of compiled models, each library of the cell model is
+/// compiled once, by one process, which the others load from the cache: one compilation of the
+/// model on the engine path, two on the batched path (the model and its QFunction). `CC` is a
+/// script which logs its arguments and calls the compiler; each process asks it for its version
+/// and its predefined macros (the key of the cache), which compile nothing.
+#[test]
+fn compile_once_on_cold_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("compile_once_on_cold_cache");
+    let log = dir.join("cc.log");
+    let cc = dir.join("cc.sh");
+    let real = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    std::fs::write(
+        &cc,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec {real} \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (solver, libraries) in [("engine", 1), ("batched", 2)] {
+        let study = with_solver(&cells_study(), solver, &dir);
+        let cache = dir.join(format!("cache_{solver}"));
+        let _ = std::fs::remove_file(&log);
+        let out = dir.join(solver);
+        let env = [("CC", cc.as_path()), ("SBMLSIM_C_CACHE", cache.as_path())];
+        let Some(run) = slidesim_parallel_with_env(3, &args(&study, &out, &[]), &env) else {
+            return;
+        };
+        assert_success(&run);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let compilations: Vec<&str> = text.lines().filter(|l| l.contains(" -o ")).collect();
+        assert_eq!(
+            compilations.len(),
+            libraries,
+            "{solver}: {} compilations:\n{text}",
+            compilations.len()
+        );
+    }
 }
 
 /// Without a C compiler for the cell model, the run fails at the start, before anything is
@@ -993,4 +1137,490 @@ fn spt_toy_runs() {
     }
     assert!(started.is_some(), "no necrosis");
     assert!(summary["cells"]["amounts"]["T"].as_array().is_some());
+}
+
+/// The file `name` of `testdata/studies/lobules`, the studies on the meshes slidesim generates.
+fn lobules(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/lobules")
+        .join(name)
+}
+
+/// `slidesim mesh <scene> --out <out>`.
+fn mesh_args(scene: &Path, out: &Path) -> Vec<String> {
+    vec![
+        "mesh".to_string(),
+        scene.display().to_string(),
+        "--out".to_string(),
+        out.display().to_string(),
+    ]
+}
+
+/// `slidesim mesh` of the lobule scene: the mesh as JSON (a `TaggedMesh` with the tags of the
+/// scene), as VTU (a cell array per area tag) and its quality (also in one line on stdout).
+#[test]
+fn mesh_command_writes_mesh_and_quality() {
+    let out = scratch("mesh_command_writes_mesh_and_quality").join("out");
+    let run = slidesim(&mesh_args(&lobules("scene.json"), &out));
+    assert_success(&run);
+    for file in ["mesh.json", "mesh.vtu", "quality.json"] {
+        assert!(out.join(file).is_file(), "{file}");
+    }
+    let quality: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap()).unwrap();
+    let min_angle = quality["min_angle_deg"].as_f64().unwrap();
+    assert!(min_angle >= 20.0, "{quality}");
+    let mesh: mesher::TaggedMesh =
+        serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+    let mut names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["central_wall", "field_cut", "portal_wall", "tissue"]
+    );
+    assert_eq!(
+        quality["triangles"].as_u64().unwrap() as usize,
+        mesh.triangles.len()
+    );
+    // One cell array per area tag, its value in every triangle.
+    let tissue = vtu_array(&out.join("mesh.vtu"), "tissue");
+    assert_eq!(tissue.len(), mesh.triangles.len());
+    assert!(tissue.iter().all(|&v| v == 1.0), "{:?}", &tissue[..10]);
+    assert!(run.stdout.contains("min angle"), "{}", run.stdout);
+
+    // A polygons scene: the tags of the polygons file, the area tags in the VTU.
+    let scene = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/contracts/scene-polygons-two-areas.json");
+    let out = out.with_file_name("polygons");
+    assert_success(&slidesim(&mesh_args(&scene, &out)));
+    let mesh: mesher::TaggedMesh =
+        serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+    let names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "border",
+            "divider",
+            "hole_wall",
+            "interface",
+            "lower",
+            "upper"
+        ]
+    );
+    let quality: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap()).unwrap();
+    assert!(
+        quality["min_angle_deg"].as_f64().unwrap() >= 20.0,
+        "{quality}"
+    );
+    let (lower, upper) = (
+        vtu_array(&out.join("mesh.vtu"), "lower"),
+        vtu_array(&out.join("mesh.vtu"), "upper"),
+    );
+    assert_eq!(lower.len(), mesh.triangles.len());
+    // Every triangle in exactly one area: value 2 in `lower`, 1 in `upper`, NaN in the other.
+    for (l, u) in lower.iter().zip(&upper) {
+        assert!(
+            (*l == 2.0 && u.is_nan()) || (l.is_nan() && *u == 1.0),
+            "{l} {u}"
+        );
+    }
+}
+
+/// `slidesim mesh` meshes on one process: on two it is a usage error, and no process waits.
+#[test]
+fn mesh_command_on_two_processes_is_a_usage_error() {
+    let out = scratch("mesh_command_on_two_processes_is_a_usage_error").join("out");
+    let Some(run) = slidesim_parallel(2, &mesh_args(&lobules("scene.json"), &out)) else {
+        return;
+    };
+    assert!(!run.status.unwrap().success(), "{}", run.stderr);
+    assert!(run.stderr.contains("one process"), "{}", run.stderr);
+    assert!(!out.exists());
+}
+
+/// The SPT study of the generated lobule on the batched path, shortened to 30 min: it runs, and
+/// every mass balance closes. The linear solves to 1e-10, not to the study's 1e-6: the residual
+/// of a balance scales with the tolerance, and 1e-8 of its largest term is the bound at 1e-10
+/// (at 1e-6 the balance of `P`, whose terms are small beside its storage, closes to 6e-7).
+#[test]
+fn lobule_spt_runs() {
+    let dir = scratch("lobule_spt_runs");
+    let study = variant(&lobules("spt_batched.study.json"), &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(1800.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 900.0, 1800.0]);
+        doc["solver"]["linear_rtol"] = Value::from(1e-10);
+    });
+    let out = dir.join("out");
+    let run = slidesim(&args(&study, &out, &[]));
+    assert_success(&run);
+    assert!(run.stdout.contains("min angle"), "{}", run.stdout);
+    for field in ["S", "P"] {
+        let balances = balances(&out, field);
+        assert_eq!(balances.len(), 3);
+        assert!(balances[0].is_none());
+        for terms in balances.iter().flatten() {
+            assert_closes(terms);
+        }
+    }
+    let summary = summary_json(&out);
+    assert!(
+        summary["cells"]["count"].as_u64().unwrap() > 1000,
+        "{summary}"
+    );
+}
+
+/// The real-slide fields of `testdata/studies/slide_fields`: slideviz's tagged polygons around a
+/// central vein with portal fields, one control and two dosed slides.
+const SLIDE_FIELDS: [&str; 3] = ["000mg_m1", "281mg_m1", "500mg_m1"];
+
+/// The file `name` of the real-slide field `field` (see [`SLIDE_FIELDS`]).
+fn slide_field(field: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/slide_fields")
+        .join(field)
+        .join(name)
+}
+
+/// The area of the area features of a polygons/1 file: each polygon's exterior ring less its
+/// holes (shoelace).
+fn polygons_area(path: &Path) -> f64 {
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let ring_area = |ring: &Value| {
+        let points: Vec<[f64; 2]> = ring
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| [p[0].as_f64().unwrap(), p[1].as_f64().unwrap()])
+            .collect();
+        let twice: f64 = points
+            .windows(2)
+            .map(|w| w[0][0] * w[1][1] - w[1][0] * w[0][1])
+            .sum();
+        (twice / 2.0).abs()
+    };
+    let polygon_area = |rings: &Value| {
+        let rings = rings.as_array().unwrap();
+        ring_area(&rings[0]) - rings[1..].iter().map(ring_area).sum::<f64>()
+    };
+    doc["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["properties"]["kind"] == "area")
+        .map(|f| {
+            let geometry = &f["geometry"];
+            match geometry["type"].as_str().unwrap() {
+                "Polygon" => polygon_area(&geometry["coordinates"]),
+                "MultiPolygon" => geometry["coordinates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(polygon_area)
+                    .sum(),
+                other => panic!("{other} is no area geometry"),
+            }
+        })
+        .sum()
+}
+
+/// `slidesim mesh` of each real-slide field: the mesh has portal and central walls, covers the
+/// polygons exactly (the area of its triangles is that of the area features), and meets the
+/// quality bounds of the mesher (min angle 20 deg, SICN 0.4, edge length / size within [0.4,
+/// 2.0]): the polygons keep pixel steps of 1.77 um under 5 um triangles, which the cap of the
+/// size by the segment lengths resolves (measured: min angle 22.4 deg, SICN 0.50, edge ratios
+/// 0.41 to 1.67).
+#[test]
+fn slide_field_examples_mesh() {
+    let dir = scratch("slide_field_examples_mesh");
+    for field in SLIDE_FIELDS {
+        let out = dir.join(field);
+        let run = slidesim(&mesh_args(&slide_field(field, "scene.json"), &out));
+        assert_success(&run);
+        let mesh: mesher::TaggedMesh =
+            serde_json::from_str(&std::fs::read_to_string(out.join("mesh.json")).unwrap()).unwrap();
+        let names: Vec<&str> = mesh.tags.iter().map(|t| t.name.as_str()).collect();
+        for wall in ["portal_wall", "central_wall"] {
+            assert!(names.contains(&wall), "{field}: {names:?}");
+        }
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|k| mesh.vertices[k as usize]);
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum();
+        let expected = polygons_area(&slide_field(field, "polygons.geojson"));
+        assert!(
+            relative_difference(&[area], &[expected]) <= 1e-9,
+            "{field}: {area} against {expected}"
+        );
+        let quality: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("quality.json")).unwrap())
+                .unwrap();
+        let number = |key: &str| quality[key].as_f64().unwrap();
+        assert!(number("min_angle_deg") >= 20.0, "{field}: {quality}");
+        assert!(number("min_sicn") >= 0.4, "{field}: {quality}");
+        let ratio = &quality["edge_ratio"];
+        let (lo, hi) = (ratio[0].as_f64().unwrap(), ratio[1].as_f64().unwrap());
+        assert!(lo >= 0.4 && hi <= 2.0, "{field}: {quality}");
+    }
+}
+
+/// The SPT study of the dosed field `281mg_m1` on the batched path, shortened to 10 min: it
+/// runs, and every mass balance closes (the linear solves to 1e-10, as in [`lobule_spt_runs`]).
+#[test]
+fn slide_field_spt_runs() {
+    let dir = scratch("slide_field_spt_runs");
+    let study = variant(
+        &slide_field("281mg_m1", "spt_batched.study.json"),
+        &dir,
+        "short",
+        |doc| {
+            doc["time"]["end"] = Value::from(600.0);
+            doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0]);
+            doc["solver"]["linear_rtol"] = Value::from(1e-10);
+        },
+    );
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&study, &out, &[])));
+    for field in ["S", "P"] {
+        let balances = balances(&out, field);
+        assert_eq!(balances.len(), 3);
+        assert!(balances[0].is_none());
+        for terms in balances.iter().flatten() {
+            assert_closes(terms);
+        }
+    }
+}
+
+/// [`cells_parallel_matches_one`] on the mesh slidesim generates for one lobule (process 0
+/// meshes, every process gets its part), with the linear study shortened to 15 min, the linear
+/// solves to 1e-12 and the cells to 1e-12 (rtol; atol 1e-16).
+///
+/// The tolerances are those of an agreement to 1e-10. With the linear solves to 1e-10 the
+/// fields of other partitions differ by 5e-11, which the cells carry to 1.4e-10 in `A` and
+/// `uptake_rate`. And a cell whose step control decides otherwise (inputs which differ in the
+/// last digits; a few of millions of steps) differs by its integration error: 4e-10 in `A` at
+/// the study's rtol 1e-8, 9e-11 at 1e-11. So the counts of the steps and of the rejected steps
+/// may differ by 1e-4 of the steps (measured: up to 76 of 4.4 million).
+#[test]
+fn cells_parallel_matches_one_on_generated_lobule() {
+    let dir = scratch("cells_parallel_matches_one_on_generated_lobule");
+    let study = variant(&lobules("linear.study.json"), &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(900.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 300.0, 600.0, 900.0]);
+        doc["solver"] = serde_json::json!({"linear_rtol": 1e-12});
+        doc["cells"]["rtol"] = Value::from(1e-12);
+        doc["cells"]["atol"] = Value::from(1e-16);
+    });
+    // `false` without mpiexec: skipped, as the run says.
+    let _ = cells_parallel_matches_one_on(&study, &dir, 1e-4);
+}
+
+/// A polygons scene which the mesher rejects (a ring crossing itself) on two processes: process
+/// 0 meshes alone, and every process ends with exit code 1 and the error, which names the
+/// polygons file and the crossing; none waits for another.
+#[test]
+fn mesher_failure_on_process_0_stops_all() {
+    let dir = scratch("mesher_failure_on_process_0_stops_all");
+    let contracts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/contracts");
+    let scene = contracts.join("scene-polygons-self-intersecting.json");
+    let study = dir.join("study.json");
+    let doc = serde_json::json!({
+        "version": "study/1",
+        "scene": scene.display().to_string(),
+        "fields": [{
+            "id": "u", "diffusion": 1.0, "decay": 0.0, "source": 0.0, "initial": 0.0,
+            "boundaries": [{"tag": "section_edge", "dirichlet": 1.0}]
+        }],
+        "time": {"end": 1.0, "dt": 0.5, "outputs": [1.0]}
+    });
+    std::fs::write(&study, doc.to_string()).unwrap();
+    let out = dir.join("out");
+    let Some(run) = slidesim_parallel(2, &args(&study, &out, &[])) else {
+        return;
+    };
+    assert_eq!(run.status.unwrap().code(), Some(1), "{}", run.stderr);
+    let file = std::path::absolute(contracts.join("polygons-self-intersecting.geojson")).unwrap();
+    for rank in 0..2 {
+        let line = run
+            .stderr
+            .lines()
+            .find(|l| l.starts_with(&format!("[rank {rank}] error:")))
+            .unwrap_or_else(|| panic!("no error of rank {rank}: {}", run.stderr));
+        assert!(line.contains(&file.display().to_string()), "{line}");
+        assert!(line.contains("cross at (50, 50) um"), "{line}");
+    }
+    assert!(!run.stderr.contains("panicked"), "{}", run.stderr);
+    assert!(!aborted(&run.stderr), "{}", run.stderr);
+}
+
+/// A study with `result.raster` writes the raster pyramid into `result.zarr`; one without it
+/// writes none, and a raster too large for the mesh is refused by name of the option.
+#[test]
+fn run_writes_the_raster_when_asked() {
+    let dir = scratch("run_writes_the_raster_when_asked");
+    let with = variant(&lobule_study(), &dir, "raster", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 10.0, "levels": 3}});
+    });
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&with, &out, &[])));
+    let data = simulation::read_result(&out.join(simulation::RESULT_STORE)).unwrap();
+    let raster = data.meta.raster.expect("raster attributes");
+    assert_eq!((raster.um_per_px, raster.levels), (10.0, 3));
+    assert_eq!(raster.shapes.len(), 3);
+    let (id, levels) = &data.rasters[0];
+    assert_eq!(id, "sucrose");
+    let [rows, cols] = raster.shapes[0];
+    let last = data.meta.written - 1;
+    let level0 = &levels[0][last * (rows * cols) as usize..];
+    assert!(level0.iter().any(|v| v.is_finite()) && level0.iter().any(|v| v.is_nan()));
+    let huge = variant(&lobule_study(), &dir, "huge", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 1e-5, "levels": 1}});
+    });
+    let run = slidesim(&args(&huge, &dir.join("huge_out"), &[]));
+    assert!(!run.status.unwrap().success(), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("result.raster.um_per_px"),
+        "{}",
+        run.stderr
+    );
+    let plain = dir.join("plain");
+    assert_success(&slidesim(&args(&lobule_study(), &plain, &[])));
+    assert!(!plain.join(simulation::RESULT_STORE).join("raster").exists());
+}
+
+/// The files of the directory `dir` with their contents, by name.
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(d).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path.strip_prefix(dir).unwrap().display().to_string();
+                files.insert(name, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// A raster beyond the cap is refused by name of the option before anything is written or
+/// removed: the outputs of an earlier run in `--out` stay as they were, and no flow is written.
+#[test]
+fn refused_raster_leaves_the_output_untouched() {
+    let dir = scratch("refused_raster_leaves_the_output_untouched");
+    let out = dir.join("out");
+    let spt = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/cells_toy/spt.study.json");
+    let first = variant(&spt, &dir, "first", |doc| {
+        doc["time"]["end"] = Value::from(60.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 60.0]);
+    });
+    assert_success(&slidesim(&args(&first, &out, &[])));
+    std::fs::remove_file(out.join("pressure.vtu")).ok();
+    let before = tree(&out);
+    assert!(before.contains_key("S_1.vtu") && before.keys().any(|k| k.starts_with("result.zarr")));
+    let huge = variant(&lobule_study(), &dir, "huge", |doc| {
+        doc["result"] = serde_json::json!({"raster": {"um_per_px": 1e-5, "levels": 1}});
+    });
+    let run = slidesim(&args(&huge, &out, &[]));
+    assert!(!run.status.unwrap().success(), "{}", run.stdout);
+    assert!(
+        run.stderr.contains("result.raster.um_per_px"),
+        "{}",
+        run.stderr
+    );
+    assert!(tree(&out) == before, "the output directory changed");
+    assert!(!out.join("pressure.vtu").exists());
+    // On two processes every process refuses, and nothing changes either.
+    if let Some(run) = slidesim_parallel(2, &args(&huge, &out, &[])) {
+        assert!(!run.status.unwrap().success(), "{}", run.stdout);
+        assert!(
+            run.stderr.contains("result.raster.um_per_px"),
+            "{}",
+            run.stderr
+        );
+        assert!(
+            tree(&out) == before,
+            "the output directory changed on 2 processes"
+        );
+    }
+}
+
+/// A run removes the earlier `result.zarr` with the earlier VTU files, so a run which fails
+/// after that and before it makes its own store (here the tag `__x` of the mesh, which cannot
+/// name an array) leaves no earlier store, marked complete, beside the new files.
+#[test]
+fn earlier_store_goes_with_the_earlier_outputs() {
+    let dir = scratch("earlier_store_goes_with_the_earlier_outputs");
+    let out = dir.join("out");
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    let store = out.join(simulation::RESULT_STORE);
+    assert!(store.is_dir());
+    let lobule = lobule_study();
+    let testdata = lobule.parent().unwrap().join("../..");
+    let msh = std::fs::read_to_string(testdata.join("meshes/lobule_toy.msh")).unwrap();
+    assert!(msh.contains("\"section_edge\""));
+    let mesh = dir.join("bad_tag.msh");
+    std::fs::write(&mesh, msh.replace("\"section_edge\"", "\"__x\"")).unwrap();
+    let mut scene: Value = serde_json::from_str(
+        &std::fs::read_to_string(lobule.with_file_name("scene.json")).unwrap(),
+    )
+    .unwrap();
+    scene["mesh"]["path"] = Value::from(mesh.display().to_string());
+    scene["maps"][0]["path"] =
+        Value::from(lobule.with_file_name("zonation.zarr").display().to_string());
+    let scene_path = dir.join("scene.json");
+    std::fs::write(&scene_path, scene.to_string()).unwrap();
+    let failing = variant(&lobule, &dir, "failing", |doc| {
+        doc["scene"] = Value::from(scene_path.display().to_string());
+    });
+    let run = slidesim(&args(&failing, &out, &[]));
+    assert!(!run.status.unwrap().success());
+    assert!(run.stderr.contains("__x"), "{}", run.stderr);
+    assert!(!store.exists(), "the earlier store is still there");
+}
+
+/// `result.zarr` of an earlier run in the output directory is replaced whole: `lobule_toy` (the
+/// field `sucrose`) and then the SPT cells on `cells_toy` (the fields `S` and `P`) into one
+/// `--out` leave the store of the second run alone, without `fields/sucrose`. The root
+/// attributes name the files of the run by their file names.
+#[test]
+fn earlier_result_is_replaced() {
+    let dir = scratch("earlier_result_is_replaced");
+    let out = dir.join("out");
+    let store = out.join(simulation::RESULT_STORE);
+    assert_success(&slidesim(&args(&lobule_study(), &out, &[])));
+    assert!(store.join("fields/sucrose").is_dir());
+    let first = simulation::read_result(&store).unwrap();
+    assert_eq!(first.meta.study, "study.json");
+    assert!(first.meta.complete);
+    let spt = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/studies/cells_toy/spt.study.json");
+    let short = variant(&spt, &dir, "short", |doc| {
+        doc["time"]["end"] = Value::from(60.0);
+        doc["time"]["outputs"] = serde_json::json!([0.0, 60.0]);
+    });
+    assert_success(&slidesim(&args(&short, &out, &[])));
+    let mut fields: Vec<String> = std::fs::read_dir(store.join("fields"))
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    fields.sort();
+    assert_eq!(fields, ["P", "S"]);
+    let data = simulation::read_result(&store).unwrap();
+    let ids: Vec<&str> = data.meta.fields.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["S", "P"]);
+    assert_eq!(data.meta.study, "short.study.json");
+    assert_eq!(data.meta.scene, "scene.json");
+    assert_eq!((data.meta.written, data.meta.complete), (2, true));
+    assert!(!data.cell_elements.is_empty());
 }

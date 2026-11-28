@@ -1,0 +1,16 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {"length": "um"},
+  "mesh": {
+    "format": "polygons",
+    "path": "polygons-two-areas.geojson",
+    "size": {
+      "min_um": 2.0,
+      "max_um": 8.0,
+      "dist_min_um": 4.0,
+      "dist_max_um": 40.0,
+      "walls": ["hole_wall"]
+    }
+  }
+}

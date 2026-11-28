@@ -18,8 +18,70 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bundle:
+    # The browser build of the lobule demo (scripts/wasm/build.sh --browser, then bundle.sh):
+    # slidesim.wasm against the wasi dependencies, which the job wasm of ci.yml caches under the
+    # same key (built here on a miss), and sbmlsim-core's modules. Nothing of it is committed.
+    name: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config python3 cmake m4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install wasi-sdk
+        run: |
+          . deps/versions.env
+          WASI_SDK_PATH="$RUNNER_TEMP/wasi-sdk"
+          archive="$RUNNER_TEMP/wasi-sdk.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          echo "$WASI_SDK_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$WASI_SDK_PATH"
+          tar xzf "$archive" --strip-components=1 -C "$WASI_SDK_PATH"
+          rm "$archive"
+          echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
+      - name: Dependencies cache keys
+        # As the job wasm of ci.yml computes them.
+        id: deps-key
+        run: |
+          versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
+          scripts="${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}"
+          echo "wasi=deps-wasi-$(uname -m)-$versions-$scripts" >> "$GITHUB_OUTPUT"
+          echo "sbmlsim-js=sbmlsim-js-$(. deps/versions.env && echo "$SBMLSIM_CORE_KERNEL_REV")" >> "$GITHUB_OUTPUT"
+      - name: Cache wasi dependencies
+        id: wasi-cache
+        uses: actions/cache@v5
+        with:
+          path: deps/install/wasi
+          key: ${{ steps.deps-key.outputs.wasi }}
+      - name: Build wasi dependencies
+        if: steps.wasi-cache.outputs.cache-hit != 'true'
+        run: scripts/deps/build-wasi.sh
+      - name: Cache sbmlsim-core's compiler and mathlib
+        uses: actions/cache@v5
+        with:
+          path: deps/install/sbmlsim-js
+          key: ${{ steps.deps-key.outputs.sbmlsim-js }}
+      - name: Build
+        run: scripts/wasm/build.sh --browser
+      - name: Bundle the lobule demo
+        run: scripts/wasm/bundle.sh bundle/lobule
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lobule-demo
+          path: bundle/lobule
+          retention-days: 7
+
   docs:
     name: docs
+    needs: bundle
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -35,6 +97,12 @@ jobs:
         # the pages are markdown of docs/ and need nothing of the build of the crates;
         # --strict fails on any warning, such as a link to a page that does not exist
         run: uvx --from zensical==0.1.3 zensical build --clean --strict
+      - name: Add the browser build to the lobule demo
+        # beside the page of docs/demo/lobule, which the build copied to site/demo/lobule
+        uses: actions/download-artifact@v7
+        with:
+          name: lobule-demo
+          path: site/demo/lobule
       - name: Upload the site
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5

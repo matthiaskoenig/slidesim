@@ -34,9 +34,9 @@ pub struct CellSetup {
     /// For each cell, its parameters as changes of the model's initial values: the parameters
     /// of the spec in their order, then the blood and the cell volume.
     pub parameters: Vec<Vec<(String, f64)>>,
-    /// For each cell, the global number of its element on the coarse level (the same for any
-    /// number of processes only up to the partition).
-    pub global: Vec<i64>,
+    /// For each cell, the element id of its element ([`Mesh::element_ids`]): the same on any
+    /// number of processes.
+    pub elements: Vec<u64>,
     /// For each cell, the centroid of its element (um).
     pub centroids: Vec<[f64; 2]>,
     /// The communicator of the mesh, for errors on every process: owned, so that it outlives
@@ -100,16 +100,7 @@ impl CellSetup {
             }
         }
         let cells: Vec<usize> = (0..n_coarse).filter(|&c| !tissue[c].is_empty()).collect();
-        let numbering = mesh.levels()[0].cell_numbering()?;
-        let global: Vec<i64> = cells
-            .iter()
-            .map(|&c| {
-                let g = i64::from(numbering[c]);
-                // Without overlap every local cell is owned; a cell of another process would
-                // be `-(g + 1)`.
-                if g >= 0 { g } else { -(g + 1) }
-            })
-            .collect();
+        let elements: Vec<u64> = cells.iter().map(|&c| mesh.element_ids()[c]).collect();
         let centroids: Vec<[f64; 2]> = cells
             .iter()
             .map(|&c| [sums[c][0] / sums[c][2], sums[c][1] / sums[c][2]])
@@ -119,7 +110,7 @@ impl CellSetup {
             q,
             maps,
             tissue: cells.iter().map(|&c| tissue[c].as_slice()).collect(),
-            global: &global,
+            elements: &elements,
             centroids: &centroids,
         };
 
@@ -161,7 +152,7 @@ impl CellSetup {
         Ok(CellSetup {
             cells,
             parameters,
-            global,
+            elements,
             centroids,
             comm: comm.duplicate()?,
         })
@@ -182,12 +173,12 @@ impl CellSetup {
         let n = self.cells.len();
         let lengths = [
             self.parameters.len(),
-            self.global.len(),
+            self.elements.len(),
             self.centroids.len(),
         ];
         if lengths.iter().any(|&l| l != n) {
             return Err(CellsError::Invalid(format!(
-                "a setup of {n} cells with {} parameter lists, {} global numbers and {} \
+                "a setup of {n} cells with {} parameter lists, {} element ids and {} \
                  centroids",
                 lengths[0], lengths[1], lengths[2]
             )));
@@ -225,7 +216,7 @@ struct Means<'a> {
     maps: &'a Maps,
     /// The finest local cells of each cell's tissue.
     tissue: Vec<&'a [usize]>,
-    global: &'a [i64],
+    elements: &'a [u64],
     centroids: &'a [[f64; 2]],
 }
 
@@ -286,7 +277,7 @@ impl Means<'_> {
     /// The error `message` of cell `i`.
     fn element(&self, i: usize, message: String) -> CellsError {
         CellsError::Element {
-            cell: self.global[i],
+            element: self.elements[i],
             centroid: self.centroids[i],
             message,
         }

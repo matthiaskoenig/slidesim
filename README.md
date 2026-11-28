@@ -18,8 +18,8 @@ on real slides.
 - An MPI with `mpicc` and `mpiexec`, and a C compiler behind `mpicc`: Open MPI
   (`apt install openmpi-bin libopenmpi-dev`) or MPICH (`apt install mpich libmpich-dev`); CI tests
   both. Not the MPICH package of Ubuntu 24.04, whose `mpiexec` runs every process alone.
-- For the native dependencies: git, curl, make, cmake, m4, python3 and pkg-config. bison and
-  flex are built from pinned tarballs.
+- For the native dependencies: git, curl, make, cmake, m4, python3, pkg-config and a C++
+  compiler (Mmg's CMake project enables C++). bison and flex are built from pinned tarballs.
 - [wasi-sdk](https://github.com/WebAssembly/wasi-sdk), the version `WASI_SDK_VERSION` of
   `deps/versions.env`: bindgen uses its clang and libclang for the bindings of every target,
   native ones included. It is looked for in `~/opt/wasi-sdk`; set `WASI_SDK_PATH` to its
@@ -36,10 +36,10 @@ on real slides.
 
 ## Build
 
-Build the pinned native dependencies (PETSc with PT-Scotch and libCEED, versions and sha256 in
-`deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging checks, for the tests and CI),
-`native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3 -march=native`, without PETSc's
-debugging), then slidesim against them:
+Build the pinned native dependencies (PETSc with PT-Scotch and Mmg, and libCEED, versions and
+sha256 in `deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging
+checks, for the tests and CI), `native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3
+-march=native`, without PETSc's debugging), then slidesim against them:
 
 ```bash
 scripts/deps/build-native.sh check   # or: debug, opt
@@ -48,8 +48,8 @@ cargo build --workspace              # with native-opt: cargo build --release
 ```
 
 The `slidesim` binary has an absolute RUNPATH into the installation it was built against
-(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED): it runs without `env.sh`,
-but not after `deps/install` is moved or removed.
+(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of
+`libpetsc.so`): it runs without `env.sh`, but not after `deps/install` is moved or removed.
 
 ## Test
 
@@ -69,8 +69,10 @@ target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out
 mpiexec -n 2 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out
 ```
 
-`out` gets `<field id>_<index>.vtu` per output time (for ParaView) and `summary.json`; outputs of
-an earlier run there are removed first. `slidesim run --help` describes them.
+`out` gets `<field id>_<index>.vtu` per output time (for ParaView), `summary.json` and
+`result.zarr` (the store `result/1` for viewers: the mesh and every field and cell value per output
+time, Zarr v3); outputs of an earlier run there are removed first. `slidesim run --help`
+describes them.
 
 `summary.json` has, per field and output time, the mass balance over the interval since the
 output time before (`mass_balance`, each term its mean rate there: the rate of change of the
@@ -111,8 +113,9 @@ residuals of its linear solves) or `-oxygen_ksp_rtol 1e-8`:
 target/debug/slidesim run testdata/studies/tissue_oxygen/study.json --out out -- -oxygen_ts_monitor
 ```
 
-Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol 1e-10`, and solvers
-which do not converge are errors), `solver.petsc_options` of the study, the options after `--`.
+Precedence of the options, lowest first: slidesim's defaults (`-ksp_rtol` of
+`solver.linear_rtol`, 1e-10 unless the study sets it, and solvers which do not converge are
+errors), `solver.petsc_options` of the study, the options after `--`.
 
 ## License
 
@@ -125,6 +128,9 @@ The native dependencies are linked into slidesim (`deps/versions.env` pins their
 - PETSc: BSD-2-Clause.
 - libCEED: BSD-2-Clause.
 - PT-Scotch (Scotch): CeCILL-C.
+- Mmg: LGPL-3.0-or-later, linked statically into PETSc (with the patches of
+  `scripts/deps/patches`); slidesim's build from source is the way to relink it with another or
+  a modified Mmg.
 - f2cblaslapack (PETSc's C translation of the reference BLAS and LAPACK): LAPACK's modified BSD
   license.
 

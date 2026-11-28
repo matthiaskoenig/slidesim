@@ -30,7 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install system packages
-        # cmake and m4 build PT-Scotch and bison (flex and bison come from pinned tarballs).
+        # cmake and m4 build PT-Scotch, Mmg and bison (flex and bison come from pinned tarballs);
+        # Mmg's CMake project also needs the C++ compiler of the image.
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.mpi-packages }} pkg-config python3 cmake m4
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -50,16 +51,18 @@ jobs:
           rm "$archive"
           echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
       - name: Native dependencies cache key
-        # The runner's OS release and MPI, the pinned versions and the build scripts (PETSc's
-        # configure).
+        # The runner's OS release and MPI, the pinned versions (but sbmlsim-core's, which only
+        # the job wasm uses), the build scripts (PETSc's configure) and the patches of the
+        # dependencies.
         id: deps-key
         run: |
           . /etc/os-release
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
-          echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-${{ hashFiles('deps/versions.env', 'scripts/deps/*') }}" >> "$GITHUB_OUTPUT"
+          versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
+          echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps/install
           key: ${{ steps.deps-key.outputs.key }}
@@ -68,6 +71,9 @@ jobs:
         run: scripts/deps/build-native.sh ${{ env.DEPS_MODE }}
       - name: Format
         run: cargo fmt --all --check
+      - name: Process hygiene of the scripts
+        # No process a script starts outlives it (scripts/lib/proc.sh); needs setpriv and setsid.
+        run: bash scripts/tests/proc_kill.sh
       - name: Clippy
         run: |
           . deps/install/native-check/env.sh
@@ -77,8 +83,109 @@ jobs:
         run: |
           . deps/install/native-check/env.sh
           cargo nextest run --workspace --no-tests=pass
+      - name: Heavy mesher sweep
+        # quality_sweep_heavy (rings 2 to 4, about 30 meshes) is ignored in the debug test run:
+        # the quality bounds of the mesher rest on its local improvement, which this checks over
+        # the larger lobule fields, in a release build.
+        run: |
+          . deps/install/native-check/env.sh
+          cargo test --release --locked -p mesher --test lobules -- --ignored --exact quality_sweep_heavy
       - name: Doctests
         # nextest does not run doctests; among them the compile_fail tests of the bindings.
         run: |
           . deps/install/native-check/env.sh
           cargo test --doc --workspace
+
+  wasm:
+    # The browser build (scripts/wasm/build.sh): slidesim.wasm against the wasi builds of PETSc,
+    # libCEED and Mmg, the batched kernel of sbmlsim-core, and the wasmtime host whose tests
+    # compare it with the native build (on the native dependencies of the check job, which runs
+    # first and caches them), and the JavaScript glue of wasm/js in Node and Chromium.
+    name: wasm
+    needs: check
+    runs-on: ubuntu-24.04
+    env:
+      MPI_PACKAGES: openmpi-bin libopenmpi-dev
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y $MPI_PACKAGES pkg-config python3 cmake m4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install wasi-sdk
+        run: |
+          . deps/versions.env
+          WASI_SDK_PATH="$RUNNER_TEMP/wasi-sdk"
+          archive="$RUNNER_TEMP/wasi-sdk.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          echo "$WASI_SDK_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$WASI_SDK_PATH"
+          tar xzf "$archive" --strip-components=1 -C "$WASI_SDK_PATH"
+          rm "$archive"
+          echo "WASI_SDK_PATH=$WASI_SDK_PATH" >> "$GITHUB_ENV"
+      - name: Dependencies cache keys
+        # The native key as the check job computes it on this image; the wasi key of the pinned
+        # versions, the build scripts and the patches; sbmlsim-core's of its revision.
+        id: deps-key
+        run: |
+          . /etc/os-release
+          mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show $MPI_PACKAGES)"
+          versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
+          scripts="${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}"
+          echo "native=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-$scripts" >> "$GITHUB_OUTPUT"
+          echo "wasi=deps-wasi-$(uname -m)-$versions-$scripts" >> "$GITHUB_OUTPUT"
+          echo "sbmlsim-js=sbmlsim-js-$(. deps/versions.env && echo "$SBMLSIM_CORE_KERNEL_REV")" >> "$GITHUB_OUTPUT"
+      - name: Restore native dependencies
+        uses: actions/cache/restore@v5
+        with:
+          path: deps/install
+          key: ${{ steps.deps-key.outputs.native }}
+          fail-on-cache-miss: true
+      - name: Cache wasi dependencies
+        id: wasi-cache
+        uses: actions/cache@v5
+        with:
+          path: deps/install/wasi
+          key: ${{ steps.deps-key.outputs.wasi }}
+      - name: Build wasi dependencies
+        if: steps.wasi-cache.outputs.cache-hit != 'true'
+        run: scripts/deps/build-wasi.sh
+      - name: Cache sbmlsim-core's compiler and mathlib
+        uses: actions/cache@v5
+        with:
+          path: deps/install/sbmlsim-js
+          key: ${{ steps.deps-key.outputs.sbmlsim-js }}
+      - name: Build
+        run: NATIVE_DEPS=native-${{ env.DEPS_MODE }} scripts/wasm/build.sh
+      - name: Format and clippy
+        # The crates of the browser build (their paths without the feature native, for
+        # wasm32-wasip1), the wasm crate and the host.
+        run: |
+          cargo fmt --manifest-path crates/slidesim-wasm/Cargo.toml --check
+          cargo fmt --manifest-path wasm/host/Cargo.toml --check
+          (
+            . deps/install/wasi/env.sh
+            export CARGO_TARGET_DIR=target/wasm
+            cargo clippy --locked --target wasm32-wasip1 -p simulation -p cells -p maps --no-default-features --lib -- -D warnings
+            cargo clippy --locked --target wasm32-wasip1 --manifest-path crates/slidesim-wasm/Cargo.toml --release -- -D warnings
+          )
+          CARGO_TARGET_DIR=target/wasm/host cargo clippy --manifest-path wasm/host/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Host tests
+        # slidesim.wasm in wasmtime against the native build.
+        env:
+          HWLOC_COMPONENTS: -gl
+        run: CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.toml --locked
+      - name: JavaScript glue
+        # slidesim.mjs and its declarations: the type check of slidesim.d.ts, the Node tests (the
+        # lobule study, bitwise against the wasmtime host) and the lobule demo in headless
+        # Chromium (Playwright).
+        env:
+          HWLOC_COMPONENTS: -gl
+        run: |
+          npm ci --prefix wasm/js
+          npm run typecheck --prefix wasm/js
+          (cd wasm/js && npx playwright install --with-deps chromium)
+          npm test --prefix wasm/js

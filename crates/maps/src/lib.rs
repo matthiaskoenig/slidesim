@@ -1,16 +1,24 @@
-//! Raster maps read from Zarr v3 arrays: windowed reads, bilinear samples and gradients.
+//! Raster maps read from Zarr v3 arrays, or computed ([`Map::from_fn`]): windowed reads,
+//! bilinear samples and gradients.
 //!
 //! A map is a 2D float array (rows = y, cols = x). Pixel (row `r`, col `c`) is centred at
 //! `origin_um + [c, r] * um_per_px`. Each process reads only the window of the raster that
 //! covers its own cells, so this crate depends neither on PETSc nor on MPI.
+//!
+//! On WASI (the browser build, wasm32-wasip1) no file is read: [`Map::read`] is an error
+//! ([`MapError::NoFiles`]), and the maps of a run are the computed ones.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+#[cfg(not(target_os = "wasi"))]
 use std::path::Path;
+#[cfg(not(target_os = "wasi"))]
 use std::sync::Arc;
 
 use contracts::MapSpec;
+#[cfg(not(target_os = "wasi"))]
 use zarrs::array::{Array, ArrayBuilder, ArraySubset, data_type};
+#[cfg(not(target_os = "wasi"))]
 use zarrs::filesystem::FilesystemStore;
 
 /// Errors of reading and sampling maps; each names the map and, where there is one, the point.
@@ -29,6 +37,9 @@ pub enum MapError {
     Format { map: String, message: String },
     #[error("map '{map}': zarr: {message}")]
     Zarr { map: String, message: String },
+    /// A map file on WASI, where no file is read (the browser build).
+    #[error("map '{map}': the browser build reads no files, and the map is the file {path}")]
+    NoFiles { map: String, path: String },
 }
 
 /// Pixels needed around a point for a bilinear sample with gradients: one before the cell for
@@ -51,6 +62,26 @@ pub struct Map {
     data: Vec<f64>,
 }
 
+/// The rows and columns of a raster of `shape` (rows, cols) pixels of `um_per_px`, pixel (0, 0)
+/// centred at `origin_um`, which cover `bounds` (`[[xmin, ymin], [xmax, ymax]]` in um) plus the
+/// margin needed for samples and gradients, clipped to the raster.
+fn window(
+    um_per_px: f64,
+    origin_um: [f64; 2],
+    shape: [usize; 2],
+    bounds: [[f64; 2]; 2],
+) -> [Range<usize>; 2] {
+    let range = |axis: usize, n: usize| -> Range<usize> {
+        let lo = ((bounds[0][axis] - origin_um[axis]) / um_per_px).floor() as i64;
+        let hi = ((bounds[1][axis] - origin_um[axis]) / um_per_px).floor() as i64;
+        let a = (lo - MARGIN).clamp(0, n as i64);
+        let b = (hi + 1 + MARGIN + 1).clamp(a, n as i64);
+        a as usize..b as usize
+    };
+    [range(1, shape[0]), range(0, shape[1])]
+}
+
+#[cfg(not(target_os = "wasi"))]
 fn zarr_err(map: &str, e: impl std::fmt::Display) -> MapError {
     MapError::Zarr {
         map: map.to_string(),
@@ -58,6 +89,7 @@ fn zarr_err(map: &str, e: impl std::fmt::Display) -> MapError {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 fn format_err(map: &str, message: impl Into<String>) -> MapError {
     MapError::Format {
         map: map.to_string(),
@@ -67,7 +99,20 @@ fn format_err(map: &str, message: impl Into<String>) -> MapError {
 
 impl Map {
     /// Read the pixels covering `bounds` (`[[xmin, ymin], [xmax, ymax]]` in um) plus the margin
-    /// needed for samples and gradients, clipped to the array; only the chunks needed.
+    /// needed for samples and gradients, clipped to the array; only the chunks needed. On WASI
+    /// an error, [`MapError::NoFiles`].
+    #[cfg(target_os = "wasi")]
+    pub fn read(spec: &MapSpec, _bounds: [[f64; 2]; 2]) -> Result<Map, MapError> {
+        Err(MapError::NoFiles {
+            map: spec.id.clone(),
+            path: spec.path.display().to_string(),
+        })
+    }
+
+    /// Read the pixels covering `bounds` (`[[xmin, ymin], [xmax, ymax]]` in um) plus the margin
+    /// needed for samples and gradients, clipped to the array; only the chunks needed. On WASI
+    /// an error, [`MapError::NoFiles`].
+    #[cfg(not(target_os = "wasi"))]
     pub fn read(spec: &MapSpec, bounds: [[f64; 2]; 2]) -> Result<Map, MapError> {
         let id = spec.id.as_str();
         if spec.um_per_px.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
@@ -97,14 +142,7 @@ impl Map {
             return Err(format_err(id, "data type must be float32 or float64"));
         }
 
-        let window = |axis: usize, n: usize| -> Range<usize> {
-            let lo = ((bounds[0][axis] - spec.origin_um[axis]) / spec.um_per_px).floor() as i64;
-            let hi = ((bounds[1][axis] - spec.origin_um[axis]) / spec.um_per_px).floor() as i64;
-            let a = (lo - MARGIN).clamp(0, n as i64);
-            let b = (hi + 1 + MARGIN + 1).clamp(a, n as i64);
-            a as usize..b as usize
-        };
-        let (rr, cr) = (window(1, rows), window(0, cols));
+        let [rr, cr] = window(spec.um_per_px, spec.origin_um, [rows, cols], bounds);
         let size = [rr.len(), cr.len()];
         let mut data = Vec::new();
         if size[0] > 0 && size[1] > 0 {
@@ -151,6 +189,55 @@ impl Map {
             size,
             data,
         })
+    }
+
+    /// The map `id` of a raster of `shape` (rows, cols) pixels of `um_per_px`, pixel (row 0,
+    /// col 0) centred at `origin_um`, whose pixels are the values of `f` at their centres: the
+    /// pixels of the window [`Map::read`] would read over `bounds` from such a raster (`f` is
+    /// called for these only). No value is missing.
+    ///
+    /// Panics unless `um_per_px` is finite and positive and the raster has at least 2 x 2
+    /// pixels, which [`Map::read`] requires of a file.
+    pub fn from_fn(
+        id: &str,
+        um_per_px: f64,
+        origin_um: [f64; 2],
+        shape: [usize; 2],
+        bounds: [[f64; 2]; 2],
+        f: impl Fn([f64; 2]) -> f64,
+    ) -> Map {
+        assert!(
+            um_per_px.is_finite() && um_per_px > 0.0,
+            "map '{id}': um_per_px must be positive and finite, got {um_per_px}"
+        );
+        assert!(
+            shape[0] >= 2 && shape[1] >= 2,
+            "map '{id}': a raster of {} x {} pixels is too small",
+            shape[0],
+            shape[1]
+        );
+        let [rr, cr] = window(um_per_px, origin_um, shape, bounds);
+        let size = [rr.len(), cr.len()];
+        let mut data = Vec::with_capacity(size[0] * size[1]);
+        for r in rr.clone() {
+            for c in cr.clone() {
+                let x = [
+                    origin_um[0] + c as f64 * um_per_px,
+                    origin_um[1] + r as f64 * um_per_px,
+                ];
+                data.push(f(x));
+            }
+        }
+        Map {
+            id: id.to_string(),
+            um_per_px,
+            origin_um,
+            no_value: None,
+            shape,
+            offset: [rr.start, cr.start],
+            size,
+            data,
+        }
     }
 
     /// The map id.
@@ -287,6 +374,11 @@ impl Maps {
         Ok(Maps { maps })
     }
 
+    /// Adds `map` under its id, in place of a map of the same id.
+    pub fn insert(&mut self, map: Map) {
+        self.maps.insert(map.id.clone(), map);
+    }
+
     /// The map `id`.
     pub fn get(&self, id: &str) -> Result<&Map, MapError> {
         self.maps.get(id).ok_or_else(|| MapError::Unknown {
@@ -299,6 +391,7 @@ impl Maps {
 /// Write a float64 zstd Zarr v3 map of `rows` x `cols` (row-major `values`) at `path` and
 /// return its spec (id `test`, units `1`). For the tests of other crates.
 #[doc(hidden)]
+#[cfg(not(target_os = "wasi"))]
 pub fn write_test_map(
     path: &Path,
     values: &[f64],

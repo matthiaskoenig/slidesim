@@ -3,7 +3,25 @@
 
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+/// The study `path` with its scene and cell model as absolute paths, changed by `change`,
+/// written into `dir` as `<name>.study.json`.
+pub fn variant(path: &Path, dir: &Path, name: &str, change: impl FnOnce(&mut Value)) -> PathBuf {
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let base = path.parent().unwrap();
+    let absolute = |v: &Value| Value::from(base.join(v.as_str().unwrap()).display().to_string());
+    doc["scene"] = absolute(&doc["scene"]);
+    if doc["cells"]["model"].is_string() {
+        doc["cells"]["model"] = absolute(&doc["cells"]["model"]);
+    }
+    change(&mut doc);
+    let study = dir.join(format!("{name}.study.json"));
+    std::fs::write(&study, doc.to_string()).unwrap();
+    study
+}
 
 /// The raw bytes of every piece of the data array `name` of the `.vtu` file `path`, piece by
 /// piece.

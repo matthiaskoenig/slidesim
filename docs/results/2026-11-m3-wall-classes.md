@@ -174,6 +174,10 @@ The window used above has no such island.
 
 ## Reproduce
 
+`mesh/build_mesh.py` and `write_scene.py --mesh` were retired in slideviz `a5d287b` (slidesim
+meshes the polygons, see the [milestone 4 meshing results](2026-11-m4-meshing.md)); these
+commands need a slideviz checkout before it, such as `98b30a7`.
+
 ```bash
 export SLIDEVIZ_DATA=/data/koeniglab/image.analysis/APAP/APAP_zarr  # read only
 cd ~/git/slideviz

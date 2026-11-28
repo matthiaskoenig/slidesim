@@ -9,6 +9,10 @@ publish = false
 [dependencies]
 contracts = { path = "../contracts" }
 thiserror = "2"
+
+# The files of the maps: Zarr's filesystem store needs positioned file I/O, which WASI does not
+# have, and the browser build (wasm32-wasip1) reads no files.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
 zarrs = { version = "0.23.14", default-features = false, features = ["filesystem", "zstd"] }
 
 [dev-dependencies]

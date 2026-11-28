@@ -63,7 +63,8 @@ static PetscErrorCode petsc_smoke(void)
 }
 
 // libCEED backend, always the full resource string: the /cpu/self prefix resolves to different
-// backends natively (avx/blocked with -march=native) and in wasm (opt/blocked), see PATCHES.md.
+// backends natively (avx/blocked with -march=native) and in wasm (opt/blocked), see
+// scripts/deps/patches/README.md.
 #define CEED_RESOURCE "/cpu/self/opt/blocked"
 
 // libCEED: CeedVectorNorm and the gallery mass operator on [0, 1] with linear elements:

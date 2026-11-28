@@ -56,6 +56,26 @@ when rejected steps (an error estimate above the tolerances, values which are no
 singular iteration matrix) make its next step smaller than 1e-10 time units of the model or too
 small to advance the time, or after \(10^6\) step attempts in one advance.
 
+### Kernel path
+
+The browser build runs the batched path without native code: on the batched kernel of
+sbmlsim-core (`kernel/1`), the model with the same RODAS4 integrator and step control in one
+WebAssembly module, which the host compiles from the SBML of the study (`compileKernel` of
+sbmlsim-core's compiler) and links to slidesim with slidesim's memory. One call advances every
+cell of the process (one process in the browser), with the same `H_MIN`, step attempts and
+failures as the QFunction, so a cell takes the steps it takes on the batched path; its math is
+that of sbmlsim-core's mathlib, which agrees with the C library within the last bits (the run of
+an hour of the SPT lobule agrees with the native one within about 1e-14 relatively). The outputs
+of `cells.outputs` which are targets of assignment rules are evaluated by the kernel at the time
+and the states of the cells whenever they are read (`sbmlsim_kernel_assign`, as `model_assign`
+evaluates them natively); a kernel without that function (its `kernel.json` has no
+`assigned_ids`) cannot give them, and such an output is refused. One difference: the kernel
+initializes the cells (a parameter of the cell fixed, every other one its SBML value and initial
+assignment), so a parameter of `cells.parameters` which is a state of the model (the initial
+amount of a species) is written into the state after the initialization and the initial
+assignments which read that state are not evaluated again. `"solver": "engine"` is refused
+there.
+
 ## Strang splitting
 
 The time from one output time to the next is split into equal split steps of at most
@@ -70,7 +90,33 @@ The second half of one split step and the first half of the next, with no transp
 them, are one cell step from \(m_k\) to \(m_{k+1}\): the same scheme with half the cell steps and
 half the restarts of the time integration of the fields. At an output time the half steps stay
 apart, so the cells reach it before the outputs are written. The splitting is of order 2 in the
-split step.
+split step once the split step is short against the time in which the transport replenishes the
+blood next to a cell. Over longer split steps a cell depletes its blood within a cell step with
+no supply, and the error is of first order: with the perfusion of a lobule (the blood replenished
+within seconds) and split steps of minutes, the amount the linear model takes up on the generated
+lobule in 1 h differs by 3 % between split steps of 120 and 60 s, the differences of successive
+halvings falling by a factor 1.9. With the transport 100 times slower, the same split steps show
+order 2.
+
+The SPT studies of the lobules are in this first order regime over all split steps that matter
+([split-step results](../results/2026-11-m4-split-step.md)): against a reference at 5 s, the
+substrate uptake of the generated lobule in 1 h is off by 4.6, 1.7, 0.6, 0.2 and 0.1 % at split
+steps of 120, 60, 30, 15 and 10 s (observed order 1.3 to 1.7), and on a coarser mesh of the
+lobule over 4 h the necrosis front lags (necrotic share 0.015 and 0.005 below the reference at
+120 and 60 s, Dice down to 0.946 and 0.984, within 0.002 and above 0.997 from 30 s on). The cost
+of the cells grows almost in proportion to the number of split steps, each of which starts the
+cells with a transient of their blood. The largest split step which keeps the substrate (S)
+uptake within 1 % and the necrotic share and Dice within 0.01 is 30 s, at about 1.7 times the
+cost of 60 s (the 24 h cost an estimate); the lobule and slide field example studies use 30 s
+since 2ee0cb5. It is a choice for the substrate and the necrosis, not for every quantity: at
+30 s the product P given back is off by up to 4.2 %, the S uptake of the 7 lobules in their
+first 15 min by up to 13 %, and the necrosis was measured on a coarser mesh over 4 h, whose
+larger cells refill more slowly, not on the production mesh over 24 h. At an output time a cell
+has just made a half step without transport, so a species the cells give to a quickly washed
+out blood (the product P of the SPT model) piles up in the blood: the states P_ext and P at the
+output times measure the splitting at every practical split step. A coupling in which the cell
+step sees the supply and washout of its blood would remove both errors; it is a separate design
+task after milestone 4.
 
 ## Exchange with the blood
 
@@ -119,6 +165,14 @@ solves than steps in the 24 h run on a real slide
 - Coupling, manufactured: a linear cell model in a closed domain with a known coupled solution,
   order 2 of the Strang splitting in the split step (`strang_order_two`,
   `testdata/studies/cells_manufactured`).
+- Coupling on the generated lobule (`testdata/studies/lobules/linear.study.json`): order 2 of
+  the splitting with split steps of 240, 120 and 60 s and the transport slowed
+  (`strang_order_two_on_generated_lobule`), conservation
+  (`coupled_conservation_on_generated_lobule`), and 1, 2 and 3 processes within 1e-10
+  (`cells_parallel_matches_one_on_generated_lobule`, with the linear solves and the cells to
+  1e-12: with the linear solves to 1e-10 the fields of other partitions differ by 5e-11, which
+  the cells carry to 1.4e-10, and a cell whose step control decides otherwise differs by its
+  integration error).
 - Conservation: the amount of substance in blood and cells together changes by the boundary
   flows only (`coupled_conservation`, also with adaptive steps).
 - End to end on a real slide, 24 h on 41,252 cells: the two paths agree on every cell's

@@ -1,0 +1,66 @@
+{
+  "version": "study/1",
+  "scene": "scene.json",
+  "fields": [
+    {
+      "id": "S",
+      "diffusion": 700.0,
+      "decay": 0.0,
+      "source": 0.0,
+      "porosity": 0.15,
+      "advection": true,
+      "initial": 0.0,
+      "boundaries": [
+        {"tag": "portal_wall", "dirichlet": 5.0}
+      ]
+    },
+    {
+      "id": "P",
+      "diffusion": 700.0,
+      "decay": 0.0,
+      "source": 0.0,
+      "porosity": 0.15,
+      "advection": true,
+      "initial": 0.0,
+      "boundaries": [
+        {"tag": "portal_wall", "dirichlet": 0.0}
+      ]
+    }
+  ],
+  "perfusion": {
+    "viscosity": 0.0024,
+    "k_along": 0.0156,
+    "k_across": 0.0175,
+    "direction": {"map": "zonation", "g0": 0.00043},
+    "boundaries": [
+      {"tag": "portal_wall", "pressure": 390.0},
+      {"tag": "central_wall", "pressure": 0.0}
+    ]
+  },
+  "cells": {
+    "model": "../../../models/spt_liver_cell.xml",
+    "solver": "batched",
+    "time_unit_s": 60.0,
+    "species": [
+      {"species": "S_ext", "field": "S"},
+      {"species": "P_ext", "field": "P"}
+    ],
+    "volumes": {"blood": "Vext", "cells": "Vli"},
+    "parameters": [
+      {"id": "pattern", "value": 7, "replace": {"map": "necrosis", "above": 0.5, "value": 6}},
+      {"id": "protein_ext", "value": {"map": "cyp2e1", "points": [[0, 0], [0.7405, 1]]}},
+      {"id": "position", "value": {"map": "zonation", "points": [[0, 0], [1, 1]]}}
+    ],
+    "split_step": 30.0,
+    "outputs": ["protein"]
+  },
+  "solver": {"linear_rtol": 1e-6},
+  "time": {
+    "end": 86400.0,
+    "dt": 10.0,
+    "adaptive": false,
+    "outputs": [0, 3600, 7200, 10800, 14400, 18000, 21600, 25200, 28800, 32400, 36000, 39600, 43200,
+                46800, 50400, 54000, 57600, 61200, 64800, 68400, 72000, 75600, 79200, 82800, 86400]
+  },
+  "mesh": {"refinements": 1}
+}

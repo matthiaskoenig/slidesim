@@ -1,0 +1,50 @@
+{
+  "shape": [
+    288,
+    288
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        256,
+        256
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0.0,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 3,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {
+    "provenance": {
+      "source": "$OUT/zonation/mouse_apap_000mg_m1_cyp2e1_lobules.npz",
+      "sha256": "f6b4902f00394a96822bcaca5a7f84d7fd7ef064e62efa6e59732fc3ad0c420f",
+      "values": "zonation position, 0 periportal, 1 pericentral",
+      "fill": "nearest",
+      "filled_share": 0.0
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

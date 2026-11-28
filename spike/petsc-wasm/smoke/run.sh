@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2086 # WASI_PETSC_CEED_LIBS and OPTS are lists of words
 # Compile smoke.c against the static libraries of deps/install/wasi and run it in wasmtime and Node.
 set -euo pipefail
 

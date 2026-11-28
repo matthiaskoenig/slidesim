@@ -136,6 +136,10 @@
           "format": "double",
           "type": "number"
         },
+        "balance": {
+          "description": "Spread the work of the cells evenly over the processes, default true: before each step\nof the cells, cells move from processes of more work to processes of less, by their step\nattempts in the step before (the mesh partition stays). A cell takes the same steps\nwherever it is advanced, so the results are the same either way, bit for bit. The\nengine path does not move the cells of a model with events, discontinuities or\nalgebraic rules (its integrator keeps state from one step to the next).",
+          "type": "boolean"
+        },
         "model": {
           "description": "SBML model, relative to the study file (`Study::load` leaves it as written).",
           "type": "string"
@@ -569,6 +573,42 @@
       ],
       "type": "object"
     },
+    "RasterOptions": {
+      "additionalProperties": false,
+      "description": "The raster pyramid of the fields (`result.raster`).",
+      "properties": {
+        "levels": {
+          "description": "Number of levels, at least 1; level k+1 halves level k.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "origin_um": {
+          "description": "Coordinates in um of the corner of pixel (0, 0) of level 0; default: the lower corner of\nthe mesh's bounding box.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "um_per_px": {
+          "description": "Pixel size of level 0 in um, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "um_per_px",
+        "levels"
+      ],
+      "type": "object"
+    },
     "Replace": {
       "additionalProperties": false,
       "description": "Where the element mean of `map` is above `above`, the parameter takes `value` instead.",
@@ -628,9 +668,34 @@
       ],
       "type": "object"
     },
+    "ResultOptions": {
+      "additionalProperties": false,
+      "description": "Options of the result store `result/1`.",
+      "properties": {
+        "raster": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RasterOptions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Also write the fields as a raster pyramid (`raster/<field>/<level>`), the frame of a slide\nimage a viewer overlays the results on."
+        }
+      },
+      "type": "object"
+    },
     "SolverOptions": {
       "additionalProperties": false,
       "properties": {
+        "linear_rtol": {
+          "description": "Relative tolerance of the linear solves of the transport (the residual of each solve\nreduced by it), in (0, 1), default 1e-10. With fixed steps the time integration has no\nerror estimate to derive it from: the study sets it. `-ksp_rtol` in `petsc_options`\noverrides it.",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        },
         "petsc_options": {
           "default": "",
           "description": "PETSc options string, e.g. `-ksp_type cg -pc_type jacobi`.",
@@ -679,18 +744,21 @@
           "type": "number"
         },
         "outputs": {
-          "default": [],
-          "description": "Output times in s, sorted and within [0, end].",
+          "description": "Output times in s: at least one, strictly increasing, the first >= 0 and the last equal\nto `end`. Output index 0 is the state at the first output time (the initial state when it\nis 0).",
           "items": {
             "format": "double",
+            "minimum": 0,
             "type": "number"
           },
-          "type": "array"
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
         "end",
-        "dt"
+        "dt",
+        "outputs"
       ],
       "type": "object"
     },
@@ -751,6 +819,17 @@
         }
       ],
       "description": "Darcy perfusion of the tissue; required for fields with `advection`."
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResultOptions"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What the result store holds besides the mesh values."
     },
     "scene": {
       "description": "Path of the `scene/1` file; relative paths resolve against the\ndirectory of the study file (`Study::load` stores the absolute path).",

@@ -540,3 +540,82 @@ fn panic_ends_every_process() {
 unsafe extern "C" {
     fn printf(format: *const std::ffi::c_char, ...) -> std::ffi::c_int;
 }
+
+/// The bytes of every process on the root, in the order of the ranks, whatever their lengths
+/// (none included); `None` on the other processes. A root which is not a rank is an error on
+/// every process.
+#[test]
+fn gather_bytes_collects_in_rank_order() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let (rank, size) = (comm.rank(), comm.size());
+    assert_eq!(size, test_support::ranks());
+    // Process r sends r + 1 bytes of value r, process 1 none.
+    let bytes = |r: usize| {
+        if r == 1 {
+            Vec::new()
+        } else {
+            vec![r as u8; r + 1]
+        }
+    };
+    for root in [0, size - 1] {
+        let gathered = comm.gather_bytes(root, &bytes(rank)).unwrap();
+        if rank == root {
+            let expected: Vec<Vec<u8>> = (0..size).map(bytes).collect();
+            assert_eq!(gathered, Some(expected), "root {root}");
+        } else {
+            assert_eq!(gathered, None, "root {root}");
+        }
+    }
+    // Nothing from any process.
+    let gathered = comm.gather_bytes(0, &[]).unwrap();
+    assert_eq!(gathered, (rank == 0).then(|| vec![Vec::new(); size]));
+    let e = comm.gather_bytes(size, b"x").unwrap_err();
+    assert!(e.message.contains(&format!("rank {size}")), "{e}");
+}
+
+/// Every process gets the bytes each process sent to it, in the order of the ranks, whatever
+/// their lengths (none included); a list of other than one vector per process is an error on
+/// every process.
+#[test]
+fn exchange_bytes_delivers_to_each_process() {
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let (rank, size) = (comm.rank(), comm.size());
+    assert_eq!(size, test_support::ranks());
+    // From p to q: p + 2 q bytes, of the value 10 p + q (none from 0 to 0).
+    let bytes = |from: usize, to: usize| vec![(10 * from + to) as u8; from + 2 * to];
+    let sends: Vec<Vec<u8>> = (0..size).map(|to| bytes(rank, to)).collect();
+    let received = comm.exchange_bytes(&sends).unwrap();
+    let expected: Vec<Vec<u8>> = (0..size).map(|from| bytes(from, rank)).collect();
+    assert_eq!(received, expected);
+    // Nothing at all.
+    let received = comm.exchange_bytes(&vec![Vec::new(); size]).unwrap();
+    assert_eq!(received, vec![Vec::<u8>::new(); size]);
+    // One process gives one vector too many.
+    let mut sends = vec![vec![1u8]; size];
+    if rank == size - 1 {
+        sends.push(Vec::new());
+    }
+    let e = comm.exchange_bytes(&sends).unwrap_err();
+    assert!(
+        e.message.contains("vectors of bytes") || e.message.contains("another process"),
+        "{e}"
+    );
+}
+
+/// The tests `parallel_on_*_processes` run on several processes.
+const PARALLEL_TESTS: [&str; 2] = [
+    "gather_bytes_collects_in_rank_order",
+    "exchange_bytes_delivers_to_each_process",
+];
+
+#[test]
+fn parallel_on_2_processes() {
+    test_support::parallel(2, &PARALLEL_TESTS);
+}
+
+#[test]
+fn parallel_on_3_processes() {
+    test_support::parallel(3, &PARALLEL_TESTS);
+}

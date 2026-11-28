@@ -83,6 +83,16 @@ impl Pc {
         Ok(())
     }
 
+    /// Makes algebraic multigrid (`PCGAMG`, which [`Pc::set_type`] `gamg` selects) coarsen until
+    /// a level has at most `limit` equations, which its coarse solver solves directly
+    /// (`PCGAMGSetCoarseEqLim`; PETSc's default is 50). It coarsens at least once.
+    pub fn gamg_set_coarse_eq_limit(&mut self, limit: usize) -> Result<()> {
+        let limit = to_int(limit, "equations of the coarsest level")?;
+        // SAFETY: a valid PC; PETSc ignores the call for a PC of another type.
+        chk!(unsafe { sys::PCGAMGSetCoarseEqLim(self.raw, limit) });
+        Ok(())
+    }
+
     /// The solver of level `level` of a `PCMG` (`PCMGGetSmoother`), shared: the smoother of
     /// the level, or the coarse solver for level 0.
     pub fn mg_smoother(&self, level: usize) -> Result<Ksp> {

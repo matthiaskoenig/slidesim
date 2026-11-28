@@ -13,7 +13,10 @@ use std::collections::HashMap;
 
 use ceed::Ceed;
 use cells::{BatchedCells, CellModel, CellSetup, CellSolver, Cells, CellsError, EngineCells};
-use common::{c_cache, ceed, finest, linear_spec, mesh, model, parameter, spt_spec, testdata};
+use common::{
+    c_cache, ceed, finest, linear_spec, mesh, model, oscillator_model, parameter, spt_spec,
+    testdata,
+};
 use contracts::{CellSolverKind, CellsSpec, Coefficient, Scene, Study};
 use maps::Maps;
 use mesh::Mesh;
@@ -81,7 +84,7 @@ fn fifty_cells(p: &Petsc, ceed: &Ceed) -> (Mesh, CellSetup, CellsSpec, Vec<f64>)
     assert!(setup.cells.len() >= n, "{} cells", setup.cells.len());
     setup.cells.truncate(n);
     setup.parameters.truncate(n);
-    setup.global.truncate(n);
+    setup.elements.truncate(n);
     setup.centroids.truncate(n);
     for (cell, set) in setup.parameters.iter_mut().zip(&sets) {
         let volumes: Vec<(String, f64)> = cell
@@ -382,7 +385,10 @@ fn parity(ranks: usize, test: &str) {
 }
 
 /// A cell model which fails on one process (a decay rate whose growth overflows) stops every
-/// process with the same error, naming the element; the cells are not advanced after it.
+/// process with the same error, naming the element; the cells are not advanced after it. The
+/// last cell of that process fails too: the error names the first, also where the balance of
+/// the work has another process advance the last (on 3 processes, the last of 359 cells goes to
+/// the first process, of 357).
 #[test]
 fn failure_on_one_process_stops_all() {
     c_cache();
@@ -409,26 +415,44 @@ fn failure_on_one_process_stops_all() {
     .unwrap();
     let failing = comm.size() - 1;
     if comm.rank() == failing {
-        for (id, value) in &mut setup.parameters[0] {
-            if id == "d" {
-                *value = -1e6;
+        let last = setup.parameters.len() - 1;
+        for i in [0, last] {
+            for (id, value) in &mut setup.parameters[i] {
+                if id == "d" {
+                    *value = -1e6;
+                }
             }
         }
     }
+    // The element id of the first cell of the failing process (partition independent).
+    assert_eq!(setup.elements[0], mesh.element_ids()[setup.cells[0]]);
     let element = comm
         .max_int(if comm.rank() == failing {
-            setup.global[0].try_into().unwrap()
+            setup.elements[0].try_into().unwrap()
         } else {
             -1
         })
         .unwrap();
-    let element = i64::from(element);
+    let element = u64::try_from(element).unwrap();
     let mut cells = BatchedCells::new(&setup, &spec, &model("linear_uptake.xml"), &ceed).unwrap();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(0.0, 600.0, &mut blood) {
-        Err(CellsError::Element { cell, message, .. }) => {
-            println!("{message}");
-            assert_eq!(cell, element, "{message}");
+        Err(e @ CellsError::Element { .. }) => {
+            let text = e.to_string();
+            println!("{text}");
+            assert!(
+                text.starts_with(&format!("element {element} at (")),
+                "{text}"
+            );
+            let CellsError::Element {
+                element: id,
+                message,
+                ..
+            } = e
+            else {
+                unreachable!()
+            };
+            assert_eq!(id, element, "{message}");
             assert!(message.contains("600"), "{message}");
         }
         other => panic!("expected an error naming the element, got {other:?}"),
@@ -437,7 +461,7 @@ fn failure_on_one_process_stops_all() {
     let states = cells.states().to_vec();
     let mut blood = vec![1.0; cells.n_cells()];
     match cells.advance(600.0, 1200.0, &mut blood) {
-        Err(CellsError::Element { cell, .. }) => assert_eq!(cell, element),
+        Err(CellsError::Element { element: id, .. }) => assert_eq!(id, element),
         other => panic!("expected the error again, got {other:?}"),
     }
     assert_eq!(cells.states(), states.as_slice());
@@ -560,6 +584,215 @@ fn rule_outputs_read_constants() {
                 "{solver:?}: {row:?}"
             );
         }
+    }
+}
+
+/// What [`balanced_run`] gives: per advance the steps and rejected steps of this process, then
+/// the states, the outputs and the blood of its cells at the end.
+struct BalancedRun {
+    local: Vec<(u64, u64)>,
+    states: Vec<f64>,
+    outputs: Vec<f64>,
+    blood: Vec<f64>,
+}
+
+/// The SPT model on every coarse element of `lobule_toy` (the parameters from the map), the
+/// blood at first a function of the centroid, then as the cells leave it, 4 h in steps of 1 h,
+/// with the balance of the work `balance`.
+fn balanced_run(p: &Petsc, ceed: &Ceed, balance: bool) -> BalancedRun {
+    let (_mesh, setup, spec) = spt_setup(p, ceed, CellSolverKind::Batched);
+    let spec = CellsSpec { balance, ..spec };
+    let mut cells = BatchedCells::new(&setup, &spec, &model("spt_liver_cell.xml"), ceed).unwrap();
+    let mut blood: Vec<f64> = setup
+        .centroids
+        .iter()
+        .flat_map(|[x, y]| [2.5 + 2.0 * (0.01 * x + 0.02 * y).sin(), 0.0])
+        .collect();
+    let local = (0..4)
+        .map(|k| {
+            let (t0, t1) = (3600.0 * k as f64, 3600.0 * (k + 1) as f64);
+            let stats = cells.advance(t0, t1, &mut blood).unwrap();
+            (stats.steps, stats.rejected)
+        })
+        .collect();
+    let mut outputs = Vec::new();
+    cells.outputs(&mut outputs);
+    BalancedRun {
+        local,
+        states: cells.states().to_vec(),
+        outputs,
+        blood,
+    }
+}
+
+/// On 2 and 3 processes, the cells advance alike with and without the balance of their work
+/// (`cells.balance`): the states, the outputs and the blood of every cell bit for bit equal, and
+/// the steps and rejected steps of every advance, summed over the processes. The balance moved
+/// work: the steps of a process differ in some advance.
+#[test]
+fn balanced_cells_match_unbalanced() {
+    for ranks in [2, 3] {
+        test_support::parallel(ranks, &["balanced_cells_match_unbalanced"]);
+    }
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let ceed = ceed();
+    let (off, on) = (
+        balanced_run(&p, &ceed, false),
+        balanced_run(&p, &ceed, true),
+    );
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&off.states), bits(&on.states));
+    assert_eq!(bits(&off.outputs), bits(&on.outputs));
+    assert_eq!(bits(&off.blood), bits(&on.blood));
+    let sum = |x: u64| comm.sum_int(x.try_into().unwrap()).unwrap();
+    for (a, b) in off.local.iter().zip(&on.local) {
+        assert_eq!((sum(a.0), sum(a.1)), (sum(b.0), sum(b.1)));
+    }
+    let moved = off.local.iter().zip(&on.local).any(|(a, b)| a != b);
+    let moved = comm.max_int(moved.into()).unwrap() > 0;
+    println!(
+        "{} processes: work moved {moved}, {:?} against {:?}",
+        comm.size(),
+        on.local,
+        off.local
+    );
+    assert_eq!(moved, comm.size() > 1);
+}
+
+/// On 2 and 3 processes, the oscillator model with the cells of process 0 at 10 times the
+/// frequency of the others (10 times their step attempts): with the balance, the step attempts
+/// of each process in the second advance (after the first, whose attempts the balance reads)
+/// are within 10 % of their mean; without it, process 0 makes far more.
+#[test]
+fn balance_evens_the_work() {
+    for ranks in [2, 3] {
+        test_support::parallel(ranks, &["balance_evens_the_work"]);
+    }
+    if test_support::ranks() == 1 {
+        return;
+    }
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let sbml = oscillator_model();
+    for balance in [false, true] {
+        let spec = CellsSpec {
+            areas: None,
+            solver: CellSolverKind::Batched,
+            balance,
+            ..linear_spec(vec![parameter("w", Coefficient::Constant(1.0))])
+        };
+        let mut setup = CellSetup::new(
+            &fine,
+            &mesh,
+            &spec,
+            &Maps::default(),
+            &Coefficient::Constant(0.2),
+        )
+        .unwrap();
+        if comm.rank() == 0 {
+            for cell in &mut setup.parameters {
+                cell.iter_mut().find(|(id, _)| id == "w").unwrap().1 = 10.0;
+            }
+        }
+        let mut cells = BatchedCells::new(&setup, &spec, &sbml, &ceed).unwrap();
+        let mut blood = vec![1.0; cells.n_cells()];
+        cells.advance(0.0, 6.0, &mut blood).unwrap();
+        let stats = cells.advance(6.0, 12.0, &mut blood).unwrap();
+        let attempts = (stats.steps + stats.rejected) as f64;
+        let max = comm.max_real(attempts).unwrap();
+        let mean = comm.sum_real(attempts).unwrap() / comm.size() as f64;
+        println!(
+            "{} processes, balance {balance}: {} cells, attempts {attempts} here, largest over \
+             mean {}",
+            comm.size(),
+            cells.n_cells(),
+            max / mean
+        );
+        if balance {
+            assert!(max / mean <= 1.1, "{}", max / mean);
+        } else {
+            assert!(max / mean > 1.5, "{}", max / mean);
+        }
+    }
+}
+
+/// On 3 processes with one cell each, the cell of process 0 at 100 times the frequency of the
+/// others: after the first advance the balance sends that cell away (its weight is more than
+/// twice those of the others together), so process 0 advances no cell, and its statistics count
+/// no step (not those of the advance before, when it advanced its cell). The steps of each
+/// advance, summed over the processes, are those without the balance.
+#[test]
+fn process_without_points_counts_nothing() {
+    if test_support::ranks() == 1 {
+        test_support::parallel(3, &["process_without_points_counts_nothing"]);
+        return;
+    }
+    c_cache();
+    let p = Petsc::init(&[]).unwrap();
+    let comm = p.comm();
+    let mesh = mesh(&p, "lobule_toy.msh", 0);
+    let ceed = ceed();
+    let fine = finest(&mesh, &ceed);
+    let sbml = oscillator_model();
+    let mut runs = Vec::new();
+    for balance in [false, true] {
+        let spec = CellsSpec {
+            areas: None,
+            solver: CellSolverKind::Batched,
+            balance,
+            ..linear_spec(vec![parameter("w", Coefficient::Constant(1.0))])
+        };
+        let mut setup = CellSetup::new(
+            &fine,
+            &mesh,
+            &spec,
+            &Maps::default(),
+            &Coefficient::Constant(0.2),
+        )
+        .unwrap();
+        assert!(!setup.cells.is_empty(), "a process without cells");
+        setup.cells.truncate(1);
+        setup.parameters.truncate(1);
+        setup.elements.truncate(1);
+        setup.centroids.truncate(1);
+        if comm.rank() == 0 {
+            let w = setup.parameters[0]
+                .iter_mut()
+                .find(|(id, _)| id == "w")
+                .unwrap();
+            w.1 = 100.0;
+        }
+        let mut cells = BatchedCells::new(&setup, &spec, &sbml, &ceed).unwrap();
+        let mut blood = vec![1.0; cells.n_cells()];
+        let steps: Vec<u64> = [(0.0, 6.0), (6.0, 12.0), (12.0, 18.0)]
+            .into_iter()
+            .map(|(t0, t1)| cells.advance(t0, t1, &mut blood).unwrap().steps)
+            .collect();
+        runs.push(steps);
+    }
+    let (off, on) = (&runs[0], &runs[1]);
+    println!(
+        "process {}: steps {on:?} with the balance, {off:?} without",
+        comm.rank()
+    );
+    let sum = |x: u64| comm.sum_int(x.try_into().unwrap()).unwrap();
+    for (a, b) in off.iter().zip(on) {
+        assert_eq!(sum(*a), sum(*b), "{off:?} against {on:?}");
+    }
+    assert!(off[0] > 0);
+    if comm.rank() == 0 {
+        assert_eq!(on[0], off[0], "nothing moves in the first advance");
+        assert_eq!(
+            on[1..],
+            [0, 0],
+            "process 0 advances no cell after the first"
+        );
     }
 }
 

@@ -223,6 +223,29 @@ impl Dm {
         Ok((!raw.is_null()).then_some(Dm { raw }))
     }
 
+    /// [`Dm::distribute`], with the star forest which migrated the points of this DM (its roots)
+    /// to those of the new one (its leaves): each point of the new DM is a leaf of the point it
+    /// came from (`DMPlexDistribute`'s `sf`). The cones keep their order. `None` on one process.
+    /// Collective.
+    pub fn distribute_with_migration(&self, overlap: usize) -> Result<Option<(Dm, Sf)>> {
+        let overlap = to_int(overlap, "overlap")?;
+        let (mut raw, mut sf) = (null_mut(), null_mut());
+        // SAFETY: `raw` and `sf` receive new objects, or stay null.
+        chk!(unsafe { sys::DMPlexDistribute(self.raw, overlap, &mut sf, &mut raw) });
+        // SAFETY: new references, given up here.
+        let sf = (!sf.is_null()).then(|| unsafe { Sf::from_raw(sf) });
+        Ok(match (raw.is_null(), sf) {
+            (false, Some(sf)) => Some((Dm { raw }, sf)),
+            (false, None) => {
+                return Err(Error::new(
+                    sys::PETSC_ERR_PLIB,
+                    "DMPlexDistribute gave a DM without its star forest".to_string(),
+                ));
+            }
+            (true, _) => None,
+        })
+    }
+
     /// The DM (distributed) with `overlap` more layers of cells shared with neighbouring
     /// processes (`DMPlexDistributeOverlap`), with the star forest which migrated the points
     /// of this DM (its roots) to those of the new one (its leaves): each point of the new DM is a
@@ -376,6 +399,17 @@ impl Dm {
         let mut is = null_mut();
         // SAFETY: the IS is borrowed from the DM.
         chk!(unsafe { sys::DMPlexGetCellNumbering(self.raw, &mut is) });
+        take_is(is, false)
+    }
+
+    /// The global numbers of the local vertices, in the order of the local vertices (depth 0); a
+    /// vertex owned by another process has the number `-(g + 1)` for its global number `g`
+    /// (`DMPlexGetVertexNumbering`). The owned vertices of the processes are numbered
+    /// consecutively, process 0 first. Collective on its first call.
+    pub fn vertex_numbering(&self) -> Result<Vec<sys::PetscInt>> {
+        let mut is = null_mut();
+        // SAFETY: the IS is borrowed from the DM.
+        chk!(unsafe { sys::DMPlexGetVertexNumbering(self.raw, &mut is) });
         take_is(is, false)
     }
 

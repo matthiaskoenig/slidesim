@@ -10,22 +10,18 @@ use contracts::{CellsSpec, Study};
 use maps::Maps;
 use mesh::Mesh;
 use pde::{Exchange, Problem};
-use petsc::{Comm, Dm, Fe, Vector, Viewer};
+use petsc::Comm;
 
-use crate::run::Phases;
+use crate::phases::Phases;
+use crate::summary::{Attempts, Seconds};
+use crate::vtu::CellWriter;
 
 /// The steps of the cells of every process ([`Coupled::stats`]).
 pub(crate) struct CellStats {
     pub(crate) steps: u64,
     pub(crate) rejected: u64,
     pub(crate) seconds: Seconds,
-}
-
-/// A time over the processes: its mean and its largest value (s).
-#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
-pub(crate) struct Seconds {
-    pub(crate) mean: f64,
-    pub(crate) max: f64,
+    pub(crate) attempts: Attempts,
 }
 
 /// The cells of a study coupled to its fields by Strang splitting.
@@ -62,10 +58,13 @@ pub(crate) struct Coupled {
     blood: Vec<f64>,
     before: Vec<f64>,
     work: Vec<f64>,
-    /// The steps and rejected steps of the cells of this process, and its time in them (s).
+    /// The steps and rejected steps of the cells this process advanced, and its time in them
+    /// (s).
     steps: u64,
     rejected: u64,
     seconds: f64,
+    /// Over the cell steps, the largest step attempts of a process in each, summed.
+    attempts_max: u64,
     /// For each linked species, the amount the cells gave to its field since t = 0 (mM*um^2),
     /// over every process.
     exchanged: Vec<f64>,
@@ -81,6 +80,8 @@ pub(crate) struct Coupled {
     writer: CellWriter,
     /// The number of cells of every process.
     count: usize,
+    /// The communicator of the cells.
+    comm: petsc::OwnedComm,
 }
 
 impl Coupled {
@@ -165,6 +166,7 @@ impl Coupled {
             steps: 0,
             rejected: 0,
             seconds: 0.0,
+            attempts_max: 0,
             exchanged: vec![0.0; spec.species.len()],
             setup,
             scale,
@@ -172,6 +174,7 @@ impl Coupled {
             cells_compartment: spec.volumes.cells.clone(),
             writer,
             count,
+            comm: comm.duplicate()?,
         })
     }
 
@@ -245,6 +248,9 @@ impl Coupled {
         self.steps += stats.steps;
         self.rejected += stats.rejected;
         self.seconds += stats.seconds;
+        // Exact as a float: far below 2^53.
+        let attempts = (stats.steps + stats.rejected) as f64;
+        self.attempts_max += self.comm.comm().max_real(attempts)? as u64;
         self.t = t1;
         phases.end("cells")?;
         for (s, (field, exchange)) in self.links.iter().enumerate() {
@@ -264,21 +270,26 @@ impl Coupled {
         self.count
     }
 
-    /// The steps and the rejected steps of the cells of every process, and the mean and the
-    /// largest time of a process in its cells (s, without the wait for the others).
-    /// Collective.
+    /// The steps and the rejected steps of the cells of every process, the mean and the
+    /// largest time of a process in its cells (s, without the wait for the others), and the
+    /// step attempts of a process ([`Attempts`]). Collective.
     pub(crate) fn stats(&self, comm: &Comm) -> Result<CellStats> {
         let sum = |x: u64| -> Result<u64> {
             Ok(u64::try_from(
                 comm.sum_int(petsc::sys::PetscInt::try_from(x)?)?,
             )?)
         };
+        let (steps, rejected) = (sum(self.steps)?, sum(self.rejected)?);
         Ok(CellStats {
-            steps: sum(self.steps)?,
-            rejected: sum(self.rejected)?,
+            steps,
+            rejected,
             seconds: Seconds {
                 mean: comm.sum_real(self.seconds)? / comm.size() as f64,
                 max: comm.max_real(self.seconds)?,
+            },
+            attempts: Attempts {
+                mean: (steps + rejected) as f64 / comm.size() as f64,
+                max: self.attempts_max as f64,
             },
         })
     }
@@ -292,12 +303,10 @@ impl Coupled {
             .zip(self.exchanged.iter().copied())
     }
 
-    /// Writes the cells as the VTU file `path` (cell data of the coarse elements, NaN where
-    /// there is no cell), and returns the amount of every species of the cell compartment in
-    /// every cell, in the units of the fields (mM*um^2): its concentration times the cell
-    /// volume of the model, times the factor of the cell from the model's volumes to um^2.
-    /// Collective.
-    pub(crate) fn write(&self, comm: &Comm, path: &Path) -> Result<Vec<(String, f64)>> {
+    /// The amount of every species of the cell compartment in every cell, in the units of the
+    /// fields (mM*um^2): its concentration times the cell volume of the model, times the factor
+    /// of the cell from the model's volumes to um^2. Collective.
+    pub(crate) fn amounts(&self, comm: &Comm) -> Result<Vec<(String, f64)>> {
         let mut outputs = Vec::new();
         self.solver.outputs(&mut outputs);
         let values = self.solver.output_values();
@@ -312,6 +321,29 @@ impl Coupled {
                 .sum();
             amounts.push((value.id.clone(), comm.sum_real(local)?));
         }
+        Ok(amounts)
+    }
+
+    /// The names of the values of a cell ([`Coupled::table`]): the output values of the model
+    /// (its states, a species of a concentration as its concentration, and `cells.outputs`),
+    /// then the parameters of the element ([`CellSetup`]: `cells.parameters` and the two
+    /// volumes).
+    pub(crate) fn names(&self) -> &[String] {
+        self.writer.names()
+    }
+
+    /// The element ids of the local cells ([`CellSetup::elements`]), in the order of the rows of
+    /// [`Coupled::table`].
+    pub(crate) fn elements(&self) -> &[u64] {
+        &self.setup.elements
+    }
+
+    /// The values of the local cells now: one row per cell, one value per name of
+    /// [`Coupled::names`].
+    pub(crate) fn table(&self) -> Vec<f64> {
+        let mut outputs = Vec::new();
+        self.solver.outputs(&mut outputs);
+        let no = self.solver.output_values().len();
         let parameters = self.setup.parameters.first().map_or(0, Vec::len);
         let columns = no + parameters;
         let mut table = Vec::with_capacity(self.solver.n_cells() * columns);
@@ -319,10 +351,15 @@ impl Coupled {
             table.extend_from_slice(&outputs[i * no..(i + 1) * no]);
             table.extend(cell.iter().map(|(_, v)| *v));
         }
+        table
+    }
+
+    /// Writes the cells as the VTU file `path`: cell data of the coarse elements, one array per
+    /// name of [`Coupled::names`], NaN where there is no cell. Collective.
+    pub(crate) fn write(&self, path: &Path) -> Result<()> {
         self.writer
-            .write(&self.setup.cells, &table, path)
-            .with_context(|| format!("cannot write {}", path.display()))?;
-        Ok(amounts)
+            .write(&self.setup.cells, &self.table(), path)
+            .with_context(|| format!("cannot write {}", path.display()))
     }
 }
 
@@ -376,61 +413,4 @@ fn parameter_ids(spec: &CellsSpec) -> Vec<String> {
         .map(|p| p.id.clone())
         .chain([spec.volumes.blood.clone(), spec.volumes.cells.clone()])
         .collect()
-}
-
-/// Writes values per coarse element as cell data of a VTU file: a field of one P0 component
-/// per value on a copy of the coarse level, named after the value, so that the data arrays are
-/// named after the values.
-struct CellWriter {
-    dm: Dm,
-    names: Vec<String>,
-    /// For each value, the entry of each local cell in a local vector.
-    offsets: Vec<Vec<usize>>,
-}
-
-impl CellWriter {
-    /// The writer of the values `names` on the coarse level `coarse`. Collective.
-    fn new(coarse: &Dm, names: Vec<String>) -> Result<CellWriter> {
-        let mut dm = coarse.clone_mesh()?;
-        let dim = dm.dimension()?;
-        let fe = Fe::lagrange(dim, 1, dm.is_simplex()?, 0, 1)?;
-        for _ in &names {
-            dm.add_field(&fe)?;
-        }
-        dm.create_ds()?;
-        for (k, name) in names.iter().enumerate() {
-            dm.set_field_names(k, name, &[name])?;
-        }
-        let offsets = (0..names.len())
-            .map(|k| {
-                let offsets = dm.local_offsets(k)?;
-                Ok(offsets
-                    .offsets
-                    .iter()
-                    .map(|&o| usize::try_from(o).expect("an entry of a local vector"))
-                    .collect())
-            })
-            .collect::<Result<Vec<Vec<usize>>>>()?;
-        Ok(CellWriter { dm, names, offsets })
-    }
-
-    /// Writes `table` (per cell of `cells`, local coarse cells, one value per name) as the VTU
-    /// file `path`; NaN for the other cells. Collective.
-    fn write(&self, cells: &[usize], table: &[f64], path: &Path) -> Result<()> {
-        let mut local = Vector::create_local(&self.dm)?;
-        local.set(f64::NAN)?;
-        let n = self.names.len();
-        local.with_array_mut(|values| {
-            for (i, &cell) in cells.iter().enumerate() {
-                for (k, offsets) in self.offsets.iter().enumerate() {
-                    values[offsets[cell]] = table[i * n + k];
-                }
-            }
-        })?;
-        local.set_name("")?;
-        let mut viewer = Viewer::vtk(&self.dm.comm(), path)?;
-        local.view(&mut viewer)?;
-        viewer.flush()?;
-        Ok(())
-    }
 }

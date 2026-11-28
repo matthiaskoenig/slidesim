@@ -1,0 +1,16 @@
+{
+  "version": "scene/1",
+  "dimension": 2,
+  "units": {"length": "um"},
+  "mesh": {
+    "format": "polygons",
+    "path": "polygons-self-intersecting.geojson",
+    "size": {
+      "min_um": 5.0,
+      "max_um": 20.0,
+      "dist_min_um": 10.0,
+      "dist_max_um": 200.0,
+      "walls": ["section_edge"]
+    }
+  }
+}

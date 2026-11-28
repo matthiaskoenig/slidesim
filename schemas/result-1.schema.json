@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "RasterMeta": {
+      "additionalProperties": false,
+      "description": "The raster pyramid of the fields.",
+      "properties": {
+        "levels": {
+          "description": "Number of levels, at least 1.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "origin_um": {
+          "description": "Coordinates in um of the corner of pixel (0, 0) of level 0.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "shapes": {
+          "description": "`[rows, cols]` per level, level 0 first.",
+          "items": {
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "um_per_px": {
+          "description": "Pixel size of level 0 in um, must be > 0.",
+          "exclusiveMinimum": 0,
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "um_per_px",
+        "origin_um",
+        "levels",
+        "shapes"
+      ],
+      "type": "object"
+    },
+    "ResultField": {
+      "additionalProperties": false,
+      "description": "A stored field.",
+      "properties": {
+        "id": {
+          "description": "Field id, unique.",
+          "type": "string"
+        },
+        "units": {
+          "description": "Units of the values, `mM`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "units"
+      ],
+      "type": "object"
+    },
+    "ResultTag": {
+      "additionalProperties": false,
+      "description": "A stored tag.",
+      "properties": {
+        "dim": {
+          "description": "2 for an area (triangle indices), 1 for an edge (vertex index pairs).",
+          "format": "uint32",
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "dim"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The root attributes of `result.zarr`.",
+  "properties": {
+    "cell_values": {
+      "description": "The per-element cell values stored under `cells/<value>`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "complete": {
+      "description": "Whether the run finished, then `written == times.len()`.",
+      "type": "boolean"
+    },
+    "fields": {
+      "description": "The fields stored under `fields/<id>`.",
+      "items": {
+        "$ref": "#/$defs/ResultField"
+      },
+      "type": "array"
+    },
+    "raster": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RasterMeta"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The raster pyramid under `raster/`, when written."
+    },
+    "refinements": {
+      "description": "Uniform refinements of the mesh beyond the coarse one.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "scene": {
+      "description": "The scene file of the study.",
+      "type": "string"
+    },
+    "study": {
+      "description": "The study file the run was made from.",
+      "type": "string"
+    },
+    "tags": {
+      "description": "The tags stored under `mesh/tags/<name>`.",
+      "items": {
+        "$ref": "#/$defs/ResultTag"
+      },
+      "type": "array"
+    },
+    "times": {
+      "description": "Output times in s, strictly increasing; the length of the `time` array.",
+      "items": {
+        "format": "double",
+        "type": "number"
+      },
+      "type": "array"
+    },
+    "version": {
+      "const": "result/1",
+      "description": "Contract version, exactly `result/1`.",
+      "type": "string"
+    },
+    "written": {
+      "description": "Number of time indices written so far; indices below it are complete.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "study",
+    "scene",
+    "refinements",
+    "times",
+    "written",
+    "complete",
+    "fields",
+    "cell_values",
+    "tags"
+  ],
+  "title": "ResultMeta",
+  "type": "object"
+}

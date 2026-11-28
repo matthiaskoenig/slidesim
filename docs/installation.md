@@ -1,6 +1,6 @@
 # Installation
 
-slidesim is built from source: a Rust workspace against PETSc, PT-Scotch and libCEED, which
+slidesim is built from source: a Rust workspace against PETSc, PT-Scotch, Mmg and libCEED, which
 `scripts/deps/build-native.sh` builds at the versions pinned in `deps/versions.env`.
 
 ## Requirements
@@ -11,8 +11,8 @@ slidesim is built from source: a Rust workspace against PETSc, PT-Scotch and lib
 - **MPI** with `mpicc` and `mpiexec`, and a C compiler behind `mpicc`: Open MPI
   (`apt install openmpi-bin libopenmpi-dev`) or MPICH (`apt install mpich libmpich-dev`); CI tests
   both. Not the MPICH package of Ubuntu 24.04, whose `mpiexec` runs every process alone.
-- **For the native dependencies**: git, curl, make, cmake, m4, python3 and pkg-config. bison and
-  flex are built from pinned tarballs.
+- **For the native dependencies**: git, curl, make, cmake, m4, python3, pkg-config and a C++
+  compiler (Mmg's CMake project enables C++). bison and flex are built from pinned tarballs.
 - **[wasi-sdk](https://github.com/WebAssembly/wasi-sdk)**, the version `WASI_SDK_VERSION` of
   `deps/versions.env`: bindgen uses its clang and libclang for the bindings of every target,
   native ones included. It is looked for in `~/opt/wasi-sdk`; set `WASI_SDK_PATH` to its
@@ -30,7 +30,8 @@ slidesim is built from source: a Rust workspace against PETSc, PT-Scotch and lib
     ```
 
 - **A C compiler at run time** for studies with cell models: the model is translated to C and
-  compiled with `$CC` (or `cc`) at the start of the run (see [Running a study](usage.md#cell-models)).
+  compiled with `$CC` (or `cc`) at the start of the run (see
+  [Running a study](usage.md#cell-models)).
 
 ## Native dependencies
 
@@ -39,6 +40,7 @@ slidesim is built from source: a Rust workspace against PETSc, PT-Scotch and lib
 | PETSc | 3.26.1 | meshes (DMPlex), time stepping (`TS`), Krylov solvers and multigrid (`KSP`, `PC`) |
 | libCEED | 1.1.2 | matrix-free finite element operators and the batched cell QFunctions, CPU backends |
 | PT-Scotch | 7.0.15 | partitioning of the mesh over the processes |
+| Mmg | 5.8.0 | remeshing of the generated meshes to a size field (`DMAdaptMetric`), linked into PETSc |
 | f2cblaslapack | 3.8.0.q2 | BLAS and LAPACK for PETSc, in C |
 
 `scripts/deps/build-native.sh <mode>` builds them into `deps/install/native-<mode>`, in one of
@@ -64,8 +66,8 @@ cargo build --workspace              # with native-opt: cargo build --release
 ```
 
 The `slidesim` binary has an absolute RUNPATH into the installation it was built against
-(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED): it runs without `env.sh`,
-but not after `deps/install` is moved or removed.
+(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of
+`libpetsc.so`): it runs without `env.sh`, but not after `deps/install` is moved or removed.
 
 For long runs and timings, build the optimized dependencies and a release binary:
 
