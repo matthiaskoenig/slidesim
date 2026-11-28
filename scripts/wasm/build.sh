@@ -70,6 +70,7 @@ if [[ "$(cat "$JS/REV" 2>/dev/null || true)" != "$SBMLSIM_CORE_KERNEL_REV" ]]; t
   rm -rf "$JS"
   (
     cd "$CORE"
+    # shellcheck disable=SC2030 # this subshell's own target directory
     export CARGO_TARGET_DIR="$ROOT/target/sbmlsim-core"
     cargo build --quiet --locked -p sbmlsim-mathlib --lib --target wasm32-unknown-unknown --release
     cargo build --quiet --locked -p sbmlsim-wasm --lib --target wasm32-unknown-unknown --profile wasm
@@ -125,6 +126,7 @@ fi
   export CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="-C linker-flavor=wasm-ld -C link-self-contained=no \
     -C link-arg=-L$sysroot/lib/wasm32-wasip1 -C link-arg=$sysroot/lib/wasm32-wasip1/crt1-reactor.o \
     -C link-arg=--export=_initialize -C link-arg=-lc -C link-arg=$builtins/libclang_rt.builtins.a"
+  # shellcheck disable=SC2031 # this subshell's own target directory
   export CARGO_TARGET_DIR="$OUT"
   cargo build --quiet --locked --release --target wasm32-wasip1 \
     --manifest-path "$ROOT/crates/slidesim-wasm/Cargo.toml"
