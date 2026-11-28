@@ -512,7 +512,10 @@ impl BatchedCells {
             control[i * CONTROL..(i + 1) * CONTROL].copy_from_slice(&record[ns..ns + CONTROL]);
             counts[i * COUNTS..(i + 1) * COUNTS].copy_from_slice(&record[ns + CONTROL..]);
         })?;
-        ran?;
+        // A process whose operator failed sent back cells it did not advance, which their own
+        // processes would report as not reaching t1: the failure of the operator is the error
+        // of every process (advance_local is collective here: the gather was).
+        agree(&self.comm.comm(), ran)?;
         for (w, c) in self
             .balance
             .weights_mut()
