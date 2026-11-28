@@ -1,12 +1,12 @@
 # Meshing
 
-A scene gives its mesh in one of three ways (`mesh.format` of [`scene/1`](../contracts.md#mesh-sources)):
-a gmsh file, which slidesim reads, or tagged polygons or parametric lobules, which slidesim
-meshes itself when a run loads the scene. The mesher (crate `mesher`) turns tagged polygons into
-a graded triangle mesh with the tags: a constrained Delaunay triangulation (`spade`), adapted to
-a size field by Mmg through PETSc's `DMAdaptMetric`, then improved locally. It is plain Rust but
-for Mmg, knows no tag names, and gives the same mesh, bit for bit, for the same input on one
-target.
+A scene gives its mesh in one of three ways (`mesh.format` of
+[`scene/1`](../contracts.md#mesh-sources)): a gmsh file, which slidesim reads, or tagged polygons or
+parametric lobules, which slidesim meshes itself when a run loads the scene. The mesher (crate
+`mesher`) turns tagged polygons into a graded triangle mesh with the tags: a constrained Delaunay
+triangulation (`spade`), adapted to a size field by Mmg through PETSc's `DMAdaptMetric`, then
+improved locally. It is plain Rust but for Mmg, knows no tag names, and gives the same mesh, bit for
+bit, for the same input on one target.
 
 ## In a run
 
@@ -43,19 +43,18 @@ h(d) = \begin{cases}
 \end{cases}
 $$
 
-as gmsh's Threshold field, \(h_\max\) everywhere without walls. Several such fields combine by
-their minimum. Narrow parts of the domain cap it: at a point of the boundary whose nearest
-segment across (not joined to it along the boundary within twice the distance) is at the
-distance \(w\), the size is at most \(0.4\,w\) (but not below \(h_\min / 4\)), growing by 0.3 per
-um away from that point, so that the elements fit between the frozen boundaries of a neck. A
-chain across a neck (an interface between two areas) joins its two sides within its own
-length, so next to such a chain the neck is no gap; the cap holds where the way along the
-boundary is longer. Short
-boundary segments cap it too: at both ends of a segment of length \(l\) the size is at most
-\(1.5\,l\) (but not below \(h_\min / 4\)), growing by 0.3 per um away from them. Every input vertex
-is kept, so a segment much shorter than the size (a pixel step of a mask, 1.77 um under 5 um
-elements) is a frozen edge; with the cap the triangles beside it take its length (an isosceles
-triangle on it has SICN 0.89) instead of reaching 5 um inward.
+as gmsh's Threshold field, \(h_\max\) everywhere without walls. Several such fields combine by their
+minimum. Narrow parts of the domain cap it: at a point of the boundary whose nearest segment across
+(not joined to it along the boundary within twice the distance) is at the distance \(w\), the size
+is at most \(0.4\,w\) (but not below \(h_\min / 4\)), growing by 0.3 per um away from that point, so
+that the elements fit between the frozen boundaries of a neck. A chain across a neck (an interface
+between two areas) joins its two sides within its own length, so next to such a chain the neck is no
+gap; the cap holds where the way along the boundary is longer. Short boundary segments cap it too:
+at both ends of a segment of length \(l\) the size is at most \(1.5\,l\) (but not below \(h_\min /
+4\)), growing by 0.3 per um away from them. Every input vertex is kept, so a segment much shorter
+than the size (a pixel step of a mask, 1.77 um under 5 um elements) is a frozen edge; with the cap
+the triangles beside it take its length (an isosceles triangle on it has SICN 0.89) instead of
+reaching 5 um inward.
 
 ## The steps
 

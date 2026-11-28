@@ -98,12 +98,11 @@ A slide passes three programs, joined by two contracts which slidesim defines
 - **sbmlsim-core** translates the SBML model of one cell into C: point functions for its
   engine (CVODE, IDA), and a libCEED QFunction with a Rosenbrock integrator for the batched path.
 - **slidesim** reads the scene and the `study/1`, which names the fields, their coefficients
-  (numbers or tables over maps), the perfusion, the cell model and the times. It reads the gmsh
-  mesh of the scene, or meshes tagged polygons or ideal lobules itself
-  ([Meshing](methods/meshing.md)). It solves the
-  steady Darcy flow, then steps the fields and the cells, coupled by Strang splitting, and writes
-  the fields, the pressure, the velocity and the cell states as VTU, the fields and the cell
-  states with the mesh as the Zarr store `result/1` for viewers, and a `summary.json` with the
+  (numbers or tables over maps), the perfusion, the cell model and the times. It reads the gmsh mesh
+  of the scene, or meshes tagged polygons or ideal lobules itself ([Meshing](methods/meshing.md)).
+  It solves the steady Darcy flow, then steps the fields and the cells, coupled by Strang splitting,
+  and writes the fields, the pressure, the velocity and the cell states as VTU, the fields and the
+  cell states with the mesh as the Zarr store `result/1` for viewers, and a `summary.json` with the
   flows, the mass balance and the time per phase.
 
 Nothing in slidesim is specific to an organ or a model: maps, tags, fields and models are data

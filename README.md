@@ -36,10 +36,10 @@ on real slides.
 
 ## Build
 
-Build the pinned native dependencies (PETSc with PT-Scotch and Mmg, and libCEED, versions and sha256 in
-`deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging checks, for the tests and CI),
-`native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3 -march=native`, without PETSc's
-debugging), then slidesim against them:
+Build the pinned native dependencies (PETSc with PT-Scotch and Mmg, and libCEED, versions and
+sha256 in `deps/versions.env`) into `deps/install/native-check` (`-O2` with PETSc's debugging
+checks, for the tests and CI), `native-debug` (`-O0`, for gdb sessions) or `native-opt` (`-O3
+-march=native`, without PETSc's debugging), then slidesim against them:
 
 ```bash
 scripts/deps/build-native.sh check   # or: debug, opt
@@ -48,8 +48,8 @@ cargo build --workspace              # with native-opt: cargo build --release
 ```
 
 The `slidesim` binary has an absolute RUNPATH into the installation it was built against
-(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of `libpetsc.so`): it runs without `env.sh`,
-but not after `deps/install` is moved or removed.
+(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of
+`libpetsc.so`): it runs without `env.sh`, but not after `deps/install` is moved or removed.
 
 ## Test
 

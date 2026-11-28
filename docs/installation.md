@@ -30,7 +30,8 @@ slidesim is built from source: a Rust workspace against PETSc, PT-Scotch, Mmg an
     ```
 
 - **A C compiler at run time** for studies with cell models: the model is translated to C and
-  compiled with `$CC` (or `cc`) at the start of the run (see [Running a study](usage.md#cell-models)).
+  compiled with `$CC` (or `cc`) at the start of the run (see
+  [Running a study](usage.md#cell-models)).
 
 ## Native dependencies
 
@@ -65,8 +66,8 @@ cargo build --workspace              # with native-opt: cargo build --release
 ```
 
 The `slidesim` binary has an absolute RUNPATH into the installation it was built against
-(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of `libpetsc.so`): it runs without `env.sh`,
-but not after `deps/install` is moved or removed.
+(`deps/install/native-<mode>/lib`, for PETSc, PT-Scotch and libCEED; Mmg is part of
+`libpetsc.so`): it runs without `env.sh`, but not after `deps/install` is moved or removed.
 
 For long runs and timings, build the optimized dependencies and a release binary:
 

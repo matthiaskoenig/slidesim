@@ -77,8 +77,9 @@ of runs at a load below 12 where available (base: 53.8 to 97.4 s over five runs 
 
 Kept: the coarse limit of 5000 equations (PETSc's default is 50), 23 % fewer iterations and 20 %
 less transport time, 61 % fewer messages and 15 % fewer flops in the solves: fewer levels in the
-algebraic multigrid, with a larger direct solve at its bottom. A redundant LU of the whole coarse level
-(21,000 equations on every process) halves the iterations but makes each one far more expensive.
+algebraic multigrid, with a larger direct solve at its bottom. A redundant LU of the whole coarse
+level (21,000 equations on every process) halves the iterations but makes each one far more
+expensive.
 
 ### The coarse solve on one process
 
@@ -223,28 +224,25 @@ steps of the largest attempts of a process over their mean, `cells.attempts` of
 
 - The exchange takes 9 to 10 times less time: 0.25 to 0.026 s on `quick`, 8.3 to 0.85 s on
   the 7 lobules on 4 processes, where it was 7 % of the run.
-- The balance takes the imbalance of the step attempts from 1.027 to 1.001 on the 7 lobules
-  and from 1.016 to 1.004 on `quick` on 4 processes, and the phase `cells` 2 % down (67.0 to
-  65.6 s), as much as the imbalance it removes: these cases are nearly balanced by the
-  partition in their first hours. Milestone 3 measured 1.36 (the time in the cells) on the
-  281 mg/kg slide at 24 h, where the necrosis concentrates the work, which the balance now
-  removes at the cost of the sends: the phase `cells` less the largest integration time of a
-  process (the sends and the waits) is 0.9 and 1.0 s without the balance and 0.6 and 0.4 s
-  with it. The test `balance_evens_the_work`
-  (process 0 with 10 times the attempts) goes from 1.82 to 1.002 on 2 processes and from 2.50
-  to 1.0004 on 3.
+- The balance takes the imbalance of the step attempts from 1.027 to 1.001 on the 7 lobules and from
+  1.016 to 1.004 on `quick` on 4 processes, and the phase `cells` 2 % down (67.0 to 65.6 s), as much
+  as the imbalance it removes: these cases are nearly balanced by the partition in their first
+  hours. Milestone 3 measured 1.36 (the time in the cells) on the 281 mg/kg slide at 24 h, where the
+  necrosis concentrates the work, which the balance now removes at the cost of the sends: the phase
+  `cells` less the largest integration time of a process (the sends and the waits) is 0.9 and 1.0 s
+  without the balance and 0.6 and 0.4 s with it. The test `balance_evens_the_work` (process 0 with
+  10 times the attempts) goes from 1.82 to 1.002 on 2 processes and from 2.50 to 1.0004 on 3.
 - The compilation on a cold cache: the setup of `quick` on 4 processes 0.94 and 0.96 s
   (`base`) against 0.92 and 0.94 s; the wall time hardly changes on an idle machine, three
   compilations of the four are gone.
-- Parity: the balance is bit for bit neutral in the tests of the cells. Whole runs on 2
-  processes are too (`quick`, `off` against `on`: equal); on 4 processes, runs of the same
-  binary and settings are not reproducible bit for bit (`base` against `base`: up to 4e-13 of
-  the largest term of a balance; on the 7 lobules, `on` against `on`, one rejected step in the
-  350 million step attempts of a run), and `off` against `on` differ by as much (up to 6e-13),
-  so the balance adds nothing beyond that noise.
-  The parity of 1, 2 and 3 processes at the tight settings (1e-10, the same step counts of the
-  cells) holds (`cells_parallel_matches_one`, `two_ranks_match_one`). The mass balances close
-  as before.
+- Parity: the balance is bit for bit neutral in the tests of the cells. Whole runs on 2 processes
+  are too (`quick`, `off` against `on`: equal); on 4 processes, runs of the same binary and settings
+  are not reproducible bit for bit (`base` against `base`: up to 4e-13 of the largest term of a
+  balance; on the 7 lobules, `on` against `on`, one rejected step in the 350 million step attempts
+  of a run), and `off` against `on` differ by as much (up to 6e-13), so the balance adds nothing
+  beyond that noise. The parity of 1, 2 and 3 processes at the tight settings (1e-10, the same step
+  counts of the cells) holds (`cells_parallel_matches_one`, `two_ranks_match_one`). The mass
+  balances close as before.
 
 The slide target (573 s to at most 300 s, 8 processes, 24 h) was not re-measured, by ruling:
 the runs stayed within 10 CPUs and 4 processes on the shared machine.

@@ -141,21 +141,20 @@ and exchange phases grow with it (dt 10 s, and a restart of BDF2 per split step)
 
 ## Recommendation
 
-1. **Split step 30 s, the choice for the substrate and the necrosis.** It is the largest
-   measured split step whose substrate (S) uptake error is below 1 % and whose necrotic share and
-   Dice stay within 0.01 on both lobules: S uptake error 0.62 % (lobule, 1 h) and 0.30 % (coarse,
-   4 h) at the end, at most 0.71 % over the outputs; necrotic share within 0.0019 and Dice
-   0.9972 at every output with necrosis. 60 s fails the uptake (1.73 % at 1 h) and the Dice at
-   3 h (0.984). The cost against
-   60 s is 1.59 times the wall time on the lobule for 1 h, 1.74 times on the coarse lobule for
-   4 h, and 1.40 times on the 7 lobules for 15 min; for the 24 h runs, where the cells dominate,
-   an estimate of about 1.7 times (not measured). The transport step of the SPT studies (15 s)
-   stays 15 s, which `split_step` 30 s allows (at least `time.dt`); split 30 s with dt 15 s is
-   not measured, all runs here used dt 10 s. Limits of this choice: the product P
-   misses 1 % at 30 s (item 2: 4.2 % on the lobule at 1 h, on the coarse mesh 0.69 % at 4 h but
-   4.2 % at 1 h); on the 7 lobules the S uptake misses it in the first 15 min (1.7 % at 15 min,
-   13 % at 5 min); and the necrosis criteria rest on the coarse mesh over 4 h, whose larger cells
-   refill more slowly, so they may not carry over to the production mesh at 24 h (Setup).
+1. **Split step 30 s, the choice for the substrate and the necrosis.** It is the largest measured
+   split step whose substrate (S) uptake error is below 1 % and whose necrotic share and Dice stay
+   within 0.01 on both lobules: S uptake error 0.62 % (lobule, 1 h) and 0.30 % (coarse, 4 h) at the
+   end, at most 0.71 % over the outputs; necrotic share within 0.0019 and Dice 0.9972 at every
+   output with necrosis. 60 s fails the uptake (1.73 % at 1 h) and the Dice at 3 h (0.984). The cost
+   against 60 s is 1.59 times the wall time on the lobule for 1 h, 1.74 times on the coarse lobule
+   for 4 h, and 1.40 times on the 7 lobules for 15 min; for the 24 h runs, where the cells dominate,
+   an estimate of about 1.7 times (not measured). The transport step of the SPT studies (15 s) stays
+   15 s, which `split_step` 30 s allows (at least `time.dt`); split 30 s with dt 15 s is not
+   measured, all runs here used dt 10 s. Limits of this choice: the product P misses 1 % at 30 s
+   (item 2: 4.2 % on the lobule at 1 h, on the coarse mesh 0.69 % at 4 h but 4.2 % at 1 h); on the 7
+   lobules the S uptake misses it in the first 15 min (1.7 % at 15 min, 13 % at 5 min); and the
+   necrosis criteria rest on the coarse mesh over 4 h, whose larger cells refill more slowly, so
+   they may not carry over to the production mesh at 24 h (Setup).
 2. **The largest error of the product P over the output times and the blood species at the
    output times do not meet 1 % at any measured split step.** The P given back lags by up to
    8.5 % (30 s) and 1.7 % (10 s) in the first hour; at the end it meets 1 % at 10 s (0.82 % on the

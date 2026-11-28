@@ -41,13 +41,13 @@ cargo test --doc --workspace    # doctests, among them compile_fail tests
 when other tests take their CPUs, and ends a test which hangs after ten minutes. The tests run
 against the `native-check` build (`-O2` with PETSc's debugging checks).
 
-The tests are the acceptance of each milestone: manufactured solutions with their convergence
-rates, conservation of the mass balances, agreement across 1, 2 and 3 processes within 1e-10
-at tight test settings (fixed transport steps; on the generated lobule also the linear solves and
-the cells to 1e-12, see [Running a study](usage.md)),
-the cell paths against each other and against sbmlsim-core, and end-to-end runs of the CLI on the
-[example studies](examples.md). The compiled cell models of the tests go to a cache directory of
-the test binary in the temporary directory, not to the cache of the user.
+The tests are the acceptance of each milestone: manufactured solutions with their convergence rates,
+conservation of the mass balances, agreement across 1, 2 and 3 processes within 1e-10 at tight test
+settings (fixed transport steps; on the generated lobule also the linear solves and the cells to
+1e-12, see [Running a study](usage.md)), the cell paths against each other and against sbmlsim-core,
+and end-to-end runs of the CLI on the [example studies](examples.md). The compiled cell models of
+the tests go to a cache directory of the test binary in the temporary directory, not to the cache of
+the user.
 
 The JSON Schemas in `schemas/` are generated from the contracts; a test fails when they are
 stale:
@@ -63,6 +63,14 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+The shell scripts and the Python of the scripts are kept clean of ShellCheck's and Ruff's
+findings (not run in CI):
+
+```bash
+git ls-files '*.sh' | xargs uvx --from shellcheck-py shellcheck -x
+git ls-files '*.py' | xargs uvx ruff check
+```
+
 ## WebAssembly dependencies
 
 The browser build links PETSc (with Mmg) and libCEED compiled for `wasm32-wasip1` with wasi-sdk,
@@ -75,7 +83,9 @@ scripts/deps/wasi-smoke/run.sh   # in wasmtime: Mmg adapts a square, and prints 
 
 Both builds, native and wasm, copy the sources and apply the patches of `scripts/deps/patches`;
 its `README.md` gives the reason and the upstream status of each patch, and the configure lines
-of the wasm build.
+of the wasm build. Both compile `__FILE__` relative to `deps/build` (the wasm build all its
+paths, `-ffile-prefix-map`), so that PETSc's tracebacks carry no path of the machine which built
+them, and `build.sh` does the same for the Rust sources of `slidesim.wasm`.
 
 ## The browser build
 
@@ -205,9 +215,9 @@ a session of its own and takes down every process it started when it ends, howev
 normally, by an error, by TERM, INT or HUP, or by KILL of the script or of the shell which started
 it; it needs no exec bit (`bash script.sh` works as well). `scripts/tests/proc_kill.sh` checks
 this with a dummy script (no slidesim needed, a few seconds): it stops the script in each of
-these ways, checks that no process of it remains within 15 s, and checks the exit status of a
-normal run, a failing command and a time-limit hit, and of a run started by `bash` without the
-exec bit. CI runs it.
+these ways, and its wrapper also while the script is still starting, checks that no process of
+it remains within 15 s, and checks the exit status of a normal run, a failing command and a
+time-limit hit, and of a run started by `bash` without the exec bit. CI runs it.
 
 ## Contributing
 

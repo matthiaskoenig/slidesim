@@ -59,16 +59,16 @@ back the oscillations SUPG removes.
 
 - **BDF2** of PETSc `TS`, with fixed steps `time.dt` or adaptive steps (`time.adaptive`). With
   cells, each field steps to the end of a split step, whose last step is shortened to end there.
-- **Linear solves**: CG for diffusion-reaction (symmetric positive definite), GMRES with
-  advection, the residual reduced by `solver.linear_rtol` of the study. Its default, 1e-10, keeps
-  results of different process counts within about the tolerance (on the generated lobule the
-  fields of 1 and 2 processes differ by 5e-11; 1e-10 everywhere, the cells included, takes
-  linear solves to 1e-12, see [Running a study](../usage.md)). With fixed steps the time
-  integration has no error estimate to derive the tolerance from, so the study sets it: the SPT
-  examples solve to 1e-6, where the fields differ from those of 1e-12 by 6e-8 of their largest
-  value on the generated lobule, below a thousandth of the change from halving the time step,
-  and the residuals of the mass balances grow with the tolerance ([performance](../results/2026-11-m4-performance.md)). A
-  solver which does not converge is an error, not a silently wrong step.
+- **Linear solves**: CG for diffusion-reaction (symmetric positive definite), GMRES with advection,
+  the residual reduced by `solver.linear_rtol` of the study. Its default, 1e-10, keeps results of
+  different process counts within about the tolerance (on the generated lobule the fields of 1 and 2
+  processes differ by 5e-11; 1e-10 everywhere, the cells included, takes linear solves to 1e-12, see
+  [Running a study](../usage.md)). With fixed steps the time integration has no error estimate to
+  derive the tolerance from, so the study sets it: the SPT examples solve to 1e-6, where the fields
+  differ from those of 1e-12 by 6e-8 of their largest value on the generated lobule, below a
+  thousandth of the change from halving the time step, and the residuals of the mass balances grow
+  with the tolerance ([performance](../results/2026-11-m4-performance.md)). A solver which does not
+  converge is an error, not a silently wrong step.
 - **Geometric multigrid** (`PCMG`, V-cycles) over the refinement levels of the mesh. The coarser
   levels discretize the same equation again (coefficients and velocity at their own quadrature
   points), not the Galerkin product. Smoothers: 2 iterations of Chebyshev preconditioned by

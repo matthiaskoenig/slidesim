@@ -27,6 +27,6 @@ What the results document will contain, per the design of milestone 3:
 - the performance per phase and the strong scaling series on 1 to 12 processes, both paths
   (completing the [performance results](2026-11-m3-performance.md)).
 
-Until then, from milestone 3: the [wall classes](2026-11-m3-wall-classes.md) of the dosed slides, on which the
-study rests, and the coupled 24 h baseline on the 281 mg/kg slide in the
+Until then, from milestone 3: the [wall classes](2026-11-m3-wall-classes.md) of the dosed slides, on
+which the study rests, and the coupled 24 h baseline on the 281 mg/kg slide in the
 [performance results](2026-11-m3-performance.md#coupled-baseline-cells-and-fields-on-a-real-slide).
