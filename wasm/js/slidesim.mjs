@@ -243,27 +243,33 @@ class Wasi {
 }
 
 /**
- * What a failed allocation writes, each message as its source words it: Rust's allocation error
- * (then a trap), libCEED's `CeedMalloc`, `CeedCalloc` and `CeedRealloc` (then a trap), PETSc's
- * `PETSC_ERR_MEM` (55) as the petsc crate formats it (an error of slidesim).
+ * What a failed allocation before a trap writes to stderr, a line each, as its source words it:
+ * Rust's allocation error (`memory allocation of <n> bytes failed`) and libCEED's `CeedMalloc`,
+ * `CeedCalloc` and `CeedRealloc` (`<file>:<line> in <function>(): <call> failed to allocate <n>
+ * members of size <size>`).
  */
-const ALLOCATION_FAILED = new RegExp(
-  [
-    String.raw`memory allocation of \d+ bytes failed`,
-    String.raw`(?:posix_memalign|calloc|realloc) failed to allocate \d+ members of size \d+`,
-    String.raw`PETSc error 55: Out of memory`,
-  ].join("|"),
+const TRAP_ALLOCATION_FAILED = new RegExp(
+  String.raw`^(?:memory allocation of \d+ bytes failed|\S+:\d+ in \w+\(\): ` +
+    String.raw`(?:posix_memalign|calloc|realloc) failed to allocate \d+ members of size \d+)$`,
+  "m",
 );
+
+/**
+ * A failed allocation in the message of an error of slidesim: PETSc's `PETSC_ERR_MEM` (55) as the
+ * petsc crate formats it, the whole message or a cause in its chain (after ": ").
+ */
+const ERROR_ALLOCATION_FAILED = /(?:^|: )PETSc error 55: Out of memory/;
 
 /** `bytes` in MiB, rounded. */
 const mebibytes = (bytes) => Math.round(bytes / (1 << 20));
 
 /**
- * When `text` (a message or stderr of slidesim) tells of a failed allocation: what the memory
- * of `instance` was, against its cap if it has one; else `null`.
+ * When `text` tells of a failed allocation by `pattern` (`TRAP_ALLOCATION_FAILED` for stderr of
+ * a trap, `ERROR_ALLOCATION_FAILED` for a message of slidesim): what the memory of `instance`
+ * was, against its cap if it has one; else `null`.
  */
-function memoryNote(instance, text) {
-  if (!ALLOCATION_FAILED.test(text)) return null;
+function memoryNote(instance, text, pattern) {
+  if (!pattern.test(text)) return null;
   const used = mebibytes(instance.memory.buffer.byteLength);
   const pages = instance.maximumPages;
   return pages !== undefined
@@ -277,7 +283,7 @@ function memoryNote(instance, text) {
 function trapError(instance, what, cause) {
   const stderr = instance.wasi.text(2).trim();
   const parts = [];
-  const note = memoryNote(instance, stderr);
+  const note = memoryNote(instance, stderr, TRAP_ALLOCATION_FAILED);
   if (note) parts.push(note);
   const message = cause instanceof Error ? cause.message : String(cause);
   parts.push(`slidesim.wasm trapped in ${what} (${message}) and was discarded`);
@@ -336,7 +342,7 @@ class Instance {
     const ptr = this.call("slidesim_error_ptr") >>> 0;
     const len = this.call("slidesim_error_len") >>> 0;
     const message = new TextDecoder().decode(new Uint8Array(this.memory.buffer, ptr, len));
-    const note = memoryNote(this, message);
+    const note = memoryNote(this, message, ERROR_ALLOCATION_FAILED);
     return note ? `${note}: ${message}` : message;
   }
 
