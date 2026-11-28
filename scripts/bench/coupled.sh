@@ -144,8 +144,8 @@ for name in $STUDIES; do
     # TS's solvers, which -log_view does not separate, so the PCSetUp count is printed whole.
     pc_setups=$(awk '$1 == "PCSetUp" { print $2; exit }' "$dir/log_view.txt")
     jq -r '(.phases | [.setup, .pressure, .transport, .exchange, .cells, .output]) +
-        [(.cells.attempts // null | if . then .max / .mean else "-" end),
-         (.cells.seconds // null | if . then .max / .mean else "-" end)]
+        [(.cells.attempts // null | if . and .mean > 0 then .max / .mean else "-" end),
+         (.cells.seconds // null | if . and .mean > 0 then .max / .mean else "-" end)]
         | map(tostring) | join(" ")' "$dir/summary.json" |
         awk -v run="${TAG}_$name" -v np="$np" -v solves="$solves" -v iterations="$iterations" \
             -v setups="$pc_setups" -v wall="$wall" -v l0="$load0" -v l1="$load1" '
