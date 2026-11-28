@@ -35,6 +35,11 @@
 //! the same as where they were (`balance`). The first cell which fails is the first in the
 //! order of the processes and their cells, wherever it was advanced.
 
+// Without native code the cells run on the kernel the host binds to slidesim's imports
+// (`slidesim_kernel`): a wasm module only, which elsewhere fails at the link.
+#[cfg(all(not(feature = "native"), not(target_family = "wasm")))]
+compile_error!("cells without the feature `native` is the browser build: build it for wasm");
+
 #[cfg(feature = "native")]
 mod balance;
 #[cfg(feature = "native")]

@@ -88,9 +88,11 @@ const NO_CELL_MODEL: &str = "cells: the inputs have no cell model";
 const NO_CELL_MODEL: &str = "cells: the inputs have no kernel of the cell model";
 
 /// Checks the inputs before anything is made, as [`crate::Simulation::new`] does: a study of at
-/// least one field, its times (again: a study may be changed after it was loaded) and, with
-/// cells, a cell model (errors on every process, with [`OnEveryProcess`]: every process has the
-/// inputs), then [`check`].
+/// least one field, its times (again: a study may be changed after it was loaded), [`check`],
+/// and with cells, in the browser build a path other than the engine
+/// ([`cells::CellsError::EngineNeedsNative`], before the missing kernel such a study may have)
+/// and a cell model (errors on every process, with [`OnEveryProcess`]: every process has the
+/// inputs).
 pub(crate) fn check_inputs(inputs: &Inputs) -> Result<()> {
     ensure!(
         !inputs.study.fields.is_empty(),
@@ -102,6 +104,13 @@ pub(crate) fn check_inputs(inputs: &Inputs) -> Result<()> {
         .validate()
         .context(OnEveryProcess("invalid study"))?;
     check(&inputs.study, &inputs.scene)?;
+    #[cfg(not(feature = "native"))]
+    if let Some(spec) = &inputs.study.cells
+        && matches!(spec.solver, contracts::CellSolverKind::Engine)
+    {
+        return Err(anyhow::Error::new(cells::CellsError::EngineNeedsNative)
+            .context(OnEveryProcess("invalid study")));
+    }
     ensure!(
         inputs.study.cells.is_none() || inputs.has_cell_model(),
         OnEveryProcess(NO_CELL_MODEL)
