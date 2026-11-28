@@ -21,3 +21,36 @@ test(=parallel_on_2_processes) | test(=parallel_on_3_processes) \
 | binary_id(slidesim::cli)\
 """
 threads-required = "num-test-threads"
+
+# CI (`--profile ci`): the fast tests. The default profile, the full suite, runs locally before a
+# push (scripts/check.sh). Local only are, measured on the Open MPI leg of CI (4 CPUs):
+# - the runs on 3 processes: every binary which has one also runs the same test on 2 processes
+#   (the MPI path of the code, the communication between ranks and their agreement);
+# - the tests which take more than 10 s there: the quality sweeps of the mesher (35 to 60 s
+#   each; the mesher's fixture, its lobule meshes and its small cases stay), the runs on the
+#   generated lobule and on the slide field (15 to 40 s; the toy lobule and the SPT toy study
+#   stay, end to end through the CLI), the convergence orders of the flow on the tagged mesh and
+#   of the conservative velocity and the bound of the multigrid iterations (13 to 15 s; the orders
+#   on the square meshes stay), and the 2-process runs of the mesh, the flow and the multigrid
+#   (14 to 28 s; their other parallel tests stay).
+# Together 537 s of the 876 s of test time, and most of the time of the tests which run alone.
+[profile.ci]
+default-filter = """
+not (
+    test(=parallel_on_3_processes)
+  | (binary_id(mesher::lobules) & test(/^quality_sweep_/))
+  | test(/_on_generated_lobule$/)
+  | (binary_id(slidesim::cli) & (test(=lobule_spt_runs) | test(/^slide_field_/) \
+                                 | test(=cells_parallel_matches_one)))
+  | (binary_id(slidesim::simulation) & test(=simulation_matches_cli))
+  | (binary_id(simulation::simulation) & test(=mesh_override_matches_generated))
+  | (binary_id(simulation::result) & test(=result_is_partition_independent))
+  | (binary_id(pde::flow) & (test(=pressure_order_on_tagged_mesh) \
+                             | test(=conservative_velocity_order)))
+  | (binary_id(pde::multigrid) & test(=iterations_bounded))
+  | ((binary_id(mesh::mesh) | binary_id(pde::flow) | binary_id(pde::multigrid)) \
+     & test(=parallel_on_2_processes))
+)
+"""
+# Every failure of a run, not only the first.
+fail-fast = false

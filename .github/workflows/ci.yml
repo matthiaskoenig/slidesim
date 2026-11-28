@@ -4,9 +4,20 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to a pull request cancels its running run; every push to main runs (a group of its
+# own per commit), so that main saves the caches of each of its states.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+# CI runs the fast tests (the nextest profile ci of .config/nextest.toml); the full suite, the
+# heavy mesher sweep and the rest run locally before a push (scripts/check.sh).
 env:
   # -O2 with PETSc's debugging checks (scripts/deps/build-native.sh), several times faster than debug.
   DEPS_MODE: check
+  # Line tables only in the debug builds: smaller caches of the target directories and faster
+  # links; panics and backtraces keep their file and line.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -60,15 +71,33 @@ jobs:
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show ${{ matrix.mpi-packages }})"
           versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
           echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}" >> "$GITHUB_OUTPUT"
-      - name: Cache native dependencies
+      - name: Restore native dependencies
         id: deps-cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: deps/install
           key: ${{ steps.deps-key.outputs.key }}
       - name: Build native dependencies
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: scripts/deps/build-native.sh ${{ env.DEPS_MODE }}
+      - name: Save native dependencies
+        # At once, not at the end of the job: a later failing step keeps the build. The job wasm
+        # may have saved them under the same key meanwhile, which only warns.
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: deps/install
+          key: ${{ steps.deps-key.outputs.key }}
+      - name: Cache the Cargo registry and target directory
+        # The dependencies' build artifacts (not the workspace's crates), keyed by the native
+        # dependencies they are built against (and by rust-cache by the toolchain, the Cargo
+        # manifests and locks, and the CARGO_* and RUST* environment). Saved by main only, when
+        # the key is new: pull requests restore main's entries, and write none of their own into
+        # the 10 GB of the repository's caches.
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ steps.deps-key.outputs.key }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Format
         run: cargo fmt --all --check
       - name: Process hygiene of the scripts
@@ -79,17 +108,11 @@ jobs:
           . deps/install/native-check/env.sh
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        # .config/nextest.toml: tests which start mpiexec run alone, and a timeout.
+        # .config/nextest.toml: the profile ci (the fast tests; the slow ones and the runs on 3
+        # processes are local only), tests which start mpiexec run alone, and a timeout.
         run: |
           . deps/install/native-check/env.sh
-          cargo nextest run --workspace --no-tests=pass
-      - name: Heavy mesher sweep
-        # quality_sweep_heavy (rings 2 to 4, about 30 meshes) is ignored in the debug test run:
-        # the quality bounds of the mesher rest on its local improvement, which this checks over
-        # the larger lobule fields, in a release build.
-        run: |
-          . deps/install/native-check/env.sh
-          cargo test --release --locked -p mesher --test lobules -- --ignored --exact quality_sweep_heavy
+          cargo nextest run --workspace --profile ci --no-tests=pass
       - name: Doctests
         # nextest does not run doctests; among them the compile_fail tests of the bindings.
         run: |
@@ -99,10 +122,10 @@ jobs:
   wasm:
     # The browser build (scripts/wasm/build.sh): slidesim.wasm against the wasi builds of PETSc,
     # libCEED and Mmg, the batched kernel of sbmlsim-core, and the wasmtime host whose tests
-    # compare it with the native build (on the native dependencies of the check job, which runs
-    # first and caches them), and the JavaScript glue of wasm/js in Node and Chromium.
+    # compare it with the native build (on the native dependencies of the Open MPI leg of the
+    # job check, from the same cache, built here on a miss), and the JavaScript glue of wasm/js
+    # in Node and Chromium. It runs beside the job check.
     name: wasm
-    needs: check
     runs-on: ubuntu-24.04
     env:
       MPI_PACKAGES: openmpi-bin libopenmpi-dev
@@ -135,15 +158,31 @@ jobs:
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show $MPI_PACKAGES)"
           versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
           scripts="${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}"
-          echo "native=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-$scripts" >> "$GITHUB_OUTPUT"
+          native="deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-$scripts"
+          echo "native=$native" >> "$GITHUB_OUTPUT"
           echo "wasi=deps-wasi-$(uname -m)-$versions-$scripts" >> "$GITHUB_OUTPUT"
           echo "sbmlsim-js=sbmlsim-js-$(. deps/versions.env && echo "$SBMLSIM_CORE_KERNEL_REV")" >> "$GITHUB_OUTPUT"
+          # The target directories: the native and wasi dependencies (their versions and
+          # scripts are in the native key), the locks, the toolchain, the Cargo configuration,
+          # the flags of build.sh, and this workflow (its environment, e.g.
+          # CARGO_PROFILE_DEV_DEBUG, and the commands of the build).
+          echo "target=target-wasm-$native-${{ hashFiles('Cargo.lock', 'crates/slidesim-wasm/Cargo.lock', 'wasm/host/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/wasm/build.sh', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
       - name: Restore native dependencies
+        id: native-cache
         uses: actions/cache/restore@v5
         with:
           path: deps/install
           key: ${{ steps.deps-key.outputs.native }}
-          fail-on-cache-miss: true
+      - name: Build native dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: scripts/deps/build-native.sh ${{ env.DEPS_MODE }}
+      - name: Save native dependencies
+        # As the job check does, which may have saved them under the same key meanwhile.
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: deps/install
+          key: ${{ steps.deps-key.outputs.native }}
       - name: Cache wasi dependencies
         id: wasi-cache
         uses: actions/cache@v5
@@ -158,6 +197,25 @@ jobs:
         with:
           path: deps/install/sbmlsim-js
           key: ${{ steps.deps-key.outputs.sbmlsim-js }}
+      - name: Cache the Cargo registry
+        # Saved by main only, as in the job check.
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ steps.deps-key.outputs.native }}
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Restore the target directories
+        # The three workspaces (the native one, slidesim-wasm and the wasmtime host) build into
+        # nested target directories (target, target/wasm, target/wasm/host), which rust-cache
+        # would clean with the packages of one workspace each, so the whole of target is cached
+        # as built, under the exact key of everything its artifacts depend on: no fallback to an
+        # older entry, whose stale artifacts would pile up from one key to the next (a new key
+        # builds once from scratch). Saved below, by main only.
+        id: target-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: target
+          key: ${{ steps.deps-key.outputs.target }}
       - name: Build
         run: NATIVE_DEPS=native-${{ env.DEPS_MODE }} scripts/wasm/build.sh
       - name: Format and clippy
@@ -178,6 +236,14 @@ jobs:
         env:
           HWLOC_COMPONENTS: -gl
         run: CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.toml --locked
+      - name: Save the target directories
+        # After the last step which compiles (the build, Clippy and the host tests all write into
+        # target), whether or not the JavaScript glue passes; by main only, on a new key.
+        if: github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: target
+          key: ${{ steps.deps-key.outputs.target }}
       - name: JavaScript glue
         # slidesim.mjs and its declarations: the type check of slidesim.d.ts, the Node tests (the
         # lobule study, bitwise against the wasmtime host) and the lobule demo in headless
