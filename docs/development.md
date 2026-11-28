@@ -25,11 +25,25 @@ dependencies are in [Installation](installation.md).
 | `testdata/` | meshes, maps, models, contracts and example studies of the tests |
 | `scripts/deps/` | the builds of the dependencies, native (`build-native.sh`) and wasm32-wasip1 (`build-wasi.sh`, with its smoke test `wasi-smoke/`), and their patches (`patches/`, each explained in its `README.md`) |
 | `scripts/wasm/` | the build of the browser build and of what its tests need (`build.sh`), and the bundle of the lobule demo (`bundle.sh`) |
+| `scripts/check.sh` | the checks before a push: what CI runs, the full test suite, the heavy mesher sweep and the browser build's tests |
 | `scripts/e2e/`, `scripts/bench/` | the end-to-end runs on real slides, and the benchmarks |
 | `spike/petsc-wasm/`, `spike/mmg/RESULT.md` | the spikes of milestone 0 (PETSc and libCEED from Rust in `wasm32-wasip1`) and milestone 4 (Mmg through `DMAdaptMetric`, natively and in `wasm32-wasip1`: its result; the code is in the history) |
 | `docs/` | these pages; `docs/superpowers/` holds the design documents and plans of the milestones, which are not part of the site |
 
 ## Tests
+
+Before every push, run
+
+```bash
+scripts/check.sh        # 20 to 30 min on 10 CPUs; --ci: only what the job check of CI runs
+```
+
+It runs what CI runs and what CI leaves out: the format, the process hygiene of the scripts,
+Clippy, the full test suite, the doctests, the heavy quality sweep of the mesher in a release
+build, ShellCheck and Ruff (with `uvx`), and the browser build with its Clippy and its tests
+when its prerequisites are there (below). Every step runs through `run_sim` of
+`scripts/lib/proc.sh` (CPUs 0-9 at nice 10, a time limit, no process left behind); the tests run
+on 4 threads. The single commands:
 
 ```bash
 . deps/install/native-check/env.sh
@@ -40,6 +54,26 @@ cargo test --doc --workspace    # doctests, among them compile_fail tests
 `.config/nextest.toml` runs the tests which start `mpiexec` alone, because MPI processes stall
 when other tests take their CPUs, and ends a test which hangs after ten minutes. The tests run
 against the `native-check` build (`-O2` with PETSc's debugging checks).
+
+The default profile is the full suite. CI runs the profile `ci`
+(`cargo nextest run --workspace --profile ci`), which leaves out, by the filter of the profile in
+`.config/nextest.toml`, the tests which only a local run runs:
+
+- the runs on 3 processes (`parallel_on_3_processes`): every test binary with one also runs the
+  same test on 2 processes, the parallel code path with its communication and agreement;
+- the tests which take more than 10 s on a CI runner: the quality sweeps of the mesher
+  (`quality_sweep_rings_0`, `_rings_1`, `_radius_limits`), the runs on the generated lobule
+  (`*_on_generated_lobule`, `mesh_override_matches_generated`, `simulation_matches_cli`,
+  `lobule_spt_runs`) and on the slide field (`slide_field_*`), `cells_parallel_matches_one`,
+  `result_is_partition_independent`, the convergence orders of the flow on the tagged mesh and
+  of its conservative velocity and the bound of the multigrid iterations, and the 2-process
+  runs of the mesh, the flow and the multigrid.
+
+They are 30 of the 508 tests and 537 s of the 876 s of test time on a CI runner, most of it in
+tests which run alone. CI keeps the contracts and schemas, the mesher's fixture and small
+meshes, the toy lobule and the SPT toy study end to end through the CLI, and the 2-process runs
+of the other crates on both MPI implementations. A test which grows beyond 10 s on a CI runner
+joins the filter.
 
 The tests are the acceptance of each milestone: manufactured solutions with their convergence rates,
 conservation of the mass balances, agreement across 1, 2 and 3 processes within 1e-10 at tight test
@@ -64,7 +98,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The shell scripts and the Python of the scripts are kept clean of ShellCheck's and Ruff's
-findings (not run in CI):
+findings (not run in CI; `scripts/check.sh` runs them):
 
 ```bash
 git ls-files '*.sh' | xargs uvx --from shellcheck-py shellcheck -x
@@ -167,15 +201,20 @@ CARGO_TARGET_DIR=target/wasm cargo clippy --target wasm32-wasip1 \
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request: the format, the
-process hygiene of the scripts, Clippy, the tests, the doctests and, in a release build, the
-heavy quality sweep of the mesher (`quality_sweep_heavy`: rings 2 to 4, about 30 meshes, ignored
-in the debug test run), on Ubuntu 24.04 with Open MPI and on Ubuntu 22.04 with MPICH, against
-the `native-check` dependencies, which it caches (the key covers `deps/versions.env` but for the
-revision of sbmlsim-core, the build scripts and the patches). The job `wasm` then runs the
-browser build on Ubuntu 24.04: the wasi dependencies and sbmlsim-core's artifacts cached,
-`scripts/wasm/build.sh`, the format and Clippy of the browser build's crates, the tests of
-`wasm/host`, the type check of `slidesim.d.ts` and the Node and browser tests of `wasm/js`.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request (a newer push to
+a pull request cancels its running run): the format, the process hygiene of the scripts,
+Clippy, the fast tests (the profile `ci`, [above](#tests)) and the doctests, on Ubuntu 24.04
+with Open MPI and on Ubuntu 22.04 with MPICH, against the `native-check` dependencies, which it
+caches (the key covers `deps/versions.env` but for the revision of sbmlsim-core, the build
+scripts and the patches; saved right after their build), with the Cargo registry and the
+dependencies' build artifacts in the target directory (rust-cache, keyed by the native
+dependencies). The full suite, the heavy quality sweep of the mesher (`quality_sweep_heavy`:
+rings 2 to 4, about 30 meshes, ignored in the debug test run, in a release build) and ShellCheck
+and Ruff run locally, in `scripts/check.sh`. Beside the job `check`, the job `wasm` runs the
+browser build on Ubuntu 24.04: the native dependencies from the cache of the Open MPI leg (built
+there on a miss), the wasi dependencies, sbmlsim-core's artifacts and the target directories
+cached, `scripts/wasm/build.sh`, the format and Clippy of the browser build's crates, the tests
+of `wasm/host`, the type check of `slidesim.d.ts` and the Node and browser tests of `wasm/js`.
 `.github/workflows/docs.yml` builds these pages (below), and in a job of its own the browser build
 (`build.sh --browser`, the wasi dependencies from the cache of the job `wasm`), whose bundle goes
 to `demo/lobule/` of the site.
@@ -223,7 +262,8 @@ time-limit hit, and of a run started by `bash` without the exec bit. CI runs it.
 
 ## Contributing
 
-Work happens on branches and reaches `main` through pull requests, which CI must pass. The commit
+Work happens on branches and reaches `main` through pull requests, which CI must pass;
+`scripts/check.sh` passes before every push. The commit
 messages follow the conventional style of the history (`feat(pde): ...`, `fix(mesh): ...`,
 `perf: ...`, `docs: ...`, `test: ...`). Every commit keeps `cargo fmt --check`, Clippy and the
 tests clean.

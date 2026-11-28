@@ -54,13 +54,16 @@ The `slidesim` binary has an absolute RUNPATH into the installation it was built
 ## Test
 
 ```bash
+scripts/check.sh                # before a push: lint, the full suite, the heavy sweep, wasm
 . deps/install/native-check/env.sh
 cargo nextest run --workspace   # one process per test; some start mpiexec
 cargo test --doc --workspace    # doctests, among them compile_fail tests of the bindings
 ```
 
 `.config/nextest.toml` runs the tests which start `mpiexec` alone, because MPI processes stall
-when other tests take their CPUs, and ends a test which hangs after ten minutes.
+when other tests take their CPUs, and ends a test which hangs after ten minutes. CI runs its
+profile `ci`, the fast tests; the slow ones run locally (see
+[Development](docs/development.md#tests)).
 
 ## Run
 

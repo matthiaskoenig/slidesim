@@ -85,7 +85,8 @@ reaching 5 um inward.
    the worst it replaces, until the elements around a vertex reach that margin or a budget of
    operations is spent. The quality bounds below rest on this step: nothing guarantees that it
    lifts every element Mmg leaves below them, so the quality sweeps of the tests check it (rings
-   0 and 1 in every test run, rings 2 to 4 in the release step `quality_sweep_heavy` of CI).
+   0 and 1 in the full test run, rings 2 to 4 in the release step `quality_sweep_heavy` of
+   `scripts/check.sh`, before every push).
 6. **Quality.** The smallest angle, the SICN of every triangle (\(4\sqrt{3} A / (l_1^2 + l_2^2 +
    l_3^2)\), 1 for an equilateral triangle, 0 for a degenerate one) and the ratio of every edge
    length to the size at its midpoint. It is measured and reported, not enforced. The tests see
