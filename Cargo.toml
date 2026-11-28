@@ -23,12 +23,11 @@ petsc-sys = { path = "crates/petsc-sys" }
 robust = "1.2.0"
 rstar = "0.14.0"
 spade = "=2.15.1"
-# sbmlsim-core's C target and engine: the cell models as native code. `develop` at the merge of
-# pull request #151 (the batched kernel), after 0.40.0, the revision of the browser build
-# (SBMLSIM_CORE_KERNEL_REV of deps/versions.env); move to the release that contains it.
-sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "d3722c62f7e6b6b6efbc55b13bfc1140217ed6c0" }
-sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "d3722c62f7e6b6b6efbc55b13bfc1140217ed6c0" }
-sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", rev = "d3722c62f7e6b6b6efbc55b13bfc1140217ed6c0" }
+# sbmlsim-core's C target and engine: the cell models as native code. The release 0.41.0, the
+# revision of the browser build too (SBMLSIM_CORE_KERNEL_REV of deps/versions.env).
+sbmlsim-abi = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
+sbmlsim-c = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
+sbmlsim-engine = { git = "https://github.com/matthiaskoenig/sbmlsim-core", tag = "v0.41.0" }
 
 # The mesher's geometry in debug builds (the tests): unoptimized, spade and rstar make the
 # triangulation of a large domain about 50 times slower.
