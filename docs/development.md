@@ -35,7 +35,7 @@ dependencies are in [Installation](installation.md).
 Before every push, run
 
 ```bash
-scripts/check.sh        # 20 to 30 min on 10 CPUs; --ci: only what the job check of CI runs
+scripts/check.sh        # 20 to 30 min on 10 CPUs; --ci: what the job check of CI runs, as it does
 ```
 
 It runs what CI runs and what CI leaves out: the format, the process hygiene of the scripts,
@@ -63,7 +63,9 @@ The default profile is the full suite. CI runs the profile `ci`
   same test on 2 processes, the parallel code path with its communication and agreement;
 - the tests which take more than 10 s on a CI runner: the quality sweeps of the mesher
   (`quality_sweep_rings_0`, `_rings_1`, `_radius_limits`), the runs on the generated lobule
-  (`*_on_generated_lobule`, `mesh_override_matches_generated`, `simulation_matches_cli`,
+  (every test named `*_on_generated_lobule`: `coupled_conservation_on_generated_lobule`,
+  `strang_order_two_on_generated_lobule`, `cells_parallel_matches_one_on_generated_lobule`;
+  `mesh_override_matches_generated`, `simulation_matches_cli` (the library against the CLI),
   `lobule_spt_runs`) and on the slide field (`slide_field_*`), `cells_parallel_matches_one`,
   `result_is_partition_independent`, the convergence orders of the flow on the tagged mesh and
   of its conservative velocity and the bound of the multigrid iterations, and the 2-process
@@ -201,8 +203,8 @@ CARGO_TARGET_DIR=target/wasm cargo clippy --target wasm32-wasip1 \
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request (a newer push to
-a pull request cancels its running run): the format, the process hygiene of the scripts,
+`.github/workflows/ci.yml` runs on every push to `main` (each to its end) and every pull request
+(a newer push to a pull request cancels its running run): the format, the process hygiene of the scripts,
 Clippy, the fast tests (the profile `ci`, [above](#tests)) and the doctests, on Ubuntu 24.04
 with Open MPI and on Ubuntu 22.04 with MPICH, against the `native-check` dependencies, which it
 caches (the key covers `deps/versions.env` but for the revision of sbmlsim-core, the build
@@ -215,6 +217,13 @@ browser build on Ubuntu 24.04: the native dependencies from the cache of the Ope
 there on a miss), the wasi dependencies, sbmlsim-core's artifacts and the target directories
 cached, `scripts/wasm/build.sh`, the format and Clippy of the browser build's crates, the tests
 of `wasm/host`, the type check of `slidesim.d.ts` and the Node and browser tests of `wasm/js`.
+The Cargo caches (rust-cache of both jobs, and the whole `target` of the job `wasm` under the
+exact key of its dependencies, locks, toolchain, Cargo configuration, `build.sh` and the
+workflow) are saved by runs on `main` only, when their key is new; pull requests restore
+`main`'s entries and save none of their own, which keeps the repository's 10 GB of caches for
+`main`. So the first run after a change of a lock, of the toolchain or of the workflow compiles
+the dependencies from scratch until `main` has run with it. The dependency builds (native,
+wasi, sbmlsim-core's artifacts) are saved by every run on a miss.
 `.github/workflows/docs.yml` builds these pages (below), and in a job of its own the browser build
 (`build.sh --browser`, the wasi dependencies from the cache of the job `wasm`), whose bundle goes
 to `demo/lobule/` of the site.

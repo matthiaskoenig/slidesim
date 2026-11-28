@@ -4,10 +4,11 @@ on:
     branches: [main]
   pull_request:
 
-# A newer push to a pull request supersedes its running run; every push to main runs to the end.
+# A newer push to a pull request cancels its running run; every push to main runs (a group of its
+# own per commit), so that main saves the caches of each of its states.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 # CI runs the fast tests (the nextest profile ci of .config/nextest.toml); the full suite, the
 # heavy mesher sweep and the rest run locally before a push (scripts/check.sh).
@@ -89,11 +90,14 @@ jobs:
           key: ${{ steps.deps-key.outputs.key }}
       - name: Cache the Cargo registry and target directory
         # The dependencies' build artifacts (not the workspace's crates), keyed by the native
-        # dependencies they are built against; saved when the key is new (Cargo.lock, the
-        # toolchain or the dependencies changed), from a pull request as well.
+        # dependencies they are built against (and by rust-cache by the toolchain, the Cargo
+        # manifests and locks, and the CARGO_* and RUST* environment). Saved by main only, when
+        # the key is new: pull requests restore main's entries, and write none of their own into
+        # the 10 GB of the repository's caches.
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ steps.deps-key.outputs.key }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Format
         run: cargo fmt --all --check
       - name: Process hygiene of the scripts
@@ -154,9 +158,15 @@ jobs:
           mpi="$(dpkg-query --showformat='${Package}-${Version}+' --show $MPI_PACKAGES)"
           versions="$(grep -v '^SBMLSIM_CORE_' deps/versions.env | sha256sum | cut -c1-16)"
           scripts="${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}"
-          echo "native=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-$scripts" >> "$GITHUB_OUTPUT"
+          native="deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-$scripts"
+          echo "native=$native" >> "$GITHUB_OUTPUT"
           echo "wasi=deps-wasi-$(uname -m)-$versions-$scripts" >> "$GITHUB_OUTPUT"
           echo "sbmlsim-js=sbmlsim-js-$(. deps/versions.env && echo "$SBMLSIM_CORE_KERNEL_REV")" >> "$GITHUB_OUTPUT"
+          # The target directories: the native and wasi dependencies (their versions and
+          # scripts are in the native key), the locks, the toolchain, the Cargo configuration,
+          # the flags of build.sh, and this workflow (its environment, e.g.
+          # CARGO_PROFILE_DEV_DEBUG, and the commands of the build).
+          echo "target=target-wasm-$native-${{ hashFiles('Cargo.lock', 'crates/slidesim-wasm/Cargo.lock', 'wasm/host/Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', 'scripts/wasm/build.sh', '.github/workflows/ci.yml') }}" >> "$GITHUB_OUTPUT"
       - name: Restore native dependencies
         id: native-cache
         uses: actions/cache/restore@v5
@@ -188,21 +198,24 @@ jobs:
           path: deps/install/sbmlsim-js
           key: ${{ steps.deps-key.outputs.sbmlsim-js }}
       - name: Cache the Cargo registry
+        # Saved by main only, as in the job check.
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ steps.deps-key.outputs.native }}
           cache-targets: false
-      - name: Cache the target directories
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Restore the target directories
         # The three workspaces (the native one, slidesim-wasm and the wasmtime host) build into
         # nested target directories (target, target/wasm, target/wasm/host), which rust-cache
         # would clean with the packages of one workspace each, so the whole of target is cached
-        # as built, under the exact key of what its dependencies' artifacts depend on: no
-        # fallback to an older entry, whose stale artifacts would pile up from one key to the
-        # next (a new lock or toolchain builds once from scratch).
-        uses: actions/cache@v5
+        # as built, under the exact key of everything its artifacts depend on: no fallback to an
+        # older entry, whose stale artifacts would pile up from one key to the next (a new key
+        # builds once from scratch). Saved below, by main only.
+        id: target-cache
+        uses: actions/cache/restore@v5
         with:
           path: target
-          key: target-wasm-${{ steps.deps-key.outputs.native }}-${{ steps.deps-key.outputs.wasi }}-${{ hashFiles('Cargo.lock', 'crates/slidesim-wasm/Cargo.lock', 'wasm/host/Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ steps.deps-key.outputs.target }}
       - name: Build
         run: NATIVE_DEPS=native-${{ env.DEPS_MODE }} scripts/wasm/build.sh
       - name: Format and clippy
@@ -223,6 +236,14 @@ jobs:
         env:
           HWLOC_COMPONENTS: -gl
         run: CARGO_TARGET_DIR=target/wasm/host cargo test --manifest-path wasm/host/Cargo.toml --locked
+      - name: Save the target directories
+        # After the last step which compiles (the build, Clippy and the host tests all write into
+        # target), whether or not the JavaScript glue passes; by main only, on a new key.
+        if: github.ref == 'refs/heads/main' && steps.target-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: target
+          key: ${{ steps.deps-key.outputs.target }}
       - name: JavaScript glue
         # slidesim.mjs and its declarations: the type check of slidesim.d.ts, the Node tests (the
         # lobule study, bitwise against the wasmtime host) and the lobule demo in headless

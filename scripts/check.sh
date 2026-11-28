@@ -14,7 +14,8 @@
 #    type check and its Node and browser tests.
 #
 # Usage: scripts/check.sh [--ci]
-#   --ci: only what the job check of CI runs (1 and the profile ci with the doctests).
+#   --ci: only what the job check of CI runs, as it runs it (1, the profile ci with the doctests,
+#   debug builds with line tables only).
 # Every step runs through `run_sim` of scripts/lib/proc.sh: on the CPUs PROC_CPUS (default 0-9)
 # at nice 10, with a wall-clock limit, and no process left behind when the script ends. The tests
 # run on 4 threads (TEST_THREADS); the tests which start mpiexec run alone, on at most 3
@@ -50,11 +51,16 @@ step() {
 # shellcheck source=/dev/null
 . deps/install/native-check/env.sh
 
+if [[ "$CI_ONLY" == 1 ]]; then
+  # As the env of .github/workflows/ci.yml (its own artifacts beside those of the full debuginfo).
+  export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+fi
+
 step format cargo fmt --all --check
 step "process hygiene" bash scripts/tests/proc_kill.sh
 step clippy cargo clippy --workspace --all-targets -- -D warnings
 if [[ "$CI_ONLY" == 1 ]]; then
-  step "tests (profile ci)" cargo nextest run --workspace --profile ci \
+  step "tests (profile ci)" cargo nextest run --workspace --profile ci --no-tests=pass \
     --test-threads "$TEST_THREADS"
 else
   step "tests (full suite)" cargo nextest run --workspace --test-threads "$TEST_THREADS"
@@ -93,11 +99,12 @@ if [[ "$CI_ONLY" == 0 ]]; then
     )
     step "clippy of the host" env CARGO_TARGET_DIR=target/wasm/host cargo clippy \
       --manifest-path wasm/host/Cargo.toml --all-targets --locked -- -D warnings
-    step "host tests" env CARGO_TARGET_DIR=target/wasm/host cargo test \
+    # Open MPI's hwloc without its GL probe (the X server), as in CI.
+    step "host tests" env CARGO_TARGET_DIR=target/wasm/host HWLOC_COMPONENTS=-gl cargo test \
       --manifest-path wasm/host/Cargo.toml --locked
     if [[ -d wasm/js/node_modules ]]; then
       step "type check of slidesim.d.ts" npm run typecheck --prefix wasm/js
-      step "Node and browser tests" npm test --prefix wasm/js
+      step "Node and browser tests" env HWLOC_COMPONENTS=-gl npm test --prefix wasm/js
     else
       echo "==> tests of wasm/js skipped: no wasm/js/node_modules (npm ci --prefix wasm/js)"
     fi
