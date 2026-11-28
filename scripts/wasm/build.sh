@@ -116,7 +116,8 @@ fi
 # `--import-memory`): the host creates it with the maximum it allows and gives the same memory to
 # the kernel; scripts/wasm/memory_section.mjs records its minimum in the custom section
 # `slidesim.memory`, which a JavaScript host reads from the compiled module (the link argument is
-# in crates/slidesim-wasm/build.rs).
+# in crates/slidesim-wasm/build.rs). The paths of the sources relative (in panic messages, which
+# a page shows): crates/... for the repository, cargo/... for the crates of Cargo's home.
 (
   # shellcheck source=/dev/null
   . "$ROOT/deps/install/wasi/env.sh"
@@ -125,7 +126,8 @@ fi
   export CARGO_TARGET_WASM32_WASIP1_LINKER="$WASI_SDK_PATH/bin/wasm-ld"
   export CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="-C linker-flavor=wasm-ld -C link-self-contained=no \
     -C link-arg=-L$sysroot/lib/wasm32-wasip1 -C link-arg=$sysroot/lib/wasm32-wasip1/crt1-reactor.o \
-    -C link-arg=--export=_initialize -C link-arg=-lc -C link-arg=$builtins/libclang_rt.builtins.a"
+    -C link-arg=--export=_initialize -C link-arg=-lc -C link-arg=$builtins/libclang_rt.builtins.a \
+    --remap-path-prefix=$ROOT/= --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}/=cargo/"
   # shellcheck disable=SC2031 # this subshell's own target directory
   export CARGO_TARGET_DIR="$OUT"
   cargo build --quiet --locked --release --target wasm32-wasip1 \

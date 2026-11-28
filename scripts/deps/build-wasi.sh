@@ -28,8 +28,12 @@ RANLIB="$WASI_SDK_PATH/bin/llvm-ranlib"
 SYSROOT="$WASI_SDK_PATH/share/wasi-sysroot"
 TARGET="--target=wasm32-wasip1 --sysroot=$SYSROOT"
 
-# Reproducible floating point (same as the native build) plus wasm SIMD.
+# Reproducible floating point (same as the native build) plus wasm SIMD. The paths of the build
+# relative in the libraries (`__FILE__` in PETSc's tracebacks and libCEED's errors, which a page
+# of the browser build shows): deps/build/petsc-wasi/src/... as petsc-wasi/src/..., wasi-sdk's
+# headers as wasi-sdk/...; without -g there is no other path to map.
 FLAGS="-O3 -DNDEBUG -ffp-contract=off -fno-fast-math -msimd128"
+FLAGS+=" -ffile-prefix-map=$ROOT/deps/build/= -ffile-prefix-map=$WASI_SDK_PATH/=wasi-sdk/"
 # wasi-libc emulations used instead of source patches (signal(), times()/clock(), getpid()).
 EMU_DEFS="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID"
 EMU_LIBS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid"

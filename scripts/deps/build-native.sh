@@ -17,6 +17,10 @@ case "$MODE" in
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# `__FILE__` relative (PETSc's tracebacks name deps/build/petsc-<mode>/src/... as
+# petsc-<mode>/src/...), as in the wasm build; the debug information keeps the absolute paths,
+# which a debugger needs.
+FLAGS+=" -fmacro-prefix-map=$ROOT/deps/build/="
 # shellcheck source=SCRIPTDIR/../../deps/versions.env
 . "$ROOT/deps/versions.env"
 SRC="$ROOT/deps/src"

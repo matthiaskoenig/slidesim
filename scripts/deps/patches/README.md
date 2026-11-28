@@ -30,7 +30,9 @@ options.
 
 - `$WASI_SDK_PATH/bin/clang --target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot`
 - `-O3 -DNDEBUG -ffp-contract=off -fno-fast-math -msimd128` for all C (libCEED, Mmg, PETSc,
-  f2cblaslapack).
+  f2cblaslapack), and `-ffile-prefix-map=<repository>/deps/build/=
+  -ffile-prefix-map=$WASI_SDK_PATH/=wasi-sdk/`, so that `__FILE__` (PETSc's tracebacks, which the
+  browser build shows on a page) holds no path of the machine.
 - Archiver `llvm-ar`, `llvm-ranlib` from wasi-sdk.
 
 ## wasi-libc emulation libraries (instead of patches)
@@ -63,7 +65,7 @@ The final command is in `build-wasi.sh`:
   --with-ar=$WASI_SDK_PATH/bin/llvm-ar --with-ranlib=$WASI_SDK_PATH/bin/llvm-ranlib \
   CFLAGS+="--target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot" \
   CPPFLAGS="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID" \
-  COPTFLAGS="-O3 -DNDEBUG -ffp-contract=off -fno-fast-math -msimd128" \
+  COPTFLAGS="-O3 -DNDEBUG -ffp-contract=off -fno-fast-math -msimd128 -ffile-prefix-map=..." \
   LIBS="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid" \
   --download-f2cblaslapack=deps/src/f2cblaslapack-3.8.0.q2.tar.gz \
   --with-mmg-dir=deps/install/wasi \
