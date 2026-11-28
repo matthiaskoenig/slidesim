@@ -62,7 +62,7 @@ jobs:
           echo "key=deps-${{ env.DEPS_MODE }}-$ID-$VERSION_ID-$(uname -m)-${mpi%+}-$versions-${{ hashFiles('scripts/deps/*.sh', 'scripts/deps/patches/*.patch') }}" >> "$GITHUB_OUTPUT"
       - name: Cache native dependencies
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps/install
           key: ${{ steps.deps-key.outputs.key }}
@@ -112,7 +112,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y $MPI_PACKAGES pkg-config python3 cmake m4
       - name: Install Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
       - name: Install wasi-sdk
@@ -139,14 +139,14 @@ jobs:
           echo "wasi=deps-wasi-$(uname -m)-$versions-$scripts" >> "$GITHUB_OUTPUT"
           echo "sbmlsim-js=sbmlsim-js-$(. deps/versions.env && echo "$SBMLSIM_CORE_KERNEL_REV")" >> "$GITHUB_OUTPUT"
       - name: Restore native dependencies
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: deps/install
           key: ${{ steps.deps-key.outputs.native }}
           fail-on-cache-miss: true
       - name: Cache wasi dependencies
         id: wasi-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps/install/wasi
           key: ${{ steps.deps-key.outputs.wasi }}
@@ -154,7 +154,7 @@ jobs:
         if: steps.wasi-cache.outputs.cache-hit != 'true'
         run: scripts/deps/build-wasi.sh
       - name: Cache sbmlsim-core's compiler and mathlib
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps/install/sbmlsim-js
           key: ${{ steps.deps-key.outputs.sbmlsim-js }}
