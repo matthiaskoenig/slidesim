@@ -16,7 +16,7 @@ use simulation::raster::Raster;
 use simulation::{
     Inputs, OnEveryProcess, RESULT_STORE, ResultData, ResultWriter, Simulation, read_result,
 };
-use zarrs::array::Array;
+use zarrs::array::{Array, ArrayBuilder, data_type};
 use zarrs::filesystem::FilesystemStore;
 
 /// The output times of the shortened `cells_toy/spt` study.
@@ -303,6 +303,61 @@ fn unfinished_result_is_marked() {
     assert!(row(&data.fields[0].1, 2, n).iter().all(|x| x.is_nan()));
 }
 
+/// The reader checks the shape of every array against the attributes: an area tag of two
+/// dimensions is refused, naming the array.
+#[test]
+fn reader_checks_the_shapes() {
+    c_cache();
+    let petsc = Petsc::init(&[]).unwrap();
+    let out = scratch("reader_checks_the_shapes", None);
+    run(&petsc, inputs(false), &out, 1);
+    let store = out.join(RESULT_STORE);
+    let meta = read_result(&store).unwrap().meta;
+    let tag = meta.tags.iter().find(|t| t.dim == 2).expect("an area tag");
+    let path = format!("/mesh/tags/{}", tag.name);
+    let storage = Arc::new(FilesystemStore::new(&store).unwrap());
+    ArrayBuilder::new(vec![1, 1], vec![1, 1], data_type::uint32(), 0u32)
+        .build(storage, &path)
+        .unwrap()
+        .store_metadata()
+        .unwrap();
+    let e = read_result(&store).unwrap_err();
+    assert!(
+        format!("{e:#}").contains(&format!("the array {path} has the shape [1, 1], not [_]")),
+        "{e:#}"
+    );
+}
+
+/// A failure of process 0 to write an output time is an error of every process, the same, with
+/// `OnEveryProcess`: on 2 processes (and on one).
+#[test]
+fn write_failure_of_process_0_is_on_every_process() {
+    c_cache();
+    test_support::parallel(2, &["write_failure_of_process_0_is_on_every_process"]);
+    let petsc = Petsc::init(&[]).unwrap();
+    let ranks = petsc.comm().size();
+    let out = scratch(
+        &format!("write_failure_of_process_0_is_on_every_process-{ranks}"),
+        Some(&petsc),
+    );
+    let mut simulation =
+        Simulation::new(&petsc, inputs(false), Instant::now(), &mut |_| {}).unwrap();
+    let mut writer = ResultWriter::create(&out, &simulation, &spt()).unwrap();
+    // The attributes are written to this file and renamed: a directory there fails the write.
+    if petsc.comm().rank() == 0 {
+        std::fs::create_dir(out.join(RESULT_STORE).join(".zarr.json.partial")).unwrap();
+    }
+    assert_eq!(simulation.next_output().unwrap(), Some(0));
+    let e = writer.write(&simulation, 0).unwrap_err();
+    assert!(e.downcast_ref::<OnEveryProcess>().is_some(), "{e:#}");
+    let message = format!("{e:#}");
+    assert!(
+        message.starts_with("cannot write result.zarr: cannot write ")
+            && message.contains(".zarr.json.partial"),
+        "{message}"
+    );
+}
+
 /// The writer refuses an output time the simulation is not at, and an output time out of turn.
 #[test]
 fn writer_follows_the_simulation() {
@@ -533,6 +588,50 @@ fn raster_of_a_linear_field_is_exact() {
                     "({r}, {c}): {v}"
                 );
             }
+        }
+    }
+}
+
+/// A pixel centre on the boundary of the mesh is inside (the outer edges and those of the
+/// missing square), and so is one just outside an edge as the module documents it: barycentric
+/// coordinates of at least -1e-9.
+#[test]
+fn pixel_centres_on_the_boundary_are_inside() {
+    let mesh = l_mesh();
+    // Centres at 0, 1, 2, 3 and 4 um along each axis.
+    let raster = Raster::new(&mesh, 1.0, Some([-0.5, -0.5]), 1).unwrap();
+    assert_eq!(raster.meta().shapes, [[5, 5]]);
+    let level0 = &raster.pyramid(&linear(&mesh))[0];
+    for r in 0..5 {
+        for c in 0..5 {
+            let (x, y) = (c as f64, r as f64);
+            let v = level0[r * 5 + c];
+            if x > 2.0 && y > 2.0 {
+                assert!(v.is_nan(), "({x}, {y}) is outside: {v}");
+            } else {
+                assert!(
+                    (f64::from(v) - (x + 2.0 * y)).abs() < 1e-6,
+                    "({x}, {y}): {v}"
+                );
+            }
+        }
+    }
+    // Pixels of 0.5 um, the last column's centres 1.5e-9 um right of the edge x = 4 of the
+    // triangles of side 2 (barycentric -7.5e-10): inside up to y = 2, outside above.
+    let x0 = -0.25 + 1.5e-9;
+    let raster = Raster::new(&mesh, 0.5, Some([x0, -0.25]), 1).unwrap();
+    assert_eq!(raster.meta().shapes, [[9, 9]]);
+    let level0 = &raster.pyramid(&linear(&mesh))[0];
+    for r in 0..9 {
+        let (x, y) = (x0 + 8.5 * 0.5, r as f64 * 0.5);
+        let v = level0[r * 9 + 8];
+        if y > 2.0 {
+            assert!(v.is_nan(), "({x}, {y}) is outside: {v}");
+        } else {
+            assert!(
+                (f64::from(v) - (x + 2.0 * y)).abs() < 1e-6,
+                "({x}, {y}): {v}"
+            );
         }
     }
 }

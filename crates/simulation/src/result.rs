@@ -615,22 +615,24 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
     let meta: ResultMeta =
         serde_json::from_value(Value::Object(root.attributes().clone())).with_context(context)?;
     meta.check().with_context(context)?;
-    let time: Vec<f64> = read_all(&storage, "/time", 1)?;
-    let vertices: Vec<f64> = read_all(&storage, "/mesh/vertices", 2)?;
-    let triangles: Vec<u32> = read_all(&storage, "/mesh/triangles", 3)?;
-    let element: Vec<u64> = read_all(&storage, "/mesh/element", 1)?;
-    ensure!(
-        element.len() * 3 == triangles.len(),
-        "{}: mesh/element and mesh/triangles differ in length",
-        path.display()
-    );
+    let t = Some(meta.times.len() as u64);
+    let time: Vec<f64> = read_all(&storage, "/time", &[t])?;
+    let vertices: Vec<f64> = read_all(&storage, "/mesh/vertices", &[None, Some(2)])?;
+    let triangles: Vec<u32> = read_all(&storage, "/mesh/triangles", &[None, Some(3)])?;
+    let n = Some(triangles.len() as u64 / 3);
+    let element: Vec<u64> = read_all(&storage, "/mesh/element", &[n])?;
+    let v = Some(vertices.len() as u64 / 2);
     let tags = meta
         .tags
         .iter()
         .map(|tag| {
             let path = format!("/mesh/tags/{}", tag.name);
-            let columns = if tag.dim == 2 { 1 } else { 2 };
-            let values: Vec<u32> = read_all(&storage, &path, columns)?;
+            let shape: &[Option<u64>] = if tag.dim == 2 {
+                &[None]
+            } else {
+                &[None, Some(2)]
+            };
+            let values: Vec<u32> = read_all(&storage, &path, shape)?;
             Ok(CanonicalTag {
                 name: tag.name.clone(),
                 dim: tag.dim as u8,
@@ -653,18 +655,19 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
         .map(|f| {
             Ok((
                 f.id.clone(),
-                read_all(&storage, &format!("/fields/{}", f.id), 1)?,
+                read_all(&storage, &format!("/fields/{}", f.id), &[t, v])?,
             ))
         })
         .collect::<Result<_>>()?;
-    let cell_elements: Vec<u64> = read_all(&storage, "/cells/element", 1)?;
+    let cell_elements: Vec<u64> = read_all(&storage, "/cells/element", &[None])?;
+    let c = Some(cell_elements.len() as u64);
     let cells = meta
         .cell_values
         .iter()
         .map(|name| {
             Ok((
                 name.clone(),
-                read_all(&storage, &format!("/cells/{name}"), 1)?,
+                read_all(&storage, &format!("/cells/{name}"), &[t, c])?,
             ))
         })
         .collect::<Result<_>>()?;
@@ -674,7 +677,11 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
             .iter()
             .map(|f| {
                 let levels = (0..raster.levels)
-                    .map(|k| read_all(&storage, &format!("/raster/{}/{k}", f.id), 1))
+                    .map(|k| {
+                        let [rows, cols] = raster.shapes[k as usize];
+                        let shape = [t, Some(rows), Some(cols)];
+                        read_all(&storage, &format!("/raster/{}/{k}", f.id), &shape)
+                    })
                     .collect::<Result<_>>()?;
                 Ok((f.id.clone(), levels))
             })
@@ -697,25 +704,40 @@ pub fn read_result(path: &Path) -> Result<ResultData> {
     })
 }
 
-/// The values of the whole array `path` of `storage`, row by row; its last dimension is
-/// `columns` (1 for a one dimensional array).
+/// The values of the whole array `path` of `storage`, row by row; its shape is `shape`, an extent
+/// of each dimension (`None`: any).
 #[cfg(not(target_os = "wasi"))]
 fn read_all<T: zarrs::array::ElementOwned>(
     storage: &Arc<FilesystemStore>,
     path: &str,
-    columns: u64,
+    shape: &[Option<u64>],
 ) -> Result<Vec<T>> {
     let array = Array::open(storage.clone(), path)
         .with_context(|| format!("cannot open the array {path}"))?;
-    let shape = array.shape();
+    let found = array.shape();
     ensure!(
-        columns == 1 || shape.last() == Some(&columns),
-        "the array {path} has the shape {shape:?}, not [.., {columns}]"
+        found.len() == shape.len()
+            && found
+                .iter()
+                .zip(shape)
+                .all(|(n, s)| s.is_none_or(|s| s == *n)),
+        "the array {path} has the shape {found:?}, not {}",
+        shape_text(shape)
     );
     let values: Vec<T> = array
         .retrieve_array_subset(&array.subset_all())
         .with_context(|| format!("cannot read the array {path}"))?;
     Ok(values)
+}
+
+/// `shape` as text, `_` for any extent: `[4, _]`.
+#[cfg(not(target_os = "wasi"))]
+fn shape_text(shape: &[Option<u64>]) -> String {
+    let extents: Vec<String> = shape
+        .iter()
+        .map(|s| s.map_or_else(|| "_".to_string(), |n| n.to_string()))
+        .collect();
+    format!("[{}]", extents.join(", "))
 }
 
 #[cfg(test)]

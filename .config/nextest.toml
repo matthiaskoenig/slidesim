@@ -17,6 +17,7 @@ test(=parallel_on_2_processes) | test(=parallel_on_3_processes) \
 | test(=panic_ends_every_process) | test(=balanced_cells_match_unbalanced) \
 | test(=balance_evens_the_work) | test(=result_is_partition_independent) \
 | test(=process_without_points_counts_nothing) \
+| test(=write_failure_of_process_0_is_on_every_process) \
 | binary_id(slidesim::cli)\
 """
 threads-required = "num-test-threads"

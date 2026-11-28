@@ -30,7 +30,7 @@ pub const MAX_PIXELS: u64 = 1 << 28;
 /// Marks a pixel outside the mesh in [`Raster::triangle`].
 const OUTSIDE: u32 = u32::MAX;
 
-/// Slack of the inside test, in barycentric coordinates (relative to the triangle's size).
+/// Slack of the inside test, in barycentric coordinates (so relative to the triangle's size).
 const TOLERANCE: f64 = 1e-9;
 
 /// The pixels of a raster pyramid of a mesh and the triangle at each pixel centre of level 0.
@@ -142,18 +142,25 @@ impl Raster {
         };
         for (t, tri) in self.triangles.iter().enumerate() {
             let p = tri.map(|i| self.vertices[i as usize]);
-            let slack = TOLERANCE * h.max(1e-300);
-            let bound = |d: usize, f: fn(f64, f64) -> f64, init: f64, s: f64| {
-                p.iter().fold(init, |m, q| f(m, q[d])) + s
+            let bound = |d: usize, f: fn(f64, f64) -> f64, init: f64| {
+                p.iter().fold(init, |m, q| f(m, q[d]))
             };
-            let (x_low, x_high) = (
-                bound(0, f64::min, f64::INFINITY, -slack),
-                bound(0, f64::max, f64::NEG_INFINITY, slack),
+            let (x_min, x_max) = (
+                bound(0, f64::min, f64::INFINITY),
+                bound(0, f64::max, -f64::INFINITY),
             );
-            let (y_low, y_high) = (
-                bound(1, f64::min, f64::INFINITY, -slack),
-                bound(1, f64::max, f64::NEG_INFINITY, slack),
+            let (y_min, y_max) = (
+                bound(1, f64::min, f64::INFINITY),
+                bound(1, f64::max, -f64::INFINITY),
             );
+            // A centre whose barycentric coordinates are at least -TOLERANCE (and sum to 1) is
+            // at most 2 TOLERANCE times the extent of the box beyond it along each axis.
+            let (sx, sy) = (
+                2.0 * TOLERANCE * (x_max - x_min),
+                2.0 * TOLERANCE * (y_max - y_min),
+            );
+            let (x_low, x_high) = (x_min - sx, x_max + sx);
+            let (y_low, y_high) = (y_min - sy, y_max + sy);
             let (Some((c0, c1)), Some((r0, r1))) = (
                 span(x_low, x_high, self.origin_um[0], cols),
                 span(y_low, y_high, self.origin_um[1], rows),
